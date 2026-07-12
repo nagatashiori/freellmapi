@@ -50,6 +50,15 @@ export function AnthropicSection() {
   // Dedup catalog models by id; only enabled models can be pinned.
   const modelOptions = Array.from(new Map(models.filter(m => m.enabled).map(m => [m.modelId, m])).values())
     .sort((a, b) => a.displayName.localeCompare(b.displayName))
+
+  // Profile-based routing options (auto:high, auto:mid, auto:light).
+  // These let Claude/Anthropic clients route to a named routing profile instead
+  // of the active profile or a pinned model — same 'auto:<profile>' syntax the
+  // OpenAI route accepts.
+  const profileOptions: { value: string; label: string }[] = ['high', 'mid', 'light'].map(p => ({
+    value: `auto:${p}`,
+    label: `auto:${p}`,
+  }))
   const dirty = !!(draft && mapData?.map && JSON.stringify(draft) !== JSON.stringify(mapData.map))
 
   return (
@@ -82,8 +91,11 @@ export function AnthropicSection() {
               <SelectTrigger className="w-[320px] max-w-full"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="auto">{t('keys.anthropicAuto')}</SelectItem>
+                {profileOptions.map(opt => (
+                  <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                ))}
                 {/* Keep a currently-pinned-but-now-disabled model selectable. */}
-                {draft?.[key] && draft[key] !== 'auto' && !modelOptions.some(m => m.modelId === draft[key]) && (
+                {draft?.[key] && draft[key] !== 'auto' && !modelOptions.some(m => m.modelId === draft[key]) && !draft[key].startsWith('auto:') && (
                   <SelectItem value={draft[key]}>{draft[key]}</SelectItem>
                 )}
                 {modelOptions.map(m => (
