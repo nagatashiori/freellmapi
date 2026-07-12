@@ -9,7 +9,7 @@ import type {
   ChatToolChoice,
   ChatContentBlock,
 } from '@freellmapi/shared/types.js';
-import { routeRequest, routingReserveTokens, type RouteResult } from '../services/router.js';
+import { routeRequest, resolveRoutingChain, routingReserveTokens, type RouteResult, type ChainRow } from '../services/router.js';
 import { getUnifiedApiKey } from '../db/index.js';
 import { contentToString } from '../lib/content.js';
 import { repairToolArguments, toolSchemaMap } from '../lib/tool-args.js';
@@ -413,6 +413,18 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
   let preferredModel = resolved.preferredModelDbId;
   if (preferredModel == null) preferredModel = getStickyModel(messages, sessionId);
 
+  // When the model is 'auto:<profile>' (e.g. 'auto:high'), resolve the named
+  // profile's chain so the Anthropic route uses the same profile as the OpenAI route.
+  let profileChain: ChainRow[] | undefined;
+  if (resolved.profileName) {
+    try {
+      const chainResult = resolveRoutingChain(`auto:${resolved.profileName}`);
+      profileChain = chainResult.chain;
+    } catch {
+      // Profile not found or empty — fall through to auto-routing
+    }
+  }
+
   // Thin adapter over the shared fallback loop (lib/fallback-loop.ts): the
   // cooldown/skip/penalty/exhaustion machinery is shared, only the Anthropic
   // request/stream translation lives here. This converged three drifts on this
@@ -430,7 +442,7 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
     state,
     attemptLog,
     clientGone: () => clientGone,
-    route: () => routeRequest(estimatedTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined),
+    route: () => routeRequest(estimatedTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, profileChain),
     dispatch: async (route, attempt) => {
       if (stream) {
         try {

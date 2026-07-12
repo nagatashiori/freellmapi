@@ -78,17 +78,31 @@ export interface ResolvedAnthropicModel {
   preferredModelDbId?: number;
   // True when we resolved to a specific model (for analytics/pinned labels).
   pinned: boolean;
+  // When target starts with 'auto:', carry the profile name so the caller can
+  // resolve the correct chain via resolveRoutingChain() instead of using the
+  // active profile.
+  profileName?: string;
 }
 
 // Resolve the model a `/v1/messages` request should route to, honoring the
 // operator's family map. Returns undefined preferredModelDbId to mean
 // "auto-route" (the default for every family unless the operator pinned one).
+// When target is 'auto:<profile>' the caller should resolve the chain via
+// resolveRoutingChain() and pass it as the groupChain to routeRequest().
 export function resolveAnthropicModel(model?: string): ResolvedAnthropicModel {
   const db = getDb();
   const lookupEnabled = (modelId: string): number | undefined => {
     const row = db.prepare('SELECT id FROM models WHERE model_id = ? AND enabled = 1').get(modelId) as { id: number } | undefined;
     return row?.id;
   };
+
+  // 'auto:<profile>' — let the routing system pick the named profile chain
+  // (e.g. 'auto:high' → high profile, 'auto:mid' → mid profile).
+  // Must come before classifyClaudeFamily so 'auto:' doesn't fall through to
+  // the concrete-model-ID lookup path.
+  if (model && model.toLowerCase().startsWith('auto:')) {
+    return { pinned: false, profileName: model.toLowerCase().slice('auto:'.length).trim() };
+  }
 
   const family = classifyClaudeFamily(model);
   if (family) {
