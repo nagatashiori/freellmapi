@@ -348,7 +348,7 @@ keysRouter.get('/export', (req: Request, res: Response) => {
 });
 
 // Add a key
-keysRouter.post('/', (req: Request, res: Response) => {
+keysRouter.post('/', async (req: Request, res: Response) => {
   const parsed = addKeySchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
@@ -438,13 +438,25 @@ keysRouter.post('/', (req: Request, res: Response) => {
     VALUES (?, ?, ?, ?, ?, 'unknown', 1, ?)
   `).run(platform, label ?? '', encrypted, iv, authTag, baseUrl);
 
+  const newId = Number(result.lastInsertRowid);
+
+  // Immediately probe the key so the UI doesn't show a stale/optimistic
+  // "healthy" from a later vague check. Import lazily to avoid circular deps.
+  let status: string = 'unknown';
+  try {
+    const { checkKeyHealth } = await import('../services/health.js');
+    status = await checkKeyHealth(newId);
+  } catch {
+    /* leave unknown — scheduled health will retry */
+  }
+
   res.status(201).json({
-    id: result.lastInsertRowid,
+    id: newId,
     platform,
     label: label ?? '',
     baseUrl,
     maskedKey: maskKey(keyToStore),
-    status: 'unknown',
+    status,
     enabled: true,
     modelsAvailable: enabledModelCount(platform),
     notice: noModelsNotice(platform),

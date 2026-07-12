@@ -262,13 +262,16 @@ export class OpenAICompatProvider extends BaseProvider {
   async validateKey(apiKey: string, quotaContext?: QuotaObservationContext): Promise<boolean> {
     // Note: transport errors (DNS / timeout / TLS) propagate to the caller.
     // health.ts catches them and marks status='error' WITHOUT incrementing
-    // the consecutive-failure counter — only confirmed 401/403 disables a key.
+    // the consecutive-failure counter — only confirmed invalid auth disables a key.
+    //
+    // STRICT: only 2xx / 429 count as success on the probe endpoint.
+    // Old logic `status !== 401 && !== 403` treated 404/400 as "healthy".
+    //
+    // Additionally, some providers (ModelScope api-inference) return 200 on
+    // GET /v1/models for ANY bearer (including garbage). For keyed platforms we
+    // detect a public /models list and fall through to a 1-token chat probe.
     const url = this.validateUrl ?? `${this.baseUrl}/models`;
-    // 30s (not 10s): some upstreams return a large /v1/models catalog that
-    // takes >10s from high-latency regions (e.g. NVIDIA NIM measured ~11.2s
-    // from India). A 10s cap aborted those calls and health.ts marked a
-    // perfectly good key status='error'. 30s aligns with chatCompletion's
-    // own slow-upstream allowance and costs nothing for fast providers.
+    // 30s (not 10s): large /v1/models catalogs on high-latency links.
     const res = await this.fetchWithTimeout(url, {
       method: 'GET',
       headers: {
@@ -283,7 +286,131 @@ export class OpenAICompatProvider extends BaseProvider {
       quotaPoolKey: quotaContext?.quotaPoolKey,
       endpoint: 'models',
     });
-    return res.status !== 401 && res.status !== 403;
+
+    if (res.status === 429) return true;
+    if (res.status === 401 || res.status === 403) return false;
+    if (res.status >= 500) {
+      throw new Error(`${this.name} validateKey HTTP ${res.status}`);
+    }
+    if (res.status < 200 || res.status >= 300) {
+      // Other 4xx: treat as invalid (bad key / wrong endpoint)
+      return false;
+    }
+
+    // 2xx on /models
+    if (this.keyless) return true;
+    // Empty / sentinel is not a real credential for keyed platforms
+    if (!apiKey || apiKey === 'no-key') return false;
+
+    const ct = res.headers.get('content-type') ?? '';
+    if (ct.includes('text/html')) return false;
+
+    let firstModelId: string | null = null;
+    try {
+      const body = await res.json() as {
+        data?: Array<{ id?: string } | string>;
+        error?: unknown;
+        success?: boolean;
+      };
+      if (body && typeof body === 'object') {
+        if (body.error) return false;
+        if (body.success === false) return false;
+        const data = Array.isArray(body.data) ? body.data : [];
+        const first = data[0];
+        firstModelId = typeof first === 'string' ? first : (first?.id ?? null);
+      }
+    } catch {
+      /* non-JSON 200 */
+    }
+
+    // If /models is public (no auth required), the list cannot prove the key.
+    // ModelScope returns identical 200 + full catalog for fake bearers.
+    const publicList = await this.isModelsEndpointPublic();
+    if (publicList) {
+      return this.validateKeyViaChat(apiKey, firstModelId, quotaContext);
+    }
+    return true;
+  }
+
+  /** True when GET /models succeeds without any Authorization header. */
+  private async isModelsEndpointPublic(): Promise<boolean> {
+    const url = this.validateUrl ?? `${this.baseUrl}/models`;
+    try {
+      const res = await this.fetchWithTimeout(url, {
+        method: 'GET',
+        headers: { Accept: 'application/json', ...this.extraHeaders },
+      }, 15000);
+      return res.status >= 200 && res.status < 300;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Real credential probe: 1-token chat/completions.
+   * Used when /models is public and cannot distinguish good vs bad keys.
+   */
+  private async validateKeyViaChat(
+    apiKey: string,
+    preferredModelId: string | null,
+    quotaContext?: QuotaObservationContext,
+  ): Promise<boolean> {
+    let modelId = preferredModelId;
+    if (!modelId) {
+      try {
+        const { getDb } = await import('../db/index.js');
+        const row = getDb().prepare(
+          `SELECT model_id FROM models WHERE platform = ? AND enabled = 1 ORDER BY id LIMIT 1`,
+        ).get(this.platform) as { model_id: string } | undefined;
+        modelId = row?.model_id ?? null;
+      } catch {
+        modelId = null;
+      }
+    }
+    if (!modelId) {
+      // No model to probe — cannot confirm key; fail closed for keyed platforms
+      return false;
+    }
+
+    const res = await this.fetchWithTimeout(`${this.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        ...this.authHeader(apiKey),
+        ...this.extraHeaders,
+      },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 1,
+        stream: false,
+      }),
+    }, 30000);
+
+    recordQuotaObservationsFromResponse(res, {
+      platform: this.platform,
+      keyId: quotaContext?.keyId,
+      providerAccountId: quotaContext?.providerAccountId,
+      quotaPoolKey: quotaContext?.quotaPoolKey,
+      endpoint: 'chat',
+    });
+
+    if (res.status === 401 || res.status === 403) return false;
+    if (res.status === 429) return true;
+    if (res.status >= 200 && res.status < 300) return true;
+    if (res.status === 400) {
+      // Auth often surfaces as 400 with a message; model-not-found still means key OK
+      const text = await res.text().catch(() => '');
+      if (/unauthor|invalid.*(key|token|api)|api.?key|access.?denied|not.?authenticated/i.test(text)) {
+        return false;
+      }
+      return true;
+    }
+    if (res.status >= 500) {
+      throw new Error(`${this.name} validateKey chat probe HTTP ${res.status}`);
+    }
+    return false;
   }
 }
 
