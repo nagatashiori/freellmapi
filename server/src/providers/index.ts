@@ -70,10 +70,12 @@ register(new OpenAICompatProvider({
 // GitHub Models — OpenAI-compatible. Catalog uses `<publisher>/<model>` ids
 // (e.g. `openai/gpt-4.1`); the old Azure endpoint rejects that prefix with
 // "Unknown model", so route to the current models.github.ai endpoint.
+// validateUrl: inference base has NO /models (404); catalog is separate.
 register(new OpenAICompatProvider({
   platform: 'github',
   name: 'GitHub Models',
   baseUrl: 'https://models.github.ai/inference',
+  validateUrl: 'https://models.github.ai/catalog/models',
 }));
 
 // Cohere - OpenAI-compatible via Cohere compatibility endpoint
