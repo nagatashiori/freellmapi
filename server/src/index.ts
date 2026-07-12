@@ -1,6 +1,7 @@
 import './env.js';
 import { createApp } from './app.js';
 import { initDb, getDb, getSetting } from './db/index.js';
+import { hydrateUserPlatformsFromDb } from './providers/index.js';
 import { startHealthChecker, checkAllKeys } from './services/health.js';
 import { applyProxyUrl, applyProxyEnabled, applyProxyBypass, flushProxyCache } from './lib/proxy.js';
 import { startWakeDetect } from './lib/wake-detect.js';
@@ -31,6 +32,9 @@ async function main() {
     await restoreDbBackupIfNeeded();
   }
   initDb(config.dbPath ?? undefined);
+  // User-defined OpenAI platforms (platform=locedge etc.) live in api_keys with
+  // base_url; remember them so hasProvider/resolveProvider work after restart.
+  hydrateUserPlatformsFromDb(getDb());
   applyDeclarativeConfigFromEnv();
 
   // First-run hardening: when the dashboard is still unclaimed, mint a one-time

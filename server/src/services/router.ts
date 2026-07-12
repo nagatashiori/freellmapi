@@ -713,9 +713,10 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
       continue;
     }
 
-    const resolvedProvider = entry.platform === 'custom'
-      ? resolveProvider('custom', key.base_url)
-      : provider;
+    // custom + user-defined platforms (platformId) bind base_url per key;
+    // built-ins ignore base_url and use the registered singleton.
+    const resolvedProvider = resolveProvider(entry.platform as Platform, key.base_url)
+      ?? provider;
     if (!resolvedProvider) { note('no-resolved-provider'); continue; }
 
     roundRobinIndex.set(rrKey, idx);

@@ -333,38 +333,112 @@ register(new OpenAICompatProvider({
   baseUrl: '',
 }));
 
+// AiHub (local modification) — third-party OpenAI-compatible free relay.
+// Models/keys in DB use platform='aihub'. Extended timeout: relay models can
+// be slow (similar to custom / local inference).
+register(new OpenAICompatProvider({
+  platform: 'aihub',
+  name: 'AiHub',
+  baseUrl: 'https://aihub.071129.xyz/v1',
+  timeoutMs: 120_000,
+}));
+
 // Locally-hosted inference (llama.cpp / vLLM / Ollama on CPU) can be slow, so
 // custom providers get the same extended timeout as Ollama Cloud.
 const CUSTOM_PROVIDER_TIMEOUT_MS = 120000;
 
-export function getProvider(platform: Platform): BaseProvider | undefined {
-  return providers.get(platform);
+// User-defined OpenAI-compatible platforms (e.g. platform=locedge). Same wire
+// format as `custom`, but each slug is its own platform so multiple API keys
+// can rotate like nvidia/openrouter. Populated at boot from api_keys.base_url
+// rows and when POST /api/keys/custom supplies platformId.
+const userPlatforms = new Set<string>();
+
+const RESERVED_PLATFORM_SLUGS = new Set<string>([
+  ...providers.keys(),
+  'custom',
+  'sambanova', // dropped but still reserved
+]);
+
+/** Valid user platform slug: starts with letter, 1–32 chars [a-z0-9_-]. */
+export function isValidUserPlatformSlug(slug: string): boolean {
+  return /^[a-z][a-z0-9_-]{0,31}$/.test(slug);
+}
+
+export function isReservedPlatformSlug(slug: string): boolean {
+  return RESERVED_PLATFORM_SLUGS.has(slug) || providers.has(slug as Platform);
+}
+
+export function rememberUserPlatform(slug: string): void {
+  const s = slug.trim().toLowerCase();
+  if (!isValidUserPlatformSlug(s) || isReservedPlatformSlug(s)) return;
+  userPlatforms.add(s);
+}
+
+export function isUserPlatform(platform: string): boolean {
+  return userPlatforms.has(platform);
+}
+
+/** After initDb: treat any api_keys.platform with a base_url as a user platform
+ *  if it is not a built-in registration (aihub is built-in with fixed URL). */
+export function hydrateUserPlatformsFromDb(db: { prepare: (sql: string) => { all: (...a: unknown[]) => unknown[] } }): void {
+  try {
+    const rows = db.prepare(
+      `SELECT DISTINCT platform FROM api_keys
+        WHERE base_url IS NOT NULL AND TRIM(base_url) != ''`,
+    ).all() as { platform: string }[];
+    for (const r of rows) {
+      const p = String(r.platform || '').toLowerCase();
+      if (!p || providers.has(p as Platform)) continue;
+      if (p === 'custom') continue;
+      if (isValidUserPlatformSlug(p)) userPlatforms.add(p);
+    }
+  } catch {
+    /* DB not ready / tests without api_keys */
+  }
+}
+
+export function getProvider(platform: Platform | string): BaseProvider | undefined {
+  return providers.get(platform as Platform);
 }
 
 /**
  * Resolve the provider for a route. Built-in platforms return their registered
- * singleton; the 'custom' platform builds a fresh OpenAICompatProvider bound to
- * the caller-supplied base URL (stored per api_keys row). Returns undefined for
- * a custom provider with no base URL configured.
+ * singleton; `custom` and user-defined platforms (platformId) build a fresh
+ * OpenAICompatProvider bound to the key's base_url. Returns undefined when a
+ * base_url-backed platform has no URL configured on the key.
  */
-export function resolveProvider(platform: Platform, baseUrl?: string | null): BaseProvider | undefined {
-  if (platform === 'custom') {
+export function resolveProvider(platform: Platform | string, baseUrl?: string | null): BaseProvider | undefined {
+  const p = String(platform);
+  const dynamic = p === 'custom' || userPlatforms.has(p);
+  if (dynamic) {
     const trimmed = baseUrl?.trim();
     if (!trimmed) return undefined;
     return new OpenAICompatProvider({
-      platform: 'custom',
-      name: 'Custom (OpenAI-compatible)',
+      platform: p as Platform,
+      name: p === 'custom' ? 'Custom (OpenAI-compatible)' : `User:${p}`,
       baseUrl: trimmed,
       timeoutMs: CUSTOM_PROVIDER_TIMEOUT_MS,
     });
   }
-  return providers.get(platform);
+  // Unregistered slug that somehow has a base_url (e.g. after restart before
+  // hydrate) — still serve it as OpenAI-compatible.
+  if (!providers.has(p as Platform) && baseUrl?.trim()) {
+    rememberUserPlatform(p);
+    return new OpenAICompatProvider({
+      platform: p as Platform,
+      name: `User:${p}`,
+      baseUrl: baseUrl.trim(),
+      timeoutMs: CUSTOM_PROVIDER_TIMEOUT_MS,
+    });
+  }
+  return providers.get(p as Platform);
 }
 
 export function getAllProviders(): BaseProvider[] {
   return Array.from(providers.values());
 }
 
-export function hasProvider(platform: Platform): boolean {
-  return providers.has(platform);
+export function hasProvider(platform: Platform | string): boolean {
+  const p = String(platform);
+  return providers.has(p as Platform) || p === 'custom' || userPlatforms.has(p);
 }

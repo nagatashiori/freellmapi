@@ -167,7 +167,25 @@ export function ProviderList({ onAddKey }: { onAddKey: () => void }) {
   for (const k of healthData?.keys ?? []) healthKeyMap.set(k.id, k)
   const statusOf = (k: ApiKey) => healthKeyMap.get(k.id)?.status ?? k.status
 
-  const grouped = [...PLATFORMS, CUSTOM_GROUP].map(p => ({
+  // Built-in + classic custom + any named user platforms (modelscope, aihub, locedge…)
+  // that only exist as api_keys.platform / platformId — otherwise Keys page hides them.
+  const knownPlatforms = new Set<string>([...PLATFORMS.map(p => p.value), CUSTOM_GROUP.value])
+  const extraPlatforms: { value: string; label: string; url: string }[] = [
+    ...new Set(keys.map(k => String(k.platform)).filter(p => p && !knownPlatforms.has(p))),
+  ]
+    .sort((a, b) => a.localeCompare(b))
+    .map(p => ({
+      value: p,
+      label: p === 'aihub' ? 'AiHub' : p === 'modelscope' ? 'ModelScope' : `Custom: ${p}`,
+      url: '',
+    }))
+
+  const platformGroups: { value: string; label: string; url: string }[] = [
+    ...PLATFORMS,
+    CUSTOM_GROUP,
+    ...extraPlatforms,
+  ]
+  const grouped = platformGroups.map(p => ({
     ...p,
     keys: keys.filter(k => k.platform === p.value),
   })).filter(p => p.keys.length > 0)

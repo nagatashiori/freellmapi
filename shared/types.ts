@@ -104,7 +104,11 @@ export type Platform =
   | 'aihorde'
   // User-configured OpenAI-compatible endpoint (llama.cpp, LM Studio, vLLM,
   // Ollama, any base_url). The endpoint URL lives on the api_keys row; see #117.
-  | 'custom';
+  | 'custom'
+  // AiHub relay (local modification) — OpenAI-compatible third-party free
+  // gateway at aihub.071129.xyz. Registered as a first-class platform so DB
+  // rows use platform='aihub' (not 'custom') and hasProvider('aihub') works.
+  | 'aihub';
 
 export interface Model {
   id: number;

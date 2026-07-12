@@ -64,6 +64,8 @@ function fetchModelRow(id: number): ModelRow | undefined {
     .get(id) as ModelRow | undefined;
 }
 
+// Delete a user-added chat model (classic custom OR named platformId e.g. modelscope).
+// Path kept as /custom/:id for API compatibility with the Keys UI.
 modelsRouter.delete('/custom/:id', (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) {
@@ -72,16 +74,33 @@ modelsRouter.delete('/custom/:id', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const row = db.prepare("SELECT id, key_id FROM models WHERE id = ? AND platform = 'custom'").get(id) as { id: number; key_id: number | null } | undefined;
+  // Allow delete for classic custom and any operator platform that has a base_url key
+  // (named platformId). Catalog-only platforms cannot be removed this way.
+  const row = db.prepare(`
+    SELECT m.id, m.key_id, m.platform
+      FROM models m
+     WHERE m.id = ?
+       AND (
+         m.platform = 'custom'
+         OR EXISTS (
+           SELECT 1 FROM api_keys k
+            WHERE k.platform = m.platform
+              AND k.base_url IS NOT NULL AND TRIM(k.base_url) != ''
+         )
+       )
+  `).get(id) as { id: number; key_id: number | null; platform: string } | undefined;
   if (!row) {
-    res.status(404).json({ error: { message: `Unknown custom model ${id}` } });
+    res.status(404).json({ error: { message: `Unknown custom/user model ${id}` } });
     return;
   }
 
   const remove = db.transaction(() => {
     db.prepare('DELETE FROM fallback_config WHERE model_db_id = ?').run(id);
-    db.prepare("DELETE FROM models WHERE id = ? AND platform = 'custom'").run(id);
-    deleteUnusedCustomEndpointKey(db, row.key_id);
+    db.prepare('DELETE FROM profile_models WHERE model_db_id = ?').run(id);
+    db.prepare('DELETE FROM models WHERE id = ?').run(id);
+    if (row.platform === 'custom') {
+      deleteUnusedCustomEndpointKey(db, row.key_id);
+    }
   });
   remove();
   res.json({ success: true });

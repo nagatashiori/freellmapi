@@ -4,10 +4,17 @@ import { z } from 'zod';
 import multer from 'multer';
 import path from 'path';
 import { getDb } from '../db/index.js';
-import { resolveProvider } from '../providers/index.js';
+import {
+  resolveProvider,
+  rememberUserPlatform,
+  isValidUserPlatformSlug,
+  isReservedPlatformSlug,
+  isUserPlatform,
+} from '../providers/index.js';
 import { encrypt, decrypt, maskKey } from '../lib/crypto.js';
 import { parseKeysFromFile, stripJsoncComments, stripTrailingCommas } from '../lib/key-parser.js';
 import { assessProviderUrl } from '../lib/url-guard.js';
+import { calibrateModelMeta, niceDisplayName } from '../lib/model-intel.js';
 
 export const keysRouter = Router();
 
@@ -20,6 +27,8 @@ const PLATFORMS = [
   'openrouter', 'github', 'cohere', 'cloudflare', 'zhipu', 'ollama',
   'kilo', 'pollinations', 'llm7', 'huggingface', 'opencode', 'ovh', 'agnes', 'reka', 'siliconflow',
   'routeway', 'bazaarlink', 'ainative', 'aion', 'requesty', 'nara', 'aihorde', 'custom',
+  // Local modification: AiHub third-party relay (see providers/index.ts).
+  'aihub',
 ] as const;
 
 const ALLOWED_IMPORT_EXTENSIONS = new Set(['.env', '.json', '.jsonc', '.md', '.txt', '.csv']);
@@ -39,8 +48,10 @@ const upload = multer({
 
 // `key` is optional so keyless providers (Kilo's anonymous gateway) can be added
 // without one; the handler enforces a non-empty key for everyone else.
+// Built-in platforms OR user-defined OpenAI slugs (locedge, etc.) already
+// registered via POST /custom with platformId.
 const addKeySchema = z.object({
-  platform: z.enum(PLATFORMS),
+  platform: z.string().min(1),
   key: z.string().optional(),
   label: z.string().optional(),
 });
@@ -149,6 +160,8 @@ keysRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
   const rows = db.prepare('SELECT * FROM api_keys ORDER BY created_at DESC').all() as any[];
 
+  // Classic custom: models bound to key_id. Named user platforms (modelscope,
+  // locedge…): models have platform=<slug> and key_id NULL — attach by platform.
   const customModels = [
     ...db.prepare(`
       SELECT key_id, id, 'chat' AS kind, model_id, display_name, NULL AS family
@@ -180,6 +193,32 @@ keysRouter.get('/', (_req: Request, res: Response) => {
     });
     modelsByKeyId.set(keyId, list);
   }
+
+  // Named OpenAI platforms (modelscope, locedge…): models share platform slug, key_id NULL
+  const modelsByPlatform = new Map<string, any[]>();
+  const platformModelRows = db.prepare(`
+    SELECT m.platform, m.id, 'chat' AS kind, m.model_id, m.display_name
+      FROM models m
+     WHERE m.platform != 'custom'
+       AND EXISTS (
+         SELECT 1 FROM api_keys k
+          WHERE k.platform = m.platform
+            AND k.base_url IS NOT NULL AND TRIM(k.base_url) != ''
+       )
+     ORDER BY m.display_name
+  `).all() as any[];
+  for (const m of platformModelRows) {
+    const list = modelsByPlatform.get(m.platform) ?? [];
+    list.push({
+      id: m.id,
+      kind: m.kind,
+      modelId: m.model_id,
+      displayName: m.display_name,
+      family: null,
+    });
+    modelsByPlatform.set(m.platform, list);
+  }
+
   for (const list of modelsByKeyId.values()) {
     list.sort((a, b) => {
       const ka = ['chat', 'embedding', 'image', 'audio'].indexOf(a.kind);
@@ -196,6 +235,13 @@ keysRouter.get('/', (_req: Request, res: Response) => {
     } catch {
       maskedKey = '[decrypt failed]';
     }
+    let models: any[] | undefined;
+    if (row.platform === 'custom') {
+      models = modelsByKeyId.get(row.id) ?? [];
+    } else if (modelsByPlatform.has(row.platform)) {
+      // Named OpenAI platforms (modelscope, aihub-as-user, locedge…)
+      models = modelsByPlatform.get(row.platform);
+    }
     return {
       id: row.id,
       platform: row.platform,
@@ -207,7 +253,7 @@ keysRouter.get('/', (_req: Request, res: Response) => {
       keyless: resolveProvider(row.platform)?.keyless === true,
       createdAt: row.created_at,
       lastCheckedAt: row.last_checked_at,
-      models: row.platform === 'custom' ? (modelsByKeyId.get(row.id) ?? []) : undefined,
+      models,
     };
   });
 
@@ -309,7 +355,38 @@ keysRouter.post('/', (req: Request, res: Response) => {
     return;
   }
 
-  const { platform, label } = parsed.data;
+  const platform = parsed.data.platform.trim().toLowerCase();
+  const { label } = parsed.data;
+  const isBuiltin = (PLATFORMS as readonly string[]).includes(platform);
+  const db = getDb();
+
+  // Named platforms may exist only in DB (base_url keys) even if the in-memory
+  // userPlatforms set was not hydrated yet — treat that as a user platform too.
+  const existingUserUrl = db.prepare(
+    `SELECT base_url FROM api_keys
+      WHERE platform = ? AND base_url IS NOT NULL AND TRIM(base_url) != ''
+      LIMIT 1`,
+  ).get(platform) as { base_url: string } | undefined;
+  const isUser = isUserPlatform(platform) || !!existingUserUrl?.base_url;
+  if (isUser && existingUserUrl?.base_url) {
+    rememberUserPlatform(platform);
+  }
+
+  if (!isBuiltin && !isUser) {
+    res.status(400).json({
+      error: {
+        message: isValidUserPlatformSlug(platform)
+          ? `Unknown platform "${platform}". Create it first via Custom provider with platformId=${platform}, then add more keys here.`
+          : `Invalid platform "${platform}"`,
+      },
+    });
+    return;
+  }
+  if (platform === 'custom') {
+    res.status(400).json({ error: { message: 'Custom providers must be added with a base URL (Custom section)' } });
+    return;
+  }
+
   const isKeyless = resolveProvider(platform)?.keyless === true;
   const rawKey = parsed.data.key?.trim() ?? '';
 
@@ -321,8 +398,6 @@ keysRouter.post('/', (req: Request, res: Response) => {
   // Keyless providers (Kilo anon) store a sentinel so routing sees the platform
   // as configured; the provider omits the auth header on outgoing calls.
   const keyToStore = isKeyless ? (rawKey || 'no-key') : rawKey;
-
-  const db = getDb();
 
   // A keyless provider needs only one sentinel row — re-enable an existing one
   // instead of piling up duplicates each time the user clicks "Add".
@@ -344,16 +419,30 @@ keysRouter.post('/', (req: Request, res: Response) => {
     }
   }
 
+  // User platforms: inherit base_url from existing keys so the new key hits
+  // the same OpenAI-compatible endpoint (multi-account rotation).
+  let baseUrl: string | null = null;
+  if (isUser) {
+    if (!existingUserUrl?.base_url) {
+      res.status(400).json({
+        error: { message: `User platform "${platform}" has no base_url yet. Re-add via Custom provider with platformId.` },
+      });
+      return;
+    }
+    baseUrl = existingUserUrl.base_url;
+  }
+
   const { encrypted, iv, authTag } = encrypt(keyToStore);
   const result = db.prepare(`
-    INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-    VALUES (?, ?, ?, ?, ?, 'unknown', 1)
-  `).run(platform, label ?? '', encrypted, iv, authTag);
+    INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
+    VALUES (?, ?, ?, ?, ?, 'unknown', 1, ?)
+  `).run(platform, label ?? '', encrypted, iv, authTag, baseUrl);
 
   res.status(201).json({
     id: result.lastInsertRowid,
     platform,
     label: label ?? '',
+    baseUrl,
     maskedKey: maskKey(keyToStore),
     status: 'unknown',
     enabled: true,
@@ -393,6 +482,11 @@ const customProviderSchema = z.object({
   displayName: z.string().optional(),
   apiKey: z.string().optional(),
   label: z.string().optional(),
+  // Optional user platform slug (e.g. "locedge"). When set, keys/models use
+  // platform=<slug> instead of "custom", so you can add MULTIPLE API keys for
+  // the same OpenAI-compatible endpoint (account rotation) like nvidia/groq.
+  // Omit to keep classic one-key-per-baseUrl `custom` behaviour.
+  platformId: z.string().optional(),
   // Top-level defaults applied to every model in this submit; a per-entry flag
   // (object form) overrides them for that one model.
   supportsTools: z.boolean().optional(),
@@ -401,6 +495,207 @@ const customProviderSchema = z.object({
   d => (d.model && d.model.trim().length > 0) || (d.models && d.models.length > 0),
   { message: 'model or models is required' },
 );
+
+/**
+ * Classify custom models into auto:high / mid / light by **name keywords**.
+ * Tuned from FreeLLMAPI live ranking (stability/speed/intelligence score) +
+ * known agent flagships (Kimi K2.6, DeepSeek-V4, MiniMax, Hermes, …).
+ *
+ * high  ≈ score ≥ ~0.72 / 智能档 75–100 / coding·agent 旗舰
+ * mid   ≈ score ~0.50–0.72 / 中等通用
+ * light ≈ 小模型、lite、8B 级、快翻快摘要
+ *
+ * A model may land in more than one pool (e.g. flash flagships → high+mid).
+ */
+function classifyAutoPools(modelId: string): Array<'high' | 'mid' | 'light'> {
+  const s = modelId.toLowerCase().replace(/[[\]]/g, '');
+
+  // Non-chat / media / safety — skip profile pools
+  if (
+    /embed|embedding|rerank|bge-|tts|whisper|sensevoice|voxtral|orpheus|audio|speech|image|video|vision-only|safety|safeguard|guard|moderat/i.test(
+      s,
+    )
+  ) {
+    return [];
+  }
+
+  const pools: Array<'high' | 'mid' | 'light'> = [];
+
+  // ── HIGH: flagship / agent / top of your leaderboard (#1–~32, score≳0.71)
+  // Families: Kimi/Moonshot, DeepSeek-V4, MiniMax, Hermes, Mistral Large,
+  // Gemini 3.x, Nemotron Ultra/Super, Qwen3.5-397B / Coder, GPT-OSS-120B,
+  // Codestral/Devstral, Gemma-4-31B, GPT-4.1, Command-A, GLM-5, Kat-Coder…
+  const high =
+    /kimi|moonshot|k2\.6|k2\.7|k2-6|k2-7/i.test(s) ||
+    /deepseek-v4|deepseek\/deepseek-v4|deepseek-ai\/deepseek-v4/i.test(s) ||
+    /minimax|m2\.7|m2-7/i.test(s) ||
+    /hermes|405b/i.test(s) ||
+    /mistral-large|mistralai\/mistral-large|675b/i.test(s) ||
+    /gemini-3|gemini\/gemini-3/i.test(s) ||
+    /nemotron-3-ultra|ultra-550|nemotron-3-super|super-120|nemotron-3-120/i.test(s) ||
+    /qwen3\.5-397|qwen3\.5-122|397b|122b-a10b/i.test(s) ||
+    /qwen3-coder|qwen3\.coder|coder-next|coder:480|coder-480/i.test(s) ||
+    /gpt-oss-120|gpt-oss\/120/i.test(s) ||
+    /codestral|devstral|kat-coder|mistral-code/i.test(s) ||
+    /gemma-4-31|gemma4:31/i.test(s) ||
+    /gpt-4\.1|gpt-4o(?!.*mini)/i.test(s) ||
+    /command-a|command_a|command\.a/i.test(s) ||
+    /glm-5|glm\/5|z-ai\/glm-5/i.test(s) ||
+    /magistral-medium/i.test(s) ||
+    /big-pickle|llama-4-maverick/i.test(s);
+
+  // ── LIGHT: small / cheap / translate-ish (your score ~0.29 band + micros)
+  // Prefer exact small markers; do NOT put flagship *-flash here alone.
+  const light =
+    /flash-lite|lite$|-lite|instant/i.test(s) ||
+    /(?:^|[^0-9])([1-9]|1[0-4])b(?:[^0-9]|$)/i.test(s) || // 1b–14b only
+    /nano-9|nano-12|ministral-3|ministral-8|laguna-xs|lfm|liquid|granite.*micro|1\.2b|3b-instruct|tiny/i.test(
+      s,
+    ) ||
+    /mercury|step-3\.[57]-flash|stepfun\/step-3/i.test(s);
+
+  // ── MID: solid general (your ~0.50–0.72) — medium, 20–70B, mid flash, etc.
+  const mid =
+    /mistral-medium|mistral-small|ministral-14|medium|gpt-oss-20|oss-20b/i.test(s) ||
+    /glm-4\.7|glm-4\.6|glm-4-7|zai-glm/i.test(s) ||
+    /(?:^|[^0-9])(20|24|26|27|30|32|35|36|49|70|80)b(?:[^0-9]|$)/i.test(s) ||
+    /llama-3|llama3|llama-4-scout|scout/i.test(s) ||
+    /gemma-4-26|gemma4:26|nano-30|nemotron-3-nano|nemotron-nano/i.test(s) ||
+    /compound|command-r|command_r|seed-oss|hy3|mimo|laguna-m|north-mini|dracarys/i.test(
+      s,
+    ) ||
+    /qwen3\.5-35|qwen3\.6|qwen3-next|qwen3\.5-?27|deepseek-r1|distill/i.test(s) ||
+    /gemini-2\.5-flash(?!-lite)|magistral-small|mistral-code-agent/i.test(s) ||
+    /poolside\/laguna-m|cohere\/north/i.test(s);
+
+  if (high) pools.push('high');
+  if (mid) pools.push('mid');
+  // light only if not already a clear high flagship (avoid kimi-lite false positive)
+  if (light && !high) pools.push('light');
+  // flash alone (not lite): mid, unless already high (deepseek-v4-flash is high)
+  if (!high && !mid && !light && /flash/i.test(s)) pools.push('mid');
+  if (pools.length === 0) pools.push('mid');
+  return pools;
+}
+
+function ensureModelInProfile(db: ReturnType<typeof getDb>, modelDbId: number, profileId: number): void {
+  const exists = db.prepare(
+    'SELECT 1 FROM profile_models WHERE profile_id = ? AND model_db_id = ?',
+  ).get(profileId, modelDbId);
+  if (exists) return;
+  const max = db.prepare(
+    'SELECT COALESCE(MAX(priority), 0) AS m FROM profile_models WHERE profile_id = ?',
+  ).get(profileId) as { m: number };
+  db.prepare(
+    'INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, 1)',
+  ).run(profileId, modelDbId, max.m + 1);
+}
+
+// Discover models from a third-party OpenAI-compatible /v1/models so the user
+// can pick which ids to register as custom (instead of typing them by hand).
+const discoverSchema = z.object({
+  baseUrl: z.string().url('baseUrl must be a valid URL'),
+  apiKey: z.string().optional(),
+});
+
+keysRouter.post('/custom/discover', async (req: Request, res: Response) => {
+  const parsed = discoverSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
+    return;
+  }
+
+  const baseUrl = parsed.data.baseUrl.trim().replace(/\/+$/, '');
+  const verdict = await assessProviderUrl(baseUrl);
+  if (!verdict.allowed) {
+    res.status(400).json({ error: { message: `baseUrl rejected: ${verdict.reason}` } });
+    return;
+  }
+
+  const apiKey = parsed.data.apiKey?.trim();
+  const modelsUrl = `${baseUrl}/models`;
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'User-Agent': 'FreeLLMAPI-custom-discover/1.0',
+  };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+
+  let upstream: globalThis.Response;
+  try {
+    upstream = await fetch(modelsUrl, {
+      method: 'GET',
+      headers,
+      signal: AbortSignal.timeout(30_000),
+      redirect: 'manual',
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(502).json({ error: { message: `Failed to reach ${modelsUrl}: ${msg}` } });
+    return;
+  }
+
+  if (upstream.status >= 300 && upstream.status < 400) {
+    res.status(400).json({
+      error: { message: 'Redirects are not followed for custom providers; point baseUrl directly at the API root (…/v1)' },
+    });
+    return;
+  }
+
+  const text = await upstream.text();
+  if (!upstream.ok) {
+    res.status(502).json({
+      error: {
+        message: `Upstream /models returned ${upstream.status}: ${text.slice(0, 300)}`,
+      },
+    });
+    return;
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    res.status(502).json({ error: { message: 'Upstream /models did not return JSON' } });
+    return;
+  }
+
+  // OpenAI shape: { data: [{ id, … }] }; some gateways return a bare array.
+  const rawList: unknown[] = Array.isArray(body)
+    ? body
+    : Array.isArray((body as { data?: unknown }).data)
+      ? ((body as { data: unknown[] }).data)
+      : Array.isArray((body as { models?: unknown }).models)
+        ? ((body as { models: unknown[] }).models)
+        : [];
+
+  const models: { id: string; ownedBy?: string; alreadyRegistered: boolean }[] = [];
+  const seen = new Set<string>();
+  const db = getDb();
+  for (const item of rawList) {
+    if (!item || typeof item !== 'object') continue;
+    const id = String((item as { id?: unknown; model?: unknown }).id
+      ?? (item as { model?: unknown }).model
+      ?? '').trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const ownedBy = (item as { owned_by?: unknown }).owned_by;
+    const already = db.prepare(
+      'SELECT 1 FROM models WHERE model_id = ? LIMIT 1',
+    ).get(id);
+    models.push({
+      id,
+      ownedBy: typeof ownedBy === 'string' ? ownedBy : undefined,
+      alreadyRegistered: !!already,
+    });
+  }
+
+  models.sort((a, b) => a.id.localeCompare(b.id));
+  res.json({
+    baseUrl,
+    count: models.length,
+    models,
+  });
+});
 
 keysRouter.post('/custom', async (req: Request, res: Response) => {
   const parsed = customProviderSchema.safeParse(req.body);
@@ -424,6 +719,28 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
   const providedKey = parsed.data.apiKey?.trim() || undefined;
   const label = parsed.data.label?.trim() || undefined;
 
+  // Optional named platform (multi-key). Empty → classic `custom` (1 key / URL).
+  const rawPlatformId = parsed.data.platformId?.trim().toLowerCase() || '';
+  let platform = 'custom';
+  let multiKey = false;
+  if (rawPlatformId) {
+    if (!isValidUserPlatformSlug(rawPlatformId)) {
+      res.status(400).json({
+        error: { message: 'platformId must match /^[a-z][a-z0-9_-]{0,31}$/ (e.g. locedge)' },
+      });
+      return;
+    }
+    if (isReservedPlatformSlug(rawPlatformId) || (PLATFORMS as readonly string[]).includes(rawPlatformId)) {
+      res.status(400).json({
+        error: { message: `platformId "${rawPlatformId}" is reserved; pick another slug` },
+      });
+      return;
+    }
+    platform = rawPlatformId;
+    multiKey = true;
+    rememberUserPlatform(platform);
+  }
+
   // Flatten singular + plural inputs into one list, dedupe by model id, drop
   // blanks. The singular `displayName` only applies to a lone `model` (it can't
   // sensibly fan out across many ids). Capability flags resolve per-entry first,
@@ -438,7 +755,8 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
     seen.add(modelId);
     entries.push({
       modelId,
-      displayName: (rawDisplay?.trim() || modelId),
+      // Prefer explicit name; else nice name so Unify groups with catalog rows
+      displayName: niceDisplayName(modelId, rawDisplay),
       supportsTools: tools ?? topTools,
       supportsVision: vision ?? topVision,
     });
@@ -456,75 +774,133 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
 
   const db = getDb();
   const upsert = db.transaction(() => {
-    // One 'custom' key row PER ENDPOINT (matched on base_url). Re-submitting
-    // the same endpoint updates its key/label; a new base_url gets its own
-// row instead of clobbering the previous provider. (#212) Re-submitting with a
-// blank key preserves the stored key; only a provided key updates credentials.
-    const existing = db.prepare("SELECT id, encrypted_key, iv, auth_tag FROM api_keys WHERE platform = 'custom' AND base_url = ? LIMIT 1")
-      .get(baseUrl) as { id: number; encrypted_key: string; iv: string; auth_tag: string } | undefined;
+    // ── Key row ────────────────────────────────────────────────────────────
+    // classic custom: one key per base_url (re-submit overwrites credentials)
+    // named platformId: ALWAYS insert a new key → multi-account rotation
     let keyId: number;
     let storedKeyForMask = providedKey ?? 'no-key';
-    if (existing) {
-      keyId = existing.id;
-      if (providedKey) {
-        const { encrypted, iv, authTag } = encrypt(providedKey);
-        db.prepare("UPDATE api_keys SET label = COALESCE(?, label), encrypted_key = ?, iv = ?, auth_tag = ?, status = 'unknown', enabled = 1 WHERE id = ?")
-          .run(label ?? null, encrypted, iv, authTag, existing.id);
-        storedKeyForMask = providedKey;
-      } else {
-        try {
-          storedKeyForMask = decrypt(existing.encrypted_key, existing.iv, existing.auth_tag);
-        } catch {
-          storedKeyForMask = 'no-key';
-        }
-        db.prepare("UPDATE api_keys SET label = COALESCE(?, label), status = 'unknown', enabled = 1 WHERE id = ?")
-          .run(label ?? null, existing.id);
+
+    if (multiKey) {
+      // Enforce one base_url per user platform (all accounts share the endpoint).
+      const existingUrl = db.prepare(
+        `SELECT base_url FROM api_keys
+          WHERE platform = ? AND base_url IS NOT NULL AND TRIM(base_url) != ''
+          LIMIT 1`,
+      ).get(platform) as { base_url: string } | undefined;
+      if (existingUrl && existingUrl.base_url.replace(/\/+$/, '') !== baseUrl) {
+        throw new Error(
+          `platform "${platform}" already uses base_url ${existingUrl.base_url}; `
+          + `use that URL or a different platformId`,
+        );
       }
-    } else {
       const keyToStore = providedKey ?? 'no-key';
       const { encrypted, iv, authTag } = encrypt(keyToStore);
       const r = db.prepare(`
         INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
-        VALUES ('custom', ?, ?, ?, ?, 'unknown', 1, ?)
-      `).run(label ?? 'Custom', encrypted, iv, authTag, baseUrl);
+        VALUES (?, ?, ?, ?, ?, 'unknown', 1, ?)
+      `).run(platform, label ?? platform, encrypted, iv, authTag, baseUrl);
       keyId = Number(r.lastInsertRowid);
       storedKeyForMask = keyToStore;
+    } else {
+      // One 'custom' key row PER ENDPOINT (matched on base_url). (#212)
+      const existing = db.prepare(
+        "SELECT id, encrypted_key, iv, auth_tag FROM api_keys WHERE platform = 'custom' AND base_url = ? LIMIT 1",
+      ).get(baseUrl) as { id: number; encrypted_key: string; iv: string; auth_tag: string } | undefined;
+      if (existing) {
+        keyId = existing.id;
+        if (providedKey) {
+          const { encrypted, iv, authTag } = encrypt(providedKey);
+          db.prepare(
+            "UPDATE api_keys SET label = COALESCE(?, label), encrypted_key = ?, iv = ?, auth_tag = ?, status = 'unknown', enabled = 1 WHERE id = ?",
+          ).run(label ?? null, encrypted, iv, authTag, existing.id);
+          storedKeyForMask = providedKey;
+        } else {
+          try {
+            storedKeyForMask = decrypt(existing.encrypted_key, existing.iv, existing.auth_tag);
+          } catch {
+            storedKeyForMask = 'no-key';
+          }
+          db.prepare(
+            "UPDATE api_keys SET label = COALESCE(?, label), status = 'unknown', enabled = 1 WHERE id = ?",
+          ).run(label ?? null, existing.id);
+        }
+      } else {
+        const keyToStore = providedKey ?? 'no-key';
+        const { encrypted, iv, authTag } = encrypt(keyToStore);
+        const r = db.prepare(`
+          INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
+          VALUES ('custom', ?, ?, ?, ?, 'unknown', 1, ?)
+        `).run(label ?? 'Custom', encrypted, iv, authTag, baseUrl);
+        keyId = Number(r.lastInsertRowid);
+        storedKeyForMask = keyToStore;
+      }
     }
 
     const registered: { modelDbId: number; model: string; displayName: string; supportsTools: boolean; supportsVision: boolean }[] = [];
     for (const { modelId, displayName, supportsTools, supportsVision } of entries) {
-      // Register each model bound to THIS endpoint's key. Custom models carry no
-      // rate limits and sort last in the intelligence preset (size_label tier).
-      // Re-registering an existing model id re-binds it (model ids are unique
-      // per platform, so one id can't live on two endpoints at once).
-      // Capability flags: an unset flag binds NULL so COALESCE picks the insert
-      // default (tools 1, vision 0) on a new row and preserves the existing
-      // value on re-registration. (#470)
+      // Capability flags: unset → NULL so COALESCE keeps insert default / prior. (#470)
+      // Named platforms: key_id NULL so ANY key on that platform can serve the model.
+      // Classic custom: bind to this endpoint's key_id.
       const toolsParam = supportsTools === undefined ? null : (supportsTools ? 1 : 0);
       const visionParam = supportsVision === undefined ? null : (supportsVision ? 1 : 0);
+      const meta = calibrateModelMeta(modelId, displayName);
+      const bindKeyId = multiKey ? null : keyId;
+      // Named platformId rows are operator-owned; keep real size_label for routing
+      // intel tiers. Catalog prune is blocked by api_keys.base_url SQL guard.
       db.prepare(`
         INSERT INTO models
           (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
            rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window, enabled, key_id,
            supports_tools, supports_vision)
-        VALUES ('custom', @modelId, @displayName, 50, 50, 'Custom', NULL, NULL, NULL, NULL, '', NULL, 1, @keyId,
+        VALUES (@platform, @modelId, @displayName, @intelRank, @speedRank, @sizeLabel, NULL, NULL, NULL, NULL, '', NULL, 1, @keyId,
            COALESCE(@tools, 1), COALESCE(@vision, 0))
         ON CONFLICT(platform, model_id)
         DO UPDATE SET
           display_name = excluded.display_name,
           key_id = excluded.key_id,
+          intelligence_rank = excluded.intelligence_rank,
+          speed_rank = excluded.speed_rank,
+          size_label = excluded.size_label,
           enabled = 1,
           supports_tools = COALESCE(@tools, supports_tools),
           supports_vision = COALESCE(@vision, supports_vision)
-      `).run({ modelId, displayName, keyId, tools: toolsParam, vision: visionParam });
+      `).run({
+        platform,
+        modelId,
+        displayName,
+        intelRank: meta.intelligenceRank,
+        // No official catalog speed → neutral 35 (not fake 50/100)
+        speedRank: 35,
+        sizeLabel: meta.sizeLabel,
+        keyId: bindKeyId,
+        tools: toolsParam,
+        vision: visionParam,
+      });
 
-      const modelRow = db.prepare("SELECT id, supports_tools, supports_vision FROM models WHERE platform = 'custom' AND model_id = ?").get(modelId) as { id: number; supports_tools: number; supports_vision: number };
+      const modelRow = db.prepare(
+        'SELECT id, supports_tools, supports_vision FROM models WHERE platform = ? AND model_id = ?',
+      ).get(platform, modelId) as { id: number; supports_tools: number; supports_vision: number };
 
       // Append to the fallback chain if not already present.
       const inChain = db.prepare('SELECT 1 FROM fallback_config WHERE model_db_id = ?').get(modelRow.id);
       if (!inChain) {
         const max = db.prepare('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config').get() as { m: number };
         db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(modelRow.id, max.m + 1);
+      }
+
+      // Also attach to routing profiles so plain `auto` and `auto:high|mid|light`
+      // can pick newly registered custom models without a manual Profile edit.
+      ensureModelInProfile(db, modelRow.id, 1); // Default
+      for (const pool of classifyAutoPools(modelId)) {
+        const prof = db.prepare('SELECT id FROM profiles WHERE LOWER(name) = ?').get(pool) as { id: number } | undefined;
+        if (prof) ensureModelInProfile(db, modelRow.id, prof.id);
+      }
+      // Named third-party endpoints (modelscope, locedge…) → Third-Party profile
+      if (multiKey || platform !== 'custom') {
+        const tp = db.prepare(
+          "SELECT id FROM profiles WHERE LOWER(name) = 'third-party' LIMIT 1",
+        ).get() as { id: number } | undefined;
+        if (tp) ensureModelInProfile(db, modelRow.id, tp.id);
       }
 
       registered.push({
@@ -539,7 +915,15 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
     return { keyId, registered, storedKeyForMask };
   });
 
-  const { keyId, registered, storedKeyForMask } = upsert();
+  let result: { keyId: number; registered: { modelDbId: number; model: string; displayName: string; supportsTools: boolean; supportsVision: boolean }[]; storedKeyForMask: string };
+  try {
+    result = upsert();
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(400).json({ error: { message: msg } });
+    return;
+  }
+  const { keyId, registered, storedKeyForMask } = result;
   // `model`/`displayName`/`modelDbId` echo the first model for older clients;
   // `models` carries the full set registered in this call.
   const first = registered[0]!;
@@ -547,7 +931,8 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
     success: true,
     keyId,
     modelDbId: first.modelDbId,
-    platform: 'custom',
+    platform,
+    multiKey,
     baseUrl,
     model: first.model,
     displayName: first.displayName,

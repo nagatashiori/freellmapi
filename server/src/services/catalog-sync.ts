@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import type { Db } from '../db/types.js';
 import { getDb, getSetting, setSetting } from '../db/index.js';
-import { hasProvider } from '../providers/index.js';
+import { hasProvider, isUserPlatform } from '../providers/index.js';
 import { MEDIA_PLATFORMS } from './media.js';
 import type { Platform } from '@freellmapi/shared/types.js';
 import type { Scheduler } from '../lib/scheduler.js';
@@ -286,19 +286,36 @@ export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['
     }
 
     // Remove catalog-managed models that the catalog no longer lists.
+    //
+    // Operator-owned platforms must NEVER be pruned here (even if hasProvider
+    // is true after hydrateUserPlatformsFromDb):
+    //   - classic custom
+    //   - aihub (local first-class relay)
+    //   - any api_keys.platform that has a base_url (named platformId: modelscope,
+    //     locedge, …) — durable SQL check so we don't depend on in-memory Set
+    //   - isUserPlatform() in-memory Set as belt-and-suspenders
+    //
+    // Without this, boot catalog re-apply deleted every modelscope model while
+    // leaving the key row, so Web UI looked like "add failed".
     const candidates = db
       .prepare(`
         SELECT id, platform, model_id
           FROM models
          WHERE platform != 'custom'
+           AND platform != 'aihub'
            AND key_id IS NULL
            AND size_label NOT IN ('User', 'Custom')
+           AND platform NOT IN (
+             SELECT DISTINCT platform FROM api_keys
+              WHERE base_url IS NOT NULL AND TRIM(base_url) != ''
+           )
       `)
       .all() as { id: number; platform: string; model_id: string }[];
     const deleteFb = db.prepare('DELETE FROM fallback_config WHERE model_db_id = ?');
     const deleteModel = db.prepare('DELETE FROM models WHERE id = ?');
     for (const c of candidates) {
       if (!hasProvider(c.platform as Platform)) continue; // not catalog-managed by this binary
+      if (isUserPlatform(c.platform)) continue;
       if (!inCatalog.has(`${c.platform}:${c.model_id}`)) {
         deleteFb.run(c.id);
         deleteModel.run(c.id);
