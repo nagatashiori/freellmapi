@@ -441,6 +441,214 @@ profilesRouter.post('/:id/sort/:preset', (req: Request, res: Response) => {
   }
 });
 
+// ── Routing group status ────────────────────────────────────────────────────
+// GET /api/profiles/routing-status — lightweight health of the three routing
+// groups (high/mid/light) for the models/chat UI status strip.
+profilesRouter.get('/routing-status', (_req: Request, res: Response) => {
+  const db = getDb();
+
+  interface RoutingGroupStatus {
+    name: string;
+    profileId: number | null;
+    total: number;
+    enabled: number;
+    servable: number;
+    top: {
+      modelDbId: number;
+      platform: string;
+      modelId: string;
+      displayName: string;
+    } | null;
+    lastSuccess: {
+      at: string;
+      platform: string;
+      modelId: string;
+      latencyMs: number;
+    } | null;
+  }
+
+  const groupNames = ['high', 'mid', 'light'];
+  const groups: RoutingGroupStatus[] = [];
+
+  for (const name of groupNames) {
+    const profile = db.prepare("SELECT id FROM profiles WHERE LOWER(name) = LOWER(?)").get(name) as { id: number } | undefined;
+    if (!profile) {
+      groups.push({ name, profileId: null, total: 0, enabled: 0, servable: 0, top: null, lastSuccess: null });
+      continue;
+    }
+
+    const total = db.prepare("SELECT COUNT(*) AS c FROM profile_models WHERE profile_id = ?").get(profile.id) as { c: number };
+    const enabled = db.prepare("SELECT COUNT(*) AS c FROM profile_models WHERE profile_id = ? AND enabled = 1").get(profile.id) as { c: number };
+
+    // Servable = enabled in model + enabled in profile + platform has ≥1 healthy+enabled key
+    const servable = db.prepare(`
+      SELECT COUNT(*) AS c FROM profile_models pm
+      JOIN models m ON m.id = pm.model_db_id AND m.enabled = 1
+      WHERE pm.profile_id = ? AND pm.enabled = 1
+        AND EXISTS (
+          SELECT 1 FROM api_keys k
+          WHERE k.platform = m.platform
+            AND k.enabled = 1
+            AND k.status IN ('healthy', 'unknown')
+        )
+    `).get(profile.id) as { c: number };
+
+    // Top 1 servable (first enabled in profile order)
+    const top = db.prepare(`
+      SELECT pm.model_db_id, m.platform, m.model_id, m.display_name
+      FROM profile_models pm
+      JOIN models m ON m.id = pm.model_db_id AND m.enabled = 1
+      WHERE pm.profile_id = ? AND pm.enabled = 1
+        AND EXISTS (
+          SELECT 1 FROM api_keys k
+          WHERE k.platform = m.platform
+            AND k.enabled = 1
+            AND k.status IN ('healthy', 'unknown')
+        )
+      ORDER BY pm.priority ASC
+      LIMIT 1
+    `).get(profile.id) as { model_db_id: number; platform: string; model_id: string; display_name: string } | undefined;
+
+    // Last success across any member of this profile
+    const last = db.prepare(`
+      SELECT r.platform, r.model_id, r.created_at, r.latency_ms
+      FROM requests r
+      WHERE r.status = 'success'
+        AND EXISTS (
+          SELECT 1 FROM profile_models pm
+          JOIN models m ON m.id = pm.model_db_id
+          WHERE pm.profile_id = ?
+            AND m.platform = r.platform
+            AND m.model_id = r.model_id
+        )
+      ORDER BY r.id DESC
+      LIMIT 1
+    `).get(profile.id) as { platform: string; model_id: string; created_at: string; latency_ms: number } | undefined;
+
+    groups.push({
+      name,
+      profileId: profile.id,
+      total: total.c,
+      enabled: enabled.c,
+      servable: servable.c,
+      top: top ? { modelDbId: top.model_db_id, platform: top.platform, modelId: top.model_id, displayName: top.display_name } : null,
+      lastSuccess: last ? { at: last.created_at, platform: last.platform, modelId: last.model_id, latencyMs: last.latency_ms } : null,
+    });
+  }
+
+  res.json({ groups });
+});
+
+// ── Membership control ──────────────────────────────────────────────────────
+// POST /api/profiles/membership — add/remove models to/from routing groups.
+// Request: { modelDbIds: number[], add: string[], remove: string[] }
+const membershipSchema = z.object({
+  modelDbIds: z.array(z.number()).min(1),
+  add: z.array(z.string()).optional().default([]),
+  remove: z.array(z.string()).optional().default([]),
+  placement: z.enum(['tail', 'head']).optional().default('tail'),
+});
+
+profilesRouter.post('/membership', (req: Request, res: Response) => {
+  const parsed = membershipSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
+    return;
+  }
+
+  const db = getDb();
+  const { modelDbIds, add, remove, placement } = parsed.data;
+  const validNames = new Set(['high', 'mid', 'light']);
+
+  // Validate profile names
+  for (const name of [...add, ...remove]) {
+    if (!validNames.has(name.toLowerCase())) {
+      res.status(400).json({ error: { message: `Unknown routing group: ${name}. Use: high, mid, light` } });
+      return;
+    }
+  }
+
+  // Resolve profile ids
+  const resolved = new Map<string, number>();
+  for (const name of validNames) {
+    const profile = db.prepare("SELECT id FROM profiles WHERE LOWER(name) = LOWER(?)").get(name) as { id: number } | undefined;
+    if (profile) resolved.set(name, profile.id);
+  }
+
+  interface Touch {
+    profile: string;
+    profileId: number;
+    added: number[];
+    already: number[];
+    removed: number[];
+  }
+  const touched: Touch[] = [];
+
+  const tx = db.transaction(() => {
+    for (const name of add) {
+      const profileId = resolved.get(name);
+      if (!profileId) continue;
+      const t: Touch = { profile: name, profileId, added: [], already: [], removed: [] };
+
+      for (const modelDbId of modelDbIds) {
+        const existing = db.prepare(
+          'SELECT enabled FROM profile_models WHERE profile_id = ? AND model_db_id = ?'
+        ).get(profileId, modelDbId) as { enabled: number } | undefined;
+
+        if (existing) {
+          if (existing.enabled === 1) {
+            t.already.push(modelDbId);
+          } else {
+            db.prepare('UPDATE profile_models SET enabled = 1 WHERE profile_id = ? AND model_db_id = ?')
+              .run(profileId, modelDbId);
+            t.added.push(modelDbId);
+          }
+        } else {
+          // Insert at tail or head
+          let priority = 1;
+          if (placement === 'tail') {
+            const max = db.prepare(
+              'SELECT COALESCE(MAX(priority), 0) AS m FROM profile_models WHERE profile_id = ?'
+            ).get(profileId) as { m: number };
+            priority = max.m + 1;
+          } else {
+            // head: shift existing up
+            db.prepare('UPDATE profile_models SET priority = priority + 1 WHERE profile_id = ?')
+              .run(profileId);
+          }
+          db.prepare(
+            'INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, 1)'
+          ).run(profileId, modelDbId, priority);
+          t.added.push(modelDbId);
+        }
+      }
+      touched.push(t);
+    }
+
+    for (const name of remove) {
+      const profileId = resolved.get(name);
+      if (!profileId) continue;
+      const t = touched.find(tc => tc.profile === name) ?? { profile: name, profileId, added: [], already: [], removed: [] };
+
+      for (const modelDbId of modelDbIds) {
+        const existing = db.prepare(
+          'SELECT enabled FROM profile_models WHERE profile_id = ? AND model_db_id = ?'
+        ).get(profileId, modelDbId) as { enabled: number } | undefined;
+
+        if (existing && existing.enabled === 1) {
+          db.prepare('UPDATE profile_models SET enabled = 0 WHERE profile_id = ? AND model_db_id = ?')
+            .run(profileId, modelDbId);
+          t.removed.push(modelDbId);
+        }
+      }
+      if (!touched.find(tc => tc.profile === name)) touched.push(t);
+    }
+  });
+  tx();
+
+  res.json({ touched });
+});
+
 // Initialize built-in profiles if they don't exist
 export function seedProfiles(db: any): void {
   const count = db.prepare("SELECT COUNT(*) as cnt FROM profiles WHERE type = 'default' OR type = 'builtin'").get() as { cnt: number };

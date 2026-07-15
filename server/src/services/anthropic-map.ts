@@ -108,6 +108,17 @@ export function resolveAnthropicModel(model?: string): ResolvedAnthropicModel {
   if (family) {
     const target = getClaudeModelMap()[family];
     if (!target || target === 'auto') return { pinned: false };
+    // Map values may be profile routes (auto:high / auto:mid / auto:light),
+    // not catalog model ids. Without this branch, lookupEnabled('auto:high')
+    // fails and we silently fall back to the active Default profile — so the
+    // Keys page Anthropic mapping (Opus→auto:high etc.) never actually fires.
+    const lowerTarget = target.toLowerCase();
+    if (lowerTarget.startsWith('auto:')) {
+      const profileName = lowerTarget.slice('auto:'.length).trim();
+      return profileName
+        ? { pinned: false, profileName }
+        : { pinned: false };
+    }
     const id = lookupEnabled(target);
     // A pinned-but-now-disabled/removed target degrades gracefully to auto.
     return id != null ? { preferredModelDbId: id, pinned: true } : { pinned: false };

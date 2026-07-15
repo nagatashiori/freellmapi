@@ -247,6 +247,62 @@ describe('Fallback API', () => {
     await request(app, 'PUT', '/api/fallback', restore);
   });
 
+  // Regression: PUT /api/fallback used to only write fallback_config while
+  // model:"auto" walked profile_models for active_profile_id — so dashboard
+  // toggles/order never affected AUTO and disabled "garbage" models kept
+  // getting selected after cooldowns.
+  it('PUT /api/fallback dual-writes priority+enabled into active profile_models', async () => {
+    const db = getDb();
+    const { body: original } = await request(app, 'GET', '/api/fallback');
+    expect(original.length).toBeGreaterThan(1);
+
+    // Ensure Default profile is active (the AUTO path).
+    const profile = db.prepare("SELECT id FROM profiles WHERE LOWER(name) = 'default' LIMIT 1").get() as
+      | { id: number }
+      | undefined;
+    expect(profile).toBeDefined();
+    const existing = db.prepare("SELECT value FROM settings WHERE key = 'active_profile_id'").get() as
+      | { value: string }
+      | undefined;
+    if (existing) {
+      db.prepare("UPDATE settings SET value = ? WHERE key = 'active_profile_id'").run(String(profile!.id));
+    } else {
+      db.prepare("INSERT INTO settings (key, value) VALUES ('active_profile_id', ?)").run(String(profile!.id));
+    }
+
+    const target = original[0];
+    const flipped = original.map((e: any, i: number) => ({
+      modelDbId: e.modelDbId,
+      priority: i === 0 ? 1 : e.priority + 1,
+      // Flip the first entry's enabled flag so we can assert dual-write.
+      enabled: i === 0 ? !e.enabled : e.enabled,
+    }));
+
+    const { status } = await request(app, 'PUT', '/api/fallback', flipped);
+    expect(status).toBe(200);
+
+    const pm = db.prepare(
+      'SELECT priority, enabled FROM profile_models WHERE profile_id = ? AND model_db_id = ?',
+    ).get(profile!.id, target.modelDbId) as { priority: number; enabled: number };
+    expect(pm).toBeDefined();
+    expect(pm.priority).toBe(1);
+    expect(pm.enabled).toBe(flipped[0].enabled ? 1 : 0);
+
+    const fc = db.prepare(
+      'SELECT priority, enabled FROM fallback_config WHERE model_db_id = ?',
+    ).get(target.modelDbId) as { priority: number; enabled: number };
+    expect(fc.priority).toBe(pm.priority);
+    expect(fc.enabled).toBe(pm.enabled);
+
+    // Restore original chain for later tests.
+    const restore = original.map((e: any, i: number) => ({
+      modelDbId: e.modelDbId,
+      priority: i + 1,
+      enabled: e.enabled,
+    }));
+    await request(app, 'PUT', '/api/fallback', restore);
+  });
+
   it('POST /api/fallback/sort/intelligence sorts by cross-provider tier, then rank', async () => {
     const { status } = await request(app, 'POST', '/api/fallback/sort/intelligence');
     expect(status).toBe(200);

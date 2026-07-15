@@ -419,7 +419,10 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
   if (resolved.profileName) {
     try {
       const chainResult = resolveRoutingChain(`auto:${resolved.profileName}`);
-      profileChain = chainResult.chain;
+      // Mirror routeRequest's getActiveChain path: only walk enabled chain rows.
+      // Without this, prefetchedChain bypasses the .filter(e => e.enabled) and
+      // disabled high/mid/light members still get attempted.
+      profileChain = chainResult.chain.filter(e => e.enabled);
     } catch {
       // Profile not found or empty — fall through to auto-routing
     }

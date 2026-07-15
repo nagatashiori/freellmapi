@@ -203,13 +203,12 @@ proxyRouter.get('/models', (req: Request, res: Response) => {
     return;
   }
 
-  // By default we return the WHOLE catalog (one row per model id), each tagged
-  // with whether it is currently usable, so a client can see everything and know
-  // what's connected vs. disabled/keyless (#242). `?available=true` (alias
-  // `?connected=true`) narrows the list to only models that can serve a request
-  // right now — the previous default behavior. `available` is computed as
-  // "enabled AND an enabled key can serve it"; dedup prefers an available
-  // instance of a model id over a disabled/keyless one.
+  // Default: only models that can serve a request right now (enabled + has a
+  // usable key). Closed / keyless rows must NOT appear in the client catalog —
+  // clients (Claude Code, OpenAI SDKs) otherwise show 400+ dead models.
+  // Escape hatches:
+  //   ?available=false / ?all=true  → full catalog, each tagged available/reason
+  //   ?available=true               → same as default (kept for old clients)
   // Shared catalog listing (one source of truth for the OpenAI and Anthropic
   // /v1/models endpoints — see services/model-listing.ts). `autoContextWindow`
   // is the honest ceiling for the virtual "auto" model: the largest context
@@ -218,9 +217,13 @@ proxyRouter.get('/models', (req: Request, res: Response) => {
   // conservative default and truncate long inputs before they reach us (#282).
   const { models: allListed, autoContextWindow } = buildModelListing();
 
-  const q = String(req.query.available ?? req.query.connected ?? '').toLowerCase();
-  const onlyAvailable = q === '1' || q === 'true' || q === 'yes';
-  const listed = onlyAvailable ? allListed.filter(m => m.available === 1) : allListed;
+  // Default: only available models. Full catalog only when explicitly requested
+  // via ?all=true or ?available=false (aliases: connected=false).
+  const allFlag = String(req.query.all ?? '').toLowerCase();
+  const availFlag = String(req.query.available ?? req.query.connected ?? '').toLowerCase();
+  const showAll = allFlag === '1' || allFlag === 'true' || allFlag === 'yes'
+    || availFlag === '0' || availFlag === 'false' || availFlag === 'no';
+  const listed = showAll ? allListed : allListed.filter(m => m.available === 1);
 
   res.json({
     object: 'list',

@@ -92,40 +92,47 @@ describe('Virtual "auto" model', () => {
 
   // #242: default returns the whole catalog, each entry annotated with whether
   // it's currently usable (connected) and, if not, why.
-  it('returns the whole catalog by default, each tagged with availability (#242)', async () => {
+  it('defaults to only available models (closed/keyless hidden)', async () => {
     const { status, body } = await request(app, 'GET', '/v1/models', undefined, authHeaders());
     expect(status).toBe(200);
     expect(body.data[0]).toMatchObject({ id: 'auto', available: true, unavailable_reason: null });
 
-    const models = body.data.filter((m: any) => m.id !== 'auto');
+    const models = body.data.filter((m: any) => m.id !== 'auto' && m.id !== 'fusion');
     expect(models.length).toBeGreaterThan(0);
-    for (const m of models) {
+    // Default catalog must not surface dead rows.
+    expect(models.every((m: any) => m.available === true)).toBe(true);
+    expect(models.every((m: any) => m.unavailable_reason === null)).toBe(true);
+    expect(models.every((m: any) => m.owned_by === 'freellmapi')).toBe(true);
+  });
+
+  it('?all=true (or ?available=false) returns the full catalog with availability tags', async () => {
+    const all = await request(app, 'GET', '/v1/models?all=true', undefined, authHeaders());
+    expect(all.status).toBe(200);
+    const allModels = all.body.data.filter((m: any) => m.id !== 'auto' && m.id !== 'fusion');
+    expect(allModels.length).toBeGreaterThan(0);
+    for (const m of allModels) {
       expect(typeof m.available).toBe('boolean');
       if (m.available) expect(m.unavailable_reason).toBeNull();
       else expect(['no_key', 'disabled']).toContain(m.unavailable_reason);
     }
-    // Every logical model is owned_by freellmapi (unified). Only a groq key is
-    // seeded, so at least one model is available (served by groq) and at least
-    // one model with no provider key is listed but unavailable.
-    expect(models.every((m: any) => m.owned_by === 'freellmapi')).toBe(true);
-    expect(models.some((m: any) => m.available)).toBe(true);
-    expect(models.some((m: any) => !m.available && m.unavailable_reason === 'no_key')).toBe(true);
-  });
+    // Only a groq key is seeded → at least one available and one no_key.
+    expect(allModels.some((m: any) => m.available)).toBe(true);
+    expect(allModels.some((m: any) => !m.available && m.unavailable_reason === 'no_key')).toBe(true);
 
-  it('?available=true narrows to only connected models (#242)', async () => {
-    const filtered = await request(app, 'GET', '/v1/models?available=true', undefined, authHeaders());
-    expect(filtered.status).toBe(200);
-    const filteredModels = filtered.body.data.filter((m: any) => m.id !== 'auto');
-    expect(filteredModels.length).toBeGreaterThan(0);
-    expect(filteredModels.every((m: any) => m.available === true)).toBe(true);
-
-    // The unfiltered list is strictly larger — the keyless models reappear.
-    const all = await request(app, 'GET', '/v1/models', undefined, authHeaders());
-    const allModels = all.body.data.filter((m: any) => m.id !== 'auto');
+    const filtered = await request(app, 'GET', '/v1/models', undefined, authHeaders());
+    const filteredModels = filtered.body.data.filter((m: any) => m.id !== 'auto' && m.id !== 'fusion');
     expect(allModels.length).toBeGreaterThan(filteredModels.length);
   });
 
-  it('marks a fully-disabled model with unavailable_reason "disabled" (#242)', async () => {
+  it('?available=true still returns only connected models', async () => {
+    const filtered = await request(app, 'GET', '/v1/models?available=true', undefined, authHeaders());
+    expect(filtered.status).toBe(200);
+    const filteredModels = filtered.body.data.filter((m: any) => m.id !== 'auto' && m.id !== 'fusion');
+    expect(filteredModels.length).toBeGreaterThan(0);
+    expect(filteredModels.every((m: any) => m.available === true)).toBe(true);
+  });
+
+  it('marks a fully-disabled model with unavailable_reason "disabled" when full catalog requested', async () => {
     const db = getDb();
     const row = db.prepare("SELECT display_name FROM models WHERE platform='groq' AND enabled=1 LIMIT 1").get() as { display_name: string } | undefined;
     expect(row).toBeDefined();
@@ -133,10 +140,14 @@ describe('Virtual "auto" model', () => {
     // disable every provider that serves this logical model (same display_name).
     db.prepare('UPDATE models SET enabled=0 WHERE display_name=?').run(row!.display_name);
     try {
-      const { body } = await request(app, 'GET', '/v1/models', undefined, authHeaders());
+      const { body } = await request(app, 'GET', '/v1/models?all=true', undefined, authHeaders());
       const disabled = body.data.filter((m: any) => m.id !== 'auto' && m.unavailable_reason === 'disabled');
       expect(disabled.length).toBeGreaterThan(0);
       expect(disabled.every((m: any) => m.available === false)).toBe(true);
+      // Default listing must hide it.
+      const def = await request(app, 'GET', '/v1/models', undefined, authHeaders());
+      const stillThere = def.body.data.some((m: any) => m.unavailable_reason === 'disabled');
+      expect(stillThere).toBe(false);
     } finally {
       db.prepare('UPDATE models SET enabled=1 WHERE display_name=?').run(row!.display_name);
     }

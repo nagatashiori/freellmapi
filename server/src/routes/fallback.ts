@@ -14,6 +14,7 @@ import { getModelGroups } from '../services/model-groups.js';
 import { getPenaltyInspector } from '../services/penalty-inspector.js';
 import { decrypt } from '../lib/crypto.js';
 import { resolveProvider, getProvider } from '../providers/index.js';
+import { mirrorFallbackConfigToActiveProfile, syncChainEntriesToActiveProfile } from '../services/chain-sync.js';
 
 export const fallbackRouter = Router();
 
@@ -95,6 +96,52 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
   const penalties = getAllPenalties();
   const penaltyMap = new Map(penalties.map(p => [p.modelDbId, p]));
 
+  // 24h probe latency aggregate per model (success probes only). Backend
+  // computes this so the dashboard / list / detail pages all share one value
+  // without the client re-aggregating the probe-history time series.
+  const latencyRows = db.prepare(`
+    SELECT m.id AS model_db_id,
+           AVG(r.latency_ms) AS avg_ms,
+           COUNT(*) AS sample_count,
+           MAX(r.id) AS last_id
+    FROM requests r
+    JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
+    WHERE r.request_type = 'probe'
+      AND r.status IN ('ok', 'success')
+      AND r.created_at > datetime('now', '-24 hours')
+    GROUP BY m.id
+  `).all() as { model_db_id: number; avg_ms: number; sample_count: number; last_id: number }[];
+
+  // Latest probe per model (any status) — used to show "last seen: error 30s
+  // ago" alongside the 24h average. Single subquery per model, no N+1.
+  const lastRows = db.prepare(`
+    SELECT r.platform, r.model_id, r.status, r.latency_ms, r.created_at
+    FROM requests r
+    JOIN (
+      SELECT r2.platform, r2.model_id, MAX(r2.id) AS max_id
+      FROM requests r2
+      WHERE r2.request_type = 'probe'
+        AND r2.created_at > datetime('now', '-24 hours')
+      GROUP BY r2.platform, r2.model_id
+    ) latest ON latest.platform = r.platform
+            AND latest.model_id = r.model_id
+            AND latest.max_id = r.id
+    JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
+  `).all() as { platform: string; model_id: string; status: string; latency_ms: number; created_at: string }[];
+
+  const lastByDbId = new Map<number, { status: string; latency: number; at: string }>();
+  for (const r of lastRows) {
+    // We need model_db_id — re-derive from platform+model_id via the rows list.
+    const hit = rows.find(x => x.platform === r.platform && x.model_id === r.model_id);
+    if (!hit) continue;
+    lastByDbId.set(hit.model_db_id, { status: r.status, latency: r.latency_ms, at: r.created_at });
+  }
+
+  const latencyByDbId = new Map<number, { avgMs: number; sampleCount: number }>();
+  for (const lr of latencyRows) {
+    latencyByDbId.set(lr.model_db_id, { avgMs: Math.round(lr.avg_ms), sampleCount: lr.sample_count });
+  }
+
   // Logical-model grouping per row, so the dashboard can collapse the same
   // model served by several providers into one expandable group. Always sent
   // (cheap); the client renders grouped only when its unify toggle is on.
@@ -143,6 +190,15 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
       keyLabel: r.key_label ?? null,
       hasOverrides: Boolean(r.has_overrides),
       keyCount: keyCountMap.get(r.platform) ?? 0,
+      // 24h probe latency stats from the server (success probes only for the
+      // average; `last` shows the most recent probe regardless of outcome).
+      latencyStats: {
+        avgMs: latencyByDbId.get(r.model_db_id)?.avgMs ?? 0,
+        sampleCount: latencyByDbId.get(r.model_db_id)?.sampleCount ?? 0,
+        lastStatus: lastByDbId.get(r.model_db_id)?.status ?? null,
+        lastLatency: lastByDbId.get(r.model_db_id)?.latency ?? null,
+        lastAt: lastByDbId.get(r.model_db_id)?.at ?? null,
+      },
     };
   }));
 });
@@ -166,10 +222,18 @@ fallbackRouter.put('/', (req: Request, res: Response) => {
     UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ?
   `);
 
+  // Dual-write: /models/chat edits fallback_config, but model:"auto" walks
+  // profile_models for active_profile_id. Keep both tables in lockstep so a
+  // drag-reorder or toggle on the dashboard actually changes AUTO routing.
   const updateAll = db.transaction(() => {
     for (const entry of parsed.data) {
       update.run(entry.priority, entry.enabled ? 1 : 0, entry.modelDbId);
     }
+    syncChainEntriesToActiveProfile(db, parsed.data.map(e => ({
+      modelDbId: e.modelDbId,
+      priority: e.priority,
+      enabled: e.enabled,
+    })));
   });
   updateAll();
 
@@ -237,6 +301,9 @@ fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
     for (let i = 0; i < models.length; i++) {
       update.run(i + 1, models[i].id);
     }
+    // Sort rewrites every fallback priority — mirror the full table so the
+    // active profile's AUTO chain does not keep the pre-sort order.
+    mirrorFallbackConfigToActiveProfile(db);
   });
   reorder();
 
@@ -657,4 +724,80 @@ fallbackRouter.get('/probe-history', (req: Request, res: Response) => {
     }
   }
   res.json({ hours, perPlatform: maxPer, platforms: byPlatform });
+});
+
+// GET /probe-stats?canonical=...&hours=24
+// Per-model latency stats for a single logical model group, optionally
+// reordered by latency. The detail page calls this after a "测全部提供方"
+// pass to display the providers in fastest-first order.
+fallbackRouter.get('/probe-stats', (req: Request, res: Response) => {
+  const db = getDb();
+  const canonical = String(req.query.canonical ?? '').trim();
+  if (!canonical) {
+    res.status(400).json({ error: { message: 'canonical is required' } });
+    return;
+  }
+  const hours = Math.min(Math.max(Number(req.query.hours) || 24, 1), 168);
+
+  // Use the same model-groups service that /api/fallback uses, so the member
+  // list always matches what the detail page shows — including ungrouped
+  // models and custom overrides. The input may be either a canonical slug
+  // (preferred) or a raw display_name / model_id.
+  const groups = getModelGroups();
+  let members: { model_db_id: number; platform: string; model_id: string; display_name: string }[] = [];
+  for (const g of groups) {
+    if (g.canonicalId === canonical) { members = g.members; break; }
+  }
+  if (members.length === 0) {
+    // Fall back to a direct match for ungrouped models.
+    members = db.prepare(`
+      SELECT m.id AS model_db_id, m.platform, m.model_id, m.display_name
+      FROM models m
+      WHERE m.enabled = 1
+        AND (m.display_name = ? OR m.model_id = ?)
+    `).all(canonical, canonical) as any[];
+  }
+
+  if (members.length === 0) {
+    res.json({ canonical, hours, members: [] });
+    return;
+  }
+
+  const ids = members.map(m => m.model_db_id);
+  const placeholders = ids.map(() => '?').join(',');
+
+  const stats = db.prepare(`
+    SELECT m.id AS model_db_id,
+           AVG(r.latency_ms) AS avg_ms,
+           COUNT(*) AS sample_count
+    FROM requests r
+    JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
+    WHERE r.request_type = 'probe'
+      AND r.status IN ('ok', 'success')
+      AND r.created_at > datetime('now', ?)
+      AND m.id IN (${placeholders})
+    GROUP BY m.id
+  `).all(`-${hours} hours`, ...ids) as { model_db_id: number; avg_ms: number; sample_count: number }[];
+
+  const statsMap = new Map(stats.map(s => [s.model_db_id, { avgMs: Math.round(s.avg_ms), sampleCount: s.sample_count }]));
+
+  const out = members.map(m => ({
+    modelDbId: m.model_db_id,
+    platform: m.platform,
+    modelId: m.model_id,
+    displayName: m.display_name,
+    avgMs: statsMap.get(m.model_db_id)?.avgMs ?? 0,
+    sampleCount: statsMap.get(m.model_db_id)?.sampleCount ?? 0,
+  }));
+
+  // Reorder: highest sample count first, then lowest avgMs. Ties preserve
+  // original order. Models with no samples sink to the end.
+  out.sort((a, b) => {
+    if (a.sampleCount === 0 && b.sampleCount === 0) return 0;
+    if (a.sampleCount === 0) return 1;
+    if (b.sampleCount === 0) return -1;
+    return a.avgMs - b.avgMs;
+  });
+
+  res.json({ canonical, hours, members: out });
 });

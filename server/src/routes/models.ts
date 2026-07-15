@@ -10,6 +10,7 @@ import {
   upsertModelOverrides,
   type ModelOverridePatch,
 } from '../services/model-state.js';
+import { syncOneModelEnabledToActiveProfile } from '../services/chain-sync.js';
 
 export const modelsRouter = Router();
 
@@ -161,8 +162,12 @@ modelsRouter.patch('/:id', (req: Request, res: Response) => {
     }
 
     if (parsed.data.fallbackEnabled !== undefined) {
+      const flag = parsed.data.fallbackEnabled ? 1 : 0;
       db.prepare('UPDATE fallback_config SET enabled = ? WHERE model_db_id = ?')
-        .run(parsed.data.fallbackEnabled ? 1 : 0, id);
+        .run(flag, id);
+      // AUTO reads profile_models for active_profile_id — keep enabled in sync
+      // with the fallback chain the dashboard toggle edits.
+      syncOneModelEnabledToActiveProfile(db, id, flag);
     }
   });
   applyUpdate();
