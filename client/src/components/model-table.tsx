@@ -1,8 +1,24 @@
 import type { ReactNode } from 'react'
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useSortable } from '@dnd-kit/sortable'
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+  useSortable,
+} from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core'
+
 import { useI18n } from '@/i18n'
 import { CopyButton } from '@/components/copy-button'
 import { Switch } from '@/components/ui/switch'
@@ -144,6 +160,62 @@ export function RowContent({
         <Switch checked={row.enabled} onCheckedChange={(c) => onToggle(row.modelDbId, c)} />
       </td>
     </>
+  )
+}
+
+// Sortable wrapper around RowContent for the per-model detail page, where the
+// user reorders providers within one logical model group. Drag only active in
+// Manual (priority) mode — other strategies derive order from score.
+export function SortableRowContent({
+  row,
+  rank,
+  draggable,
+  onToggle,
+}: {
+  row: Row
+  rank: number
+  draggable: boolean
+  onToggle: (modelDbId: number, enabled: boolean) => void
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: row.modelDbId })
+
+  return (
+    <tr
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition,
+      }}
+      className={`border-b last:border-0 ${isDragging ? 'opacity-50' : ''} ${
+        row.enabled ? '' : 'opacity-50'
+      }`}
+    >
+      <RowContent
+        row={row}
+        rank={rank}
+        draggable={draggable}
+        dragHandle={
+          draggable ? (
+            <button
+              {...attributes}
+              {...listeners}
+              className="cursor-grab active:cursor-grabbing text-muted-foreground/50 hover:text-foreground transition-colors"
+              aria-label="drag to reorder"
+            >
+              {dragDots}
+            </button>
+          ) : undefined
+        }
+        onToggle={onToggle}
+      />
+    </tr>
   )
 }
 

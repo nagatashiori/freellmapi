@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { ChevronLeft, Save, Trash2, RefreshCw, Activity } from 'lucide-react'
@@ -13,7 +13,22 @@ import { TableSkeleton } from '@/components/ui/skeleton'
 import { Tooltip } from '@/components/tooltip'
 import { PageHeader } from '@/components/page-header'
 import { ModelsTabs } from '@/components/models-tabs'
-import { ModelTableHead, RowContent } from '@/components/model-table'
+import { ModelTableHead, SortableRowContent } from '@/components/model-table'
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  KeyboardSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core'
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+  arrayMove,
+} from '@dnd-kit/sortable'
 import {
   groupQuotaBadge,
   providerLabel,
@@ -84,6 +99,12 @@ export default function ModelDetailPage() {
 
   const [probeResults, setProbeResults] = useState<Map<number, ProbeResult>>(new Map())
   const [probingAll, setProbingAll] = useState(false)
+  const [localMembers, setLocalMembers] = useState<Row[] | null>(null)
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
 
   const healthMap = new Map<number, string>()
   if (healthRaw) for (const h of healthRaw) healthMap.set(h.modelDbId, h.healthStatus)
@@ -125,6 +146,30 @@ export default function ModelDetailPage() {
     .filter(e => e.keyCount > 0 && (e.canonicalId ?? e.modelId) === canonicalId)
     .map(e => ({ ...(scoreById.get(e.modelDbId) ?? {}), ...e }))
     .sort((a, b) => (isManual ? a.priority - b.priority : (b.score ?? 0) - (a.score ?? 0)))
+
+  const displayMembers = localMembers ?? members
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event
+    if (!over || active.id === over.id || !isManual) return
+    const oldI = displayMembers.findIndex(m => m.modelDbId === Number(active.id))
+    const newI = displayMembers.findIndex(m => m.modelDbId === Number(over.id))
+    if (oldI < 0 || newI < 0) return
+    const reordered = arrayMove(displayMembers, oldI, newI)
+    setLocalMembers(reordered)
+    // Persist: build flat priority list from all entries, overriding order for
+    // the members of this group.
+    const memberIds = new Set(reordered.map(m => m.modelDbId))
+    const priority = new Map(reordered.map((m, i) => [m.modelDbId, i + 1]))
+    const all = entries.map(e => ({
+      modelDbId: e.modelDbId,
+      priority: memberIds.has(e.modelDbId) ? (priority.get(e.modelDbId) ?? e.priority) : e.priority,
+      enabled: e.enabled,
+    }))
+    saveMutation.mutate(all, {
+      onSettled: () => { setLocalMembers(null); queryClient.invalidateQueries({ queryKey: ['fallback'] }) },
+    })
+  }
 
   function handleToggle(modelDbId: number, enabled: boolean) {
     saveMutation.mutate(entries.map(e => ({
@@ -171,9 +216,9 @@ export default function ModelDetailPage() {
   }, [applyProbe])
 
   const doProbeAllMembers = useCallback(async () => {
-    if (members.length === 0 || probingAll) return
+    if (displayMembers.length === 0 || probingAll) return
     setProbingAll(true)
-    for (const m of members) {
+    for (const m of displayMembers) {
       setProbeResults(prev => new Map(prev).set(m.modelDbId, {
         modelDbId: m.modelDbId, status: 'probing', latency: 0, error: '',
       }))
@@ -315,18 +360,35 @@ export default function ModelDetailPage() {
             </div>
 
             {/* Per-provider stats (same columns as the Models table) */}
-            <div className="rounded-2xl border overflow-x-auto">
-              <table className="w-full text-sm">
-                <ModelTableHead />
-                <tbody>
-                  {members.map((m, i) => (
-                    <tr key={m.modelDbId} className={`border-b last:border-0 ${m.enabled ? '' : 'opacity-50'}`}>
-                      <RowContent row={m} rank={i + 1} draggable={false} onToggle={handleToggle} />
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            {isManual ? (
+              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                <div className="rounded-2xl border overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <ModelTableHead />
+                    <SortableContext items={displayMembers.map(m => m.modelDbId)} strategy={verticalListSortingStrategy}>
+                      <tbody>
+                        {displayMembers.map((m, i) => (
+                          <SortableRowContent key={m.modelDbId} row={m} rank={i + 1} draggable onToggle={handleToggle} />
+                        ))}
+                      </tbody>
+                    </SortableContext>
+                  </table>
+                </div>
+              </DndContext>
+            ) : (
+              <div className="rounded-2xl border overflow-x-auto">
+                <table className="w-full text-sm">
+                  <ModelTableHead />
+                  <tbody>
+                    {displayMembers.map((m, i) => (
+                      <tr key={m.modelDbId} className={`border-b last:border-0 ${m.enabled ? '' : 'opacity-50'}`}>
+                        <SortableRowContent row={m} rank={i + 1} draggable={false} onToggle={handleToggle} />
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
 
             <div className="rounded-2xl border bg-card p-4">
               <div className="mb-3">
@@ -334,7 +396,7 @@ export default function ModelDetailPage() {
                 <p className="mt-0.5 text-xs text-muted-foreground">{t('models.settingsHint')}</p>
               </div>
               <div className="space-y-3">
-                {members.map(m => (
+                {displayMembers.map(m => (
                   <ProviderSettingsRow
                     key={m.modelDbId}
                     model={m}
@@ -352,7 +414,7 @@ export default function ModelDetailPage() {
               <h2 className="text-sm font-medium">{t('models.providerIdsHeading')}</h2>
               <p className="mt-0.5 mb-3 text-xs text-muted-foreground">{t('models.providerIdsHint')}</p>
               <div className="space-y-1.5">
-                {members.map(m => (
+                {displayMembers.map(m => (
                   <div key={m.modelDbId} className="flex items-center gap-2 text-xs">
                     <span className="w-28 shrink-0 text-muted-foreground">{providerLabel(m)}</span>
                     <code className="min-w-0 flex-1 truncate font-mono text-[11px]">{m.modelId}</code>
