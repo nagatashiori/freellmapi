@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
-import { ChevronLeft, Save, Trash2 } from 'lucide-react'
+import { ChevronLeft, Save, Trash2, RefreshCw, Activity } from 'lucide-react'
 import { useI18n } from '@/i18n'
 import { apiFetch } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -30,6 +30,31 @@ type ModelSettingsPatch = {
   fallbackEnabled: boolean
 }
 
+interface ProbeResult {
+  modelDbId: number
+  platform?: string
+  modelId?: string
+  status: string
+  latency: number
+  error: string
+  enabled?: boolean
+}
+
+interface HealthRow {
+  modelDbId: number
+  healthStatus: string
+  lastProbedAt?: string | null
+}
+
+function statusMeta(status: string) {
+  const s = status || 'unknown'
+  if (s === 'ok' || s === 'success') return { label: '健康', color: '#4ade80', key: 'ok' as const }
+  if (s === 'error' || s === 'timeout') return { label: '错误', color: '#f87171', key: 'error' as const }
+  if (s === 'rate_limited') return { label: '限流', color: '#fbbf24', key: 'limited' as const }
+  if (s === 'probing') return { label: '测试中', color: '#6b7280', key: 'probing' as const }
+  return { label: '未知', color: '#6b7280', key: 'unknown' as const }
+}
+
 // One model's own page: lists every provider that serves it (this model now
 // fails over across these providers). Reached from the Models list; replaces the
 // old inline group expansion.
@@ -51,6 +76,17 @@ export default function ModelDetailPage() {
     queryKey: ['unified-key'],
     queryFn: () => apiFetch('/api/settings/api-key'),
   })
+  const { data: healthRaw } = useQuery<HealthRow[]>({
+    queryKey: ['health', 'models'],
+    queryFn: () => apiFetch('/api/fallback/health'),
+    refetchInterval: 30_000,
+  })
+
+  const [probeResults, setProbeResults] = useState<Map<number, ProbeResult>>(new Map())
+  const [probingAll, setProbingAll] = useState(false)
+
+  const healthMap = new Map<number, string>()
+  if (healthRaw) for (const h of healthRaw) healthMap.set(h.modelDbId, h.healthStatus)
 
   // Toggling a provider persists immediately (no save bar on this page): send the
   // full entries list with this one flipped, then refresh.
@@ -98,10 +134,77 @@ export default function ModelDetailPage() {
     })))
   }
 
+  const patchEnabledInCache = useCallback((modelDbId: number, enabled: boolean) => {
+    queryClient.setQueryData<FallbackEntry[]>(['fallback'], (old) => {
+      if (!old) return old
+      return old.map(row => row.modelDbId === modelDbId ? { ...row, enabled } : row)
+    })
+  }, [queryClient])
+
+  const applyProbe = useCallback((res: ProbeResult) => {
+    setProbeResults(prev => new Map(prev).set(res.modelDbId, res))
+    if (typeof res.enabled === 'boolean') {
+      patchEnabledInCache(res.modelDbId, res.enabled)
+    } else if (res.status === 'ok' || res.status === 'success') {
+      patchEnabledInCache(res.modelDbId, true)
+    } else if (res.status === 'error' || res.status === 'timeout') {
+      patchEnabledInCache(res.modelDbId, false)
+    }
+    setTimeout(() => {
+      queryClient.invalidateQueries({ queryKey: ['health'] })
+      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+    }, 400)
+  }, [patchEnabledInCache, queryClient])
+
+  const doProbe = useCallback(async (modelDbId: number) => {
+    setProbeResults(prev => new Map(prev).set(modelDbId, {
+      modelDbId, status: 'probing', latency: 0, error: '',
+    }))
+    try {
+      const res = await apiFetch(`/api/fallback/probe/${modelDbId}`, { method: 'POST' }) as ProbeResult
+      applyProbe(res)
+    } catch (e: any) {
+      applyProbe({
+        modelDbId, status: 'error', latency: 0, error: e.message || 'request failed', enabled: false,
+      })
+    }
+  }, [applyProbe])
+
+  const doProbeAllMembers = useCallback(async () => {
+    if (members.length === 0 || probingAll) return
+    setProbingAll(true)
+    for (const m of members) {
+      setProbeResults(prev => new Map(prev).set(m.modelDbId, {
+        modelDbId: m.modelDbId, status: 'probing', latency: 0, error: '',
+      }))
+      try {
+        const res = await apiFetch(`/api/fallback/probe/${m.modelDbId}`, { method: 'POST' }) as ProbeResult
+        applyProbe(res)
+      } catch (e: any) {
+        applyProbe({
+          modelDbId: m.modelDbId, status: 'error', latency: 0, error: e.message || 'request failed', enabled: false,
+        })
+      }
+      await new Promise(r => setTimeout(r, 200))
+    }
+    setProbingAll(false)
+  }, [members, probingAll, applyProbe])
+
   const label = members[0]?.groupLabel ?? members[0]?.displayName ?? canonicalId
   const quota = members.length ? groupQuotaBadge(members, t) : null
   const vision = members.some(m => m.supportsVision)
   const tools = members.some(m => m.supportsTools)
+
+  // Health summary for header
+  let okN = 0, errN = 0, limN = 0, unkN = 0
+  for (const m of members) {
+    const pr = probeResults.get(m.modelDbId)
+    const st = pr?.status || healthMap.get(m.modelDbId) || 'unknown'
+    if (st === 'ok' || st === 'success') okN++
+    else if (st === 'error' || st === 'timeout') errN++
+    else if (st === 'rate_limited') limN++
+    else unkN++
+  }
 
   // A ready-to-run request referencing this model by its unified id, so it fails
   // over across every provider above. Same base-URL derivation as the Keys page.
@@ -123,9 +226,17 @@ export default function ModelDetailPage() {
       <PageHeader title={label} description={t('models.providersHeading')} divider={false} actions={<ModelsTabs />} />
 
       <div className="space-y-6">
-        <Link to="/models/chat" className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
-          <ChevronLeft className="size-4" />{t('models.backToModels')}
-        </Link>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Link to="/models/chat" className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
+            <ChevronLeft className="size-4" />{t('models.backToModels')}
+          </Link>
+          {members.length > 0 && (
+            <Button size="sm" variant="outline" onClick={doProbeAllMembers} disabled={probingAll}>
+              {probingAll ? <RefreshCw className="size-3.5 animate-spin" /> : <Activity className="size-3.5" />}
+              {probingAll ? '测试中…' : '测试全部提供方'}
+            </Button>
+          )}
+        </div>
 
         {isLoading ? (
           <TableSkeleton rows={3} />
@@ -141,6 +252,66 @@ export default function ModelDetailPage() {
               {quota && <span title={quota.title} className="text-[11px] rounded-full px-2 py-0.5 bg-muted text-muted-foreground tabular-nums">{quota.text}</span>}
               {vision && <span title={t('models.visionTitle')} className="text-[11px] rounded-full px-2 py-0.5 bg-cyan-600/15 text-cyan-700 dark:bg-cyan-400/15 dark:text-cyan-400">{t('models.vision')}</span>}
               {tools && <span title={t('models.toolsTitle')} className="text-[11px] rounded-full px-2 py-0.5 bg-violet-600/15 text-violet-700 dark:bg-violet-400/15 dark:text-violet-400">{t('models.tools')}</span>}
+              <span className="text-[11px] rounded-full px-2 py-0.5 bg-[#4ade80]/15 text-[#4ade80]">{okN} 健康</span>
+              <span className="text-[11px] rounded-full px-2 py-0.5 bg-[#f87171]/15 text-[#f87171]">{errN} 错误</span>
+              {limN > 0 && <span className="text-[11px] rounded-full px-2 py-0.5 bg-[#fbbf24]/15 text-[#fbbf24]">{limN} 限流</span>}
+              {unkN > 0 && <span className="text-[11px] rounded-full px-2 py-0.5 bg-muted text-muted-foreground">{unkN} 未知</span>}
+            </div>
+
+            {/* Per-provider health + test (main request) */}
+            <div className="rounded-2xl border bg-card overflow-hidden">
+              <div className="px-4 py-3 border-b flex items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-medium">提供方健康</h2>
+                  <p className="text-xs text-muted-foreground mt-0.5">每个渠道单独测试；成功自动开启，失败自动关闭该渠道。</p>
+                </div>
+              </div>
+              <div className="divide-y divide-border/40">
+                {members.map(m => {
+                  const pr = probeResults.get(m.modelDbId)
+                  const status = pr?.status || healthMap.get(m.modelDbId) || 'unknown'
+                  const meta = statusMeta(status)
+                  const probing = status === 'probing'
+                  const isEnabled = pr && pr.enabled !== undefined ? pr.enabled : m.enabled
+                  return (
+                    <div key={m.modelDbId} className="px-4 py-2.5" style={{ opacity: isEnabled ? 1 : 0.45 }}>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {probing ? (
+                          <RefreshCw className="size-3 animate-spin shrink-0" style={{ color: meta.color }} />
+                        ) : (
+                          <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: meta.color }} />
+                        )}
+                        <span className="text-xs font-medium w-24 shrink-0 truncate">{providerLabel(m)}</span>
+                        <code className="text-[11px] font-mono text-muted-foreground truncate flex-1 min-w-[8rem]">{m.modelId}</code>
+                        <span className="text-[10px] text-muted-foreground w-14 text-right tabular-nums">
+                          {pr && pr.status !== 'probing' ? (pr.latency > 0 ? `${pr.latency}ms` : '-') : '-'}
+                        </span>
+                        <span className="text-[10px] w-8 text-right text-muted-foreground">{isEnabled ? '开' : '关'}</span>
+                        <span className="text-[10px] w-12 text-right font-medium" style={{ color: meta.color }}>{meta.label}</span>
+                        <button
+                          type="button"
+                          disabled={probing || probingAll}
+                          onClick={() => doProbe(m.modelDbId)}
+                          className="text-[10px] px-2 py-0.5 rounded border bg-background hover:bg-muted disabled:opacity-30"
+                        >
+                          {probing ? '…' : '测试'}
+                        </button>
+                        <Switch
+                          size="sm"
+                          checked={!!isEnabled}
+                          disabled={saveMutation.isPending}
+                          onCheckedChange={(v) => handleToggle(m.modelDbId, v)}
+                        />
+                      </div>
+                      {pr?.error && (
+                        <pre className="mt-1.5 text-[10px] text-muted-foreground bg-muted/50 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
+                          {pr.error}
+                        </pre>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
             </div>
 
             {/* Per-provider stats (same columns as the Models table) */}

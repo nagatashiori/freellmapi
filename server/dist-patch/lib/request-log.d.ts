@@ -1,0 +1,2 @@
+export declare function logRequest(platform: string, modelId: string, keyId: number, status: string, inputTokens: number, outputTokens: number, latencyMs: number, error: string | null, ttfbMs?: number | null, requestedModel?: string | null): void;
+//# sourceMappingURL=request-log.d.ts.map

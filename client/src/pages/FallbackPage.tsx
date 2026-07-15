@@ -15,7 +15,7 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
-import { Boxes, Search, X } from 'lucide-react'
+import { Boxes, Search, X, Activity } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useI18n } from '@/i18n'
 import { apiFetch } from '@/lib/api'
@@ -344,6 +344,12 @@ export default function FallbackPage() {
                     </button>
                   ))}
                 </div>
+                <Link to="/dashboard">
+                  <button className="px-3 py-1.5 text-xs rounded-lg border border-foreground/20 text-foreground bg-card hover:bg-muted font-medium inline-flex items-center gap-1.5">
+                    <Activity className="size-3.5" />
+                    Status
+                  </button>
+                </Link>
               </div>
             </div>
 
