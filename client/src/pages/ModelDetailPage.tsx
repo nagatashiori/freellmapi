@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { ChevronLeft, Save, Trash2, RefreshCw, Activity } from 'lucide-react'
@@ -54,6 +54,37 @@ interface ProbeResult {
   error: string
   enabled?: boolean
 }
+
+// Server probe hard-timeout is 15s; client waits a bit longer for JSON roundtrip.
+const PROBE_CLIENT_TIMEOUT_MS = 18_000
+
+async function probeOne(modelDbId: number): Promise<ProbeResult> {
+  const ctrl = new AbortController()
+  const tmr = window.setTimeout(() => ctrl.abort(), PROBE_CLIENT_TIMEOUT_MS)
+  try {
+    return await apiFetch(`/api/fallback/probe/${modelDbId}`, {
+      method: 'POST',
+      signal: ctrl.signal,
+    }) as ProbeResult
+  } catch (e: any) {
+    if (e?.name === 'AbortError' || /aborted|timeout/i.test(String(e?.message || e))) {
+      return {
+        modelDbId,
+        platform: '',
+        modelId: '',
+        status: 'timeout',
+        latency: PROBE_CLIENT_TIMEOUT_MS,
+        error: `timeout after ${PROBE_CLIENT_TIMEOUT_MS}ms`,
+        enabled: false,
+      }
+    }
+    throw e
+  } finally {
+    window.clearTimeout(tmr)
+  }
+}
+
+
 
 interface HealthRow {
   modelDbId: number
@@ -206,7 +237,7 @@ export default function ModelDetailPage() {
       modelDbId, status: 'probing', latency: 0, error: '',
     }))
     try {
-      const res = await apiFetch(`/api/fallback/probe/${modelDbId}`, { method: 'POST' }) as ProbeResult
+      const res = await probeOne(modelDbId)
       applyProbe(res)
     } catch (e: any) {
       applyProbe({
@@ -223,7 +254,7 @@ export default function ModelDetailPage() {
         modelDbId: m.modelDbId, status: 'probing', latency: 0, error: '',
       }))
       try {
-        const res = await apiFetch(`/api/fallback/probe/${m.modelDbId}`, { method: 'POST' }) as ProbeResult
+        const res = await probeOne(m.modelDbId)
         applyProbe(res)
       } catch (e: any) {
         applyProbe({

@@ -1,29 +1,13 @@
 import type { ReactNode } from 'react'
-import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import {
-  arrayMove,
-  SortableContext,
-  sortableKeyboardCoordinates,
-  verticalListSortingStrategy,
-  useSortable,
-} from '@dnd-kit/sortable'
+import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import {
-  DndContext,
-  closestCenter,
-  KeyboardSensor,
-  PointerSensor,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-} from '@dnd-kit/core'
 
 import { useI18n } from '@/i18n'
 import { CopyButton } from '@/components/copy-button'
 import { Switch } from '@/components/ui/switch'
 import { Tooltip } from '@/components/tooltip'
-import { Trash2 } from 'lucide-react'
+import { Play, RefreshCw, Trash2 } from 'lucide-react'
 import {
   cleanQuotaLabel,
   formatContext,
@@ -54,7 +38,7 @@ export function AxisBar({ value, color }: { value: number | undefined; color: st
 
 // The shared table header for the unified model/provider table — used by the
 // Models page and the per-model detail page so their columns line up.
-export function ModelTableHead() {
+export function ModelTableHead({ showProbe = false }: { showProbe?: boolean }) {
   const { t } = useI18n()
   return (
     <thead>
@@ -81,6 +65,7 @@ export function ModelTableHead() {
             <span className="underline decoration-dotted underline-offset-2 cursor-help">{t('strategies.scoreColumn')}</span>
           </Tooltip>
         </th>
+        {showProbe && <th className="py-2 pr-3 font-medium text-center">测试</th>}
         <th className="py-2 pr-3 font-medium text-right">{t('models.columnOn')}</th>
         <th className="py-2 pr-2 w-8"></th>
       </tr>
@@ -232,7 +217,7 @@ export const dragDots = (
 // The collapsed header row for a logical-model group: name, provider count,
 // union vision/tools badges, the best member's axis bars + score, and a single
 // switch that enables/disables every provider in the group.
-export function GroupHeaderCells({ group, rank, dragHandle, onToggleGroup, onDeleteGroup, batchMode, selected, onToggleSelect, editingRank, editValue, onEditChange, onEditClick, onEditSubmit, deletingKey }: {
+export function GroupHeaderCells({ group, rank, dragHandle, onToggleGroup, onDeleteGroup, batchMode, selected, onToggleSelect, editingRank, editValue, onEditChange, onEditClick, onEditSubmit, deletingKey, probeStatus, probeLatency, onProbeGroup, probingAll, showProbe = false }: {
   group: ModelGroupRow
   rank: number
   dragHandle?: ReactNode
@@ -247,6 +232,11 @@ export function GroupHeaderCells({ group, rank, dragHandle, onToggleGroup, onDel
   onEditClick?: () => void
   onEditSubmit?: () => void
   deletingKey?: string | null
+  probeStatus?: string
+  probeLatency?: number
+  onProbeGroup?: (group: ModelGroupRow) => void
+  probingAll?: boolean
+  showProbe?: boolean
 }) {
   const { t } = useI18n()
   const anyEnabled = group.members.some(m => m.enabled)
@@ -328,6 +318,35 @@ export function GroupHeaderCells({ group, rank, dragHandle, onToggleGroup, onDel
       <td className="py-2 pr-3 align-middle"><AxisBar value={best.intelligence} color="#a855f7" /></td>
       <td className="py-2 pr-3 align-middle font-mono text-[11px] text-muted-foreground tabular-nums">{guard < 0.999 ? `×${guard.toFixed(2)}` : '—'}</td>
       <td className="py-2 pr-3 align-middle text-right font-mono text-xs font-medium tabular-nums">{best.score !== undefined ? best.score.toFixed(3) : '–'}</td>
+      {showProbe && (
+        <td className="py-2 pr-3 align-middle text-right" onClick={e => e.stopPropagation()}>
+          {onProbeGroup && (() => {
+            const status = probeStatus
+            const probing = status === 'probing'
+            const ok = status === 'ok' || status === 'success'
+            const err = status === 'error' || status === 'timeout'
+            const limited = status === 'rate_limited'
+            const color = ok ? '#4ade80' : err ? '#f87171' : limited ? '#fbbf24' : '#6b7280'
+            return (
+              <div className="inline-flex items-center gap-1.5 justify-end">
+                {status && status !== 'probing' && (
+                  <span className="text-[10px] tabular-nums" style={{ color }} title={`${status}${probeLatency ? ` · ${probeLatency}ms` : ''}`}>
+                    {probeLatency ? `${probeLatency}ms` : status}
+                  </span>
+                )}
+                <button
+                  onClick={() => onProbeGroup(group)}
+                  disabled={probing || probingAll}
+                  className="text-[10px] px-1.5 py-0.5 rounded border bg-card hover:bg-muted disabled:opacity-40 inline-flex items-center gap-1 shrink-0"
+                  title="测试此模型组所有 provider"
+                >
+                  {probing ? <RefreshCw className="size-3 animate-spin" /> : <Play className="size-3" />}
+                </button>
+              </div>
+            )
+          })()}
+        </td>
+      )}
       <td className="py-2 pr-3 align-middle text-right" onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-1.5 justify-end">
           {batchMode && (
@@ -360,7 +379,7 @@ export function GroupHeaderCells({ group, rank, dragHandle, onToggleGroup, onDel
   )
 }
 
-export function SortableGroupRow({ group, rank, onToggleGroup, onDeleteGroup, batchMode, selectedIds, onToggleSelect, editingRankId, editRankValue, onEditChange, onEditClick, onEditSubmit, deletingKey }: {
+export function SortableGroupRow({ group, rank, onToggleGroup, onDeleteGroup, batchMode, selectedIds, onToggleSelect, editingRankId, editRankValue, onEditChange, onEditClick, onEditSubmit, deletingKey, probeStatus, probeLatency, onProbeGroup, probingAll, showProbe = false }: {
   group: ModelGroupRow
   rank: number
   onToggleGroup: (memberIds: number[], enabled: boolean) => void
@@ -373,6 +392,12 @@ export function SortableGroupRow({ group, rank, onToggleGroup, onDeleteGroup, ba
   onEditChange?: (v: string) => void
   onEditClick?: () => void
   onEditSubmit?: (key: string) => void
+  deletingKey?: string | null
+  probeStatus?: string
+  probeLatency?: number
+  onProbeGroup?: (group: ModelGroupRow) => void
+  probingAll?: boolean
+  showProbe?: boolean
 }) {
   const { t } = useI18n()
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: `grp:${group.key}` })
@@ -408,6 +433,11 @@ export function SortableGroupRow({ group, rank, onToggleGroup, onDeleteGroup, ba
         onEditClick={onEditClick}
         onEditSubmit={() => onEditSubmit?.(group.key)}
         deletingKey={deletingKey}
+        probeStatus={probeStatus}
+        probeLatency={probeLatency}
+        onProbeGroup={onProbeGroup}
+        probingAll={probingAll}
+        showProbe={showProbe}
       />
     </tr>
   )

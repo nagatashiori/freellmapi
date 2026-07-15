@@ -1,19 +1,11 @@
-import { useMemo, useState, useCallback } from 'react'
+import { useMemo, useState, useCallback, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, RefreshCw, Play, ChevronDown, ChevronRight } from 'lucide-react'
+import { Activity, RefreshCw, Play, ChevronDown, ChevronRight, Trash2 } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
+import { useProbe } from '@/lib/use-probe'
 import { EmptyState } from '@/components/empty-state'
 import { Button } from '@/components/ui/button'
 
-interface ProbeResult {
-  modelDbId: number
-  platform: string
-  modelId: string
-  status: string
-  latency: number
-  error: string
-  enabled?: boolean
-}
 
 interface ProbeHistoryItem {
   modelDbId: number
@@ -41,7 +33,7 @@ export default function DashboardPage() {
 
   const { data: probeHistory } = useQuery<{ platforms: Record<string, ProbeHistoryItem[]> }>({
     queryKey: ['probe-history'],
-    queryFn: () => apiFetch('/api/fallback/probe-history?hours=24&perPlatform=200'),
+    queryFn: () => apiFetch('/api/fallback/probe-history?hours=24&perPlatform=600'),
     refetchInterval: 60_000,
   })
 
@@ -51,12 +43,23 @@ export default function DashboardPage() {
   const entries: any[] = []
   if (fallbackRaw) for (const fb of fallbackRaw) entries.push({ ...fb, healthStatus: healthMap.get(fb.modelDbId) ?? 'unknown' })
 
-  const [probeResults, setProbeResults] = useState<Map<number, ProbeResult>>(new Map())
-  const [probingAll, setProbingAll] = useState(false)
-  const [probeProgress, setProbeProgress] = useState('')
+  const { probeResults, probingAll, probeProgress, doProbe, doProbeAll, doProbeGroup } = useProbe()
   const [expandedModel, setExpandedModel] = useState<number | null>(null)
   const [showDisabled, setShowDisabled] = useState(true)
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    if (typeof window === 'undefined') return new Set()
+    const saved = localStorage.getItem('dashboard-collapsed-platforms')
+    if (saved) {
+      try {
+        return new Set(JSON.parse(saved))
+      } catch {
+        return new Set()
+      }
+    }
+    // Default: All collapsed
+    return new Set()
+  })
+  const [deletingId, setDeletingId] = useState<string | number | null>(null)
 
   // Build per-model history lookup: modelDbId → ProbeHistoryItem[]
   const modelHistoryMap = useMemo(() => {
@@ -79,13 +82,6 @@ export default function DashboardPage() {
     })
   }, [qc])
 
-  const refreshLists = useCallback(() => {
-    setTimeout(() => {
-      qc.invalidateQueries({ queryKey: ['health'] })
-      qc.invalidateQueries({ queryKey: ['fallback'] })
-    }, 400)
-  }, [qc])
-
   const doToggle = useCallback(async (modelDbId: number, currentEnabled: boolean) => {
     const newEnabled = !currentEnabled
     // Optimistic update
@@ -102,32 +98,19 @@ export default function DashboardPage() {
     }
   }, [patchEnabledInCache, qc])
 
-  const applyProbeResult = useCallback((res: ProbeResult) => {
-    setProbeResults(prev => new Map(prev).set(res.modelDbId, res))
-    if (typeof res.enabled === 'boolean') {
-      patchEnabledInCache(res.modelDbId, res.enabled)
-    } else if (res.status === 'ok' || res.status === 'success') {
-      patchEnabledInCache(res.modelDbId, true)
-    } else if (res.status === 'error' || res.status === 'timeout') {
-      patchEnabledInCache(res.modelDbId, false)
+  const doDeleteGroup = useCallback(async (platform: string, models: any[]) => {
+    if (deletingId === platform) { // Use platform string as group id
+      try {
+        await Promise.all(models.map(m => apiFetch(`/api/models/${m.modelDbId}`, { method: 'DELETE' })))
+        qc.invalidateQueries({ queryKey: ['fallback'] })
+        qc.invalidateQueries({ queryKey: ['health'] })
+      } catch { /* ignore */ }
+      setDeletingId(null)
+    } else {
+      setDeletingId(platform)
+      setTimeout(() => setDeletingId(prev => prev === platform ? null : prev), 3000)
     }
-  }, [patchEnabledInCache])
-
-  const doProbe = useCallback(async (modelDbId: number) => {
-    setProbeResults(prev => new Map(prev).set(modelDbId, {
-      modelDbId, platform: '', modelId: '', status: 'probing', latency: 0, error: '',
-    }))
-    try {
-      const res = await apiFetch(`/api/fallback/probe/${modelDbId}`, { method: 'POST' }) as ProbeResult
-      applyProbeResult(res)
-      refreshLists()
-    } catch (e: any) {
-      setProbeResults(prev => new Map(prev).set(modelDbId, {
-        modelDbId, platform: '', modelId: '', status: 'error', latency: 0, error: e.message, enabled: false,
-      }))
-      patchEnabledInCache(modelDbId, false)
-    }
-  }, [applyProbeResult, refreshLists, patchEnabledInCache])
+  }, [deletingId, qc])
 
   const filtered = showDisabled ? entries : entries.filter(e => e.enabled)
 
@@ -143,84 +126,32 @@ export default function DashboardPage() {
       .sort((a, b) => b.models.length - a.models.length || a.platform.localeCompare(b.platform))
   }, [filtered])
 
+  // Default: All platforms collapsed initially if no memory
+  useEffect(() => {
+    if (typeof window !== 'undefined' && !localStorage.getItem('dashboard-collapsed-platforms')) {
+      const allPlatforms = groups.map(g => g.platform)
+      setCollapsed(new Set(allPlatforms))
+      localStorage.setItem('dashboard-collapsed-platforms', JSON.stringify(allPlatforms))
+    }
+  }, [groups])
+
   const probeList = useMemo(() => {
-    const list: any[] = []
+    const list: { modelDbId: number; platform: string; modelId: string }[] = []
     for (const g of groups) {
       for (const m of g.models) {
-        list.push(m)
+        list.push({ modelDbId: m.modelDbId, platform: m.platform, modelId: m.modelId })
         if (list.length >= 300) return list
       }
     }
     return list
   }, [groups])
 
-  const doProbeAll = useCallback(async () => {
-    const list = probeList
-    if (list.length === 0) return
-    setProbingAll(true)
-    let ok = 0, err = 0, limited = 0
-    setProbeProgress(`0/${list.length}`)
+  const handleProbeAll = useCallback(() => doProbeAll(probeList), [doProbeAll, probeList])
 
-    for (let i = 0; i < list.length; i++) {
-      const e = list[i]
-      setProbeResults(prev => new Map(prev).set(e.modelDbId, {
-        modelDbId: e.modelDbId, platform: e.platform, modelId: e.modelId,
-        status: 'probing', latency: 0, error: '',
-      }))
-      setProbeProgress(`${i + 1}/${list.length} · ${ok} 成功 · ${err} 失败 · ${limited} 限流`)
-      try {
-        const res = await apiFetch(`/api/fallback/probe/${e.modelDbId}`, { method: 'POST' }) as ProbeResult
-        applyProbeResult(res)
-        if (res.status === 'ok' || res.status === 'success') ok++
-        else if (res.status === 'rate_limited') limited++
-        else err++
-      } catch (ex: any) {
-        setProbeResults(prev => new Map(prev).set(e.modelDbId, {
-          modelDbId: e.modelDbId, platform: e.platform, modelId: e.modelId,
-          status: 'error', latency: 0, error: ex.message || 'request failed', enabled: false,
-        }))
-        patchEnabledInCache(e.modelDbId, false)
-        err++
-      }
-      await new Promise(r => setTimeout(r, 200))
-    }
-    setProbeProgress(`完成 · ${list.length} · ${ok} 成功 · ${err} 失败 · ${limited} 限流`)
-    refreshLists()
-    setProbingAll(false)
-  }, [probeList, applyProbeResult, refreshLists, patchEnabledInCache])
-
-  const doProbePlatform = useCallback(async (platform: string, models: any[]) => {
-    if (models.length === 0 || probingAll) return
-    setProbingAll(true)
-    let ok = 0, err = 0, limited = 0
-    setProbeProgress(`${platform}: 0/${models.length}`)
-    for (let i = 0; i < models.length; i++) {
-      const e = models[i]
-      setProbeResults(prev => new Map(prev).set(e.modelDbId, {
-        modelDbId: e.modelDbId, platform: e.platform, modelId: e.modelId,
-        status: 'probing', latency: 0, error: '',
-      }))
-      setProbeProgress(`${platform}: ${i + 1}/${models.length} · ${ok} 成功 · ${err} 失败`)
-      try {
-        const res = await apiFetch(`/api/fallback/probe/${e.modelDbId}`, { method: 'POST' }) as ProbeResult
-        applyProbeResult(res)
-        if (res.status === 'ok' || res.status === 'success') ok++
-        else if (res.status === 'rate_limited') limited++
-        else err++
-      } catch (ex: any) {
-        setProbeResults(prev => new Map(prev).set(e.modelDbId, {
-          modelDbId: e.modelDbId, platform: e.platform, modelId: e.modelId,
-          status: 'error', latency: 0, error: ex.message || 'request failed', enabled: false,
-        }))
-        patchEnabledInCache(e.modelDbId, false)
-        err++
-      }
-      await new Promise(r => setTimeout(r, 200))
-    }
-    setProbeProgress(`${platform} 完成 · ${ok} 成功 · ${err} 失败 · ${limited} 限流`)
-    refreshLists()
-    setProbingAll(false)
-  }, [probingAll, applyProbeResult, refreshLists, patchEnabledInCache])
+  const handleProbePlatform = useCallback((platform: string, models: any[]) => {
+    const list = models.map(m => ({ modelDbId: m.modelDbId, platform: m.platform, modelId: m.modelId }))
+    doProbeGroup(platform, list)
+  }, [doProbeGroup])
 
   const totalOn = entries.filter(e => e.enabled).length
   const totalOff = entries.filter(e => !e.enabled).length
@@ -235,6 +166,7 @@ export default function DashboardPage() {
       const next = new Set(prev)
       if (next.has(platform)) next.delete(platform)
       else next.add(platform)
+      localStorage.setItem('dashboard-collapsed-platforms', JSON.stringify([...next]))
       return next
     })
   }
@@ -311,6 +243,17 @@ export default function DashboardPage() {
           >
             {probing ? '…' : '测试'}
           </button>
+          <button
+            onClick={e => { e.stopPropagation(); doDeleteGroup(entry.platform, [entry]) }}
+            disabled={probing || probingAll}
+            className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ml-1 ${
+              deletingId === entry.platform
+                ? 'bg-[#f87171]/20 border border-[#f87171]/50 text-[#f87171]'
+                : 'border border-transparent text-muted-foreground hover:text-[#f87171] hover:border-[#f87171]/30'
+            }`}
+          >
+            {deletingId === entry.platform ? '确认?' : <Trash2 className="size-3" />}
+          </button>
         </div>
         {isExpanded && pr && pr.error && (
           <div className="pb-2 px-2">
@@ -340,7 +283,7 @@ export default function DashboardPage() {
           >
             {showDisabled ? '隐藏已关闭' : '显示已关闭'}
           </button>
-          <Button size="sm" variant="outline" onClick={doProbeAll} disabled={probingAll || probeList.length === 0}>
+          <Button size="sm" variant="outline" onClick={handleProbeAll} disabled={probingAll || probeList.length === 0}>
             {probingAll ? <RefreshCw className="size-3.5 animate-spin" /> : <Play className="size-3.5" />}
             {probingAll ? '测试中…' : '全部测试'}
           </Button>
@@ -403,10 +346,22 @@ export default function DashboardPage() {
                   <button
                     type="button"
                     disabled={probingAll}
-                    onClick={() => doProbePlatform(g.platform, g.models)}
+                    onClick={() => handleProbePlatform(g.platform, g.models)}
                     className="text-[10px] px-2 py-0.5 rounded border bg-card hover:bg-muted disabled:opacity-30 shrink-0"
                   >
                     测本组
+                  </button>
+                  <button
+                    type="button"
+                    disabled={probingAll}
+                    onClick={() => doDeleteGroup(g.platform, g.models)}
+                    className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ml-1 transition-colors ${
+                      deletingId === g.platform
+                        ? 'bg-[#f87171]/20 border border-[#f87171]/30 text-[#f87171]'
+                        : 'border border-transparent text-muted-foreground hover:text-[#f87171] hover:border-[#f87171]/30'
+                    }`}
+                  >
+                    {deletingId === g.platform ? '确认?' : <Trash2 className="size-3.5" />}
                   </button>
                 </div>
                 {!isCollapsed && (

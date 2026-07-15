@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   DndContext,
@@ -15,10 +15,11 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
-import { Boxes, Search, X, Activity, Trash2 } from 'lucide-react'
+import { Boxes, Search, X, Activity, Play, RefreshCw } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useI18n } from '@/i18n'
 import { apiFetch } from '@/lib/api'
+import { useProbe } from '@/lib/use-probe'
 import {
   buildGroups,
   groupMaxContext,
@@ -103,6 +104,8 @@ export default function FallbackPage() {
     refetchInterval: 15_000,
   })
 
+  const { probeResults, probingAll, probeProgress, doProbeAll, doProbeGroup } = useProbe()
+
   const saveMutation = useMutation({
     mutationFn: (data: { modelDbId: number; priority: number; enabled: boolean }[]) =>
       apiFetch('/api/fallback', { method: 'PUT', body: JSON.stringify(data) }),
@@ -171,6 +174,38 @@ export default function FallbackPage() {
     return true
   })
   const draggable = isManual && !filtersActive
+
+  // Probe list: every configured model behind the visible groups. Drives the
+  // "全部测试" button — results sync to /dashboard via the shared ['fallback']
+  // query (the probe hook invalidates it).
+  const probeList = useMemo(() => {
+    const list: { modelDbId: number; platform: string; modelId: string }[] = []
+    for (const g of visibleGroups) {
+      for (const m of g.members) {
+        list.push({ modelDbId: m.modelDbId, platform: m.platform, modelId: m.modelId })
+        if (list.length >= 300) return list
+      }
+    }
+    return list
+  }, [visibleGroups])
+
+  // Group probe state: prefers an "ok" member (the group is healthy if any
+  // provider answers); otherwise the most recent non-probing result. Returns
+  // 'probing' when every member is still mid-probe.
+  const groupProbeState = useCallback((g: ModelGroupRow): { status?: string; latency?: number } => {
+    const results = g.members.map(m => probeResults.get(m.modelDbId)).filter(Boolean)
+    if (results.length === 0) return {}
+    const ok = results.find(r => r!.status === 'ok' || r!.status === 'success')
+    if (ok) return { status: ok!.status, latency: ok!.latency }
+    if (results.every(r => r!.status === 'probing')) return { status: 'probing' }
+    const latest = results[results.length - 1]!
+    return { status: latest.status, latency: latest.latency }
+  }, [probeResults])
+
+  const handleProbeGroup = useCallback((g: ModelGroupRow) => {
+    const list = g.members.map(m => ({ modelDbId: m.modelDbId, platform: m.platform, modelId: m.modelId }))
+    doProbeGroup(g.label, list)
+  }, [doProbeGroup])
 
   // Progressive rendering: grow the row budget whenever the sentinel below the
   // table scrolls near the viewport (drag autoscroll extends it too).
@@ -410,6 +445,15 @@ export default function FallbackPage() {
                 >
                   {batchMode ? '退出选择' : '选择'}
                 </button>
+                <button
+                  onClick={() => doProbeAll(probeList)}
+                  disabled={probingAll || probeList.length === 0}
+                  className="px-3 py-1.5 text-xs rounded-lg border border-foreground/20 text-foreground bg-card hover:bg-muted disabled:opacity-50 font-medium inline-flex items-center gap-1.5"
+                  title={probeProgress || `测试全部 ${probeList.length} 个模型`}
+                >
+                  {probingAll ? <RefreshCw className="size-3.5 animate-spin" /> : <Play className="size-3.5" />}
+                  {probingAll ? '测试中…' : '全部测试'}
+                </button>
                 <Link to="/dashboard">
                   <button className="px-3 py-1.5 text-xs rounded-lg border border-foreground/20 text-foreground bg-card hover:bg-muted font-medium inline-flex items-center gap-1.5">
                     <Activity className="size-3.5" />
@@ -418,6 +462,10 @@ export default function FallbackPage() {
                 </Link>
               </div>
             </div>
+
+            {probeProgress && (
+              <div className="text-xs text-muted-foreground tabular-nums">{probeProgress}</div>
+            )}
 
             {filtersActive && (
               <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -439,10 +487,12 @@ export default function FallbackPage() {
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleGroupedDragEnd}>
                 <div className="rounded-2xl border overflow-x-auto">
                   <table className="w-full text-sm">
-                    <ModelTableHead />
+                    <ModelTableHead showProbe />
                     <SortableContext items={renderedGroups.map(g => `grp:${g.key}`)} strategy={verticalListSortingStrategy}>
                       <tbody>
-                        {renderedGroups.map(g => (
+                        {renderedGroups.map(g => {
+                          const ps = groupProbeState(g)
+                          return (
                           <SortableGroupRow key={g.key} group={g} rank={rankByKey.get(g.key) ?? 0} onToggleGroup={handleGroupToggle}
                             onDeleteGroup={doDeleteGroup}
                             batchMode={batchMode}
@@ -454,8 +504,14 @@ export default function FallbackPage() {
                             onEditClick={() => handleRankEditClick(g)}
                             onEditSubmit={handleRankEditSubmit}
                             deletingKey={deletingGroup}
+                            probeStatus={ps.status}
+                            probeLatency={ps.latency}
+                            onProbeGroup={handleProbeGroup}
+                            probingAll={probingAll}
+                            showProbe
                           />
-                        ))}
+                          )
+                        })}
                       </tbody>
                     </SortableContext>
                   </table>
@@ -464,7 +520,7 @@ export default function FallbackPage() {
             ) : (
               <div className="rounded-2xl border overflow-x-auto">
                 <table className="w-full text-sm">
-                  <ModelTableHead />
+                  <ModelTableHead showProbe />
                   <tbody>
                     {renderedGroups.map(g => (
                       <tr
@@ -472,6 +528,7 @@ export default function FallbackPage() {
                         onClick={() => navigate(`/models/chat/${encodeURIComponent(g.members[0].canonicalId ?? g.members[0].modelId)}`)}
                         className={`group/row border-b last:border-0 cursor-pointer transition-colors hover:[&>td]:bg-muted/50 [&>td:first-child]:rounded-l-lg [&>td:last-child]:rounded-r-lg ${g.members.some(m => m.enabled) ? '' : 'opacity-50'}`}
                       >
+                        {(() => { const ps = groupProbeState(g); return (
                         <GroupHeaderCells group={g} rank={rankByKey.get(g.key) ?? 0} onToggleGroup={handleGroupToggle}
                           onDeleteGroup={doDeleteGroup}
                           batchMode={batchMode}
@@ -483,7 +540,13 @@ export default function FallbackPage() {
                           onEditClick={() => handleRankEditClick(g)}
                           onEditSubmit={() => handleRankEditSubmit(g.key)}
                           deletingKey={deletingGroup}
+                          probeStatus={ps.status}
+                          probeLatency={ps.latency}
+                          onProbeGroup={handleProbeGroup}
+                          probingAll={probingAll}
+                          showProbe
                         />
+                        ) })()}
                       </tr>
                     ))}
                   </tbody>
