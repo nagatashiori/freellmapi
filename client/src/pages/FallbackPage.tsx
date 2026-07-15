@@ -15,7 +15,7 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
-import { Boxes, Search, X, Activity } from 'lucide-react'
+import { Boxes, Search, X, Activity, Trash2 } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useI18n } from '@/i18n'
 import { apiFetch } from '@/lib/api'
@@ -74,6 +74,12 @@ export default function FallbackPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [localEntries, setLocalEntries] = useState<FallbackEntry[] | null>(null)
+  const [batchMode, setBatchMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [deletingGroup, setDeletingGroup] = useState<string | null>(null)
+  const [editingRankKey, setEditingRankKey] = useState<string | null>(null)
+  const [editRankValue, setEditRankValue] = useState('')
+  const [showDisabled, setShowDisabled] = useState(true)
 
   // Catalog search + filter state (#343).
   const [search, setSearch] = useState('')
@@ -139,6 +145,7 @@ export default function FallbackPage() {
   // ── Model unification: a model served by several providers is always shown as
   // one logical row that links to its own page (the on/off toggle was removed). ─
   const orderedGroups = buildGroups(rows, isManual)
+  const displayGroups = showDisabled ? orderedGroups : orderedGroups.filter(g => g.members.some(m => m.enabled))
 
   // Catalog search + filters (#343). Filtering operates on whole logical-model
   // groups; rank stays the model's position in the full chain so the numbers
@@ -147,7 +154,7 @@ export default function FallbackPage() {
   const rankByKey = new Map(orderedGroups.map((g, i) => [g.key, i + 1]))
   const query = search.trim().toLowerCase()
   const filtersActive = query !== '' || filterVision || filterTools || minContext > 0
-  const visibleGroups = orderedGroups.filter(g => {
+  const visibleGroups = displayGroups.filter(g => {
     if (filterVision && !g.members.some(m => m.supportsVision)) return false
     if (filterTools && !g.members.some(m => m.supportsTools)) return false
     if (minContext > 0 && groupMaxContext(g.members) < minContext) return false
@@ -218,6 +225,48 @@ export default function FallbackPage() {
     persistGroupOrder(arrayMove(orderedGroups, oldI, newI))
   }
 
+  function doDeleteGroup(group: ModelGroupRow) {
+    if (deletingGroup === group.key) {
+      Promise.all(group.members.map(m =>
+        apiFetch(`/api/models/${m.modelDbId}`, { method: 'DELETE' })
+      )).then(() => {
+        queryClient.invalidateQueries({ queryKey: ['fallback'] })
+        setDeletingGroup(null)
+      }).catch(() => setDeletingGroup(null))
+    } else {
+      setDeletingGroup(group.key)
+      setTimeout(() => setDeletingGroup(prev => prev === group.key ? null : prev), 3000)
+    }
+  }
+
+  function deleteSelected() {
+    if (selectedIds.size === 0) return
+    Promise.all([...selectedIds].map(id =>
+      apiFetch(`/api/models/${id}`, { method: 'DELETE' })
+    )).then(() => {
+      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      setSelectedIds(new Set())
+      setBatchMode(false)
+    })
+  }
+
+  function handleRankEditClick(group: ModelGroupRow) {
+    setEditingRankKey(group.key)
+    setEditRankValue(String(rankByKey.get(group.key) ?? 1))
+  }
+
+  function handleRankEditSubmit(key: string) {
+    const targetRank = parseInt(editRankValue)
+    setEditingRankKey(null)
+    if (isNaN(targetRank) || targetRank < 1 || targetRank > orderedGroups.length) return
+    const idx = orderedGroups.findIndex(g => g.key === key)
+    if (idx < 0) return
+    const newGroups = [...orderedGroups]
+    const g = newGroups.splice(idx, 1)[0]
+    newGroups.splice(Math.min(targetRank - 1, newGroups.length), 0, g)
+    persistGroupOrder(newGroups)
+  }
+
   return (
     <div>
       <PageHeader
@@ -284,7 +333,7 @@ export default function FallbackPage() {
         {/* Unified routing / fallback table */}
         {isLoading ? (
           <TableSkeleton rows={8} />
-        ) : orderedGroups.length === 0 ? (
+        ) : displayGroups.length === 0 ? (
           <EmptyState
             icon={Boxes}
             title={t('models.noModelsTitle')}
@@ -344,6 +393,23 @@ export default function FallbackPage() {
                     </button>
                   ))}
                 </div>
+                {!showDisabled && displayGroups.length < orderedGroups.length && (
+                  <span className="text-xs text-muted-foreground hidden sm:inline">
+                    已隐藏 {orderedGroups.length - displayGroups.length} 个
+                  </span>
+                )}
+                <button
+                  onClick={() => setShowDisabled(s => !s)}
+                  className={`px-3 py-1.5 text-xs rounded-lg border transition-colors whitespace-nowrap ${showDisabled ? 'bg-foreground text-background border-foreground font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}`}
+                >
+                  {showDisabled ? '隐藏已关闭' : '显示已关闭'}
+                </button>
+                <button
+                  onClick={() => { setBatchMode(v => !v); if (batchMode) setSelectedIds(new Set()) }}
+                  className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${batchMode ? 'bg-[#f87171]/10 border-[#f87171]/30 text-[#f87171] font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}`}
+                >
+                  {batchMode ? '退出选择' : '选择'}
+                </button>
                 <Link to="/dashboard">
                   <button className="px-3 py-1.5 text-xs rounded-lg border border-foreground/20 text-foreground bg-card hover:bg-muted font-medium inline-flex items-center gap-1.5">
                     <Activity className="size-3.5" />
@@ -355,7 +421,7 @@ export default function FallbackPage() {
 
             {filtersActive && (
               <div className="flex items-center justify-between text-xs text-muted-foreground">
-                <span>{t('models.showingCount', { shown: visibleGroups.length, total: orderedGroups.length })}</span>
+                <span>{t('models.showingCount', { shown: visibleGroups.length, total: displayGroups.length })}</span>
                 <button onClick={clearFilters} className="underline hover:text-foreground">{t('models.clearFilters')}</button>
               </div>
             )}
@@ -377,7 +443,18 @@ export default function FallbackPage() {
                     <SortableContext items={renderedGroups.map(g => `grp:${g.key}`)} strategy={verticalListSortingStrategy}>
                       <tbody>
                         {renderedGroups.map(g => (
-                          <SortableGroupRow key={g.key} group={g} rank={rankByKey.get(g.key) ?? 0} onToggleGroup={handleGroupToggle} />
+                          <SortableGroupRow key={g.key} group={g} rank={rankByKey.get(g.key) ?? 0} onToggleGroup={handleGroupToggle}
+                            onDeleteGroup={doDeleteGroup}
+                            batchMode={batchMode}
+                            selectedIds={selectedIds}
+                            onToggleSelect={id => setSelectedIds(p => { const n = new Set(p); if (n.has(id)) n.delete(id); else n.add(id); return n })}
+                            editingRankId={editingRankKey}
+                            editRankValue={editRankValue}
+                            onEditChange={setEditRankValue}
+                            onEditClick={() => handleRankEditClick(g)}
+                            onEditSubmit={handleRankEditSubmit}
+                            deletingKey={deletingGroup}
+                          />
                         ))}
                       </tbody>
                     </SortableContext>
@@ -395,7 +472,18 @@ export default function FallbackPage() {
                         onClick={() => navigate(`/models/chat/${encodeURIComponent(g.members[0].canonicalId ?? g.members[0].modelId)}`)}
                         className={`group/row border-b last:border-0 cursor-pointer transition-colors hover:[&>td]:bg-muted/50 [&>td:first-child]:rounded-l-lg [&>td:last-child]:rounded-r-lg ${g.members.some(m => m.enabled) ? '' : 'opacity-50'}`}
                       >
-                        <GroupHeaderCells group={g} rank={rankByKey.get(g.key) ?? 0} onToggleGroup={handleGroupToggle} />
+                        <GroupHeaderCells group={g} rank={rankByKey.get(g.key) ?? 0} onToggleGroup={handleGroupToggle}
+                          onDeleteGroup={doDeleteGroup}
+                          batchMode={batchMode}
+                          selected={g.members.some(m => selectedIds.has(m.modelDbId))}
+                          onToggleSelect={id => setSelectedIds(p => { const n = new Set(p); if (n.has(id)) n.delete(id); else n.add(id); return n })}
+                          editingRank={editingRankKey === g.key}
+                          editValue={editRankValue}
+                          onEditChange={setEditRankValue}
+                          onEditClick={() => handleRankEditClick(g)}
+                          onEditSubmit={() => handleRankEditSubmit(g.key)}
+                          deletingKey={deletingGroup}
+                        />
                       </tr>
                     ))}
                   </tbody>
@@ -416,6 +504,17 @@ export default function FallbackPage() {
                 {saveMutation.isPending ? t('common.saving') : t('common.saveChanges')}
               </Button>
             </FloatingBar>
+
+            {/* Batch delete floating bar */}
+            {batchMode && (
+              <FloatingBar show={batchMode}>
+                <span className="text-xs text-muted-foreground">{selectedIds.size} 个模型已选择</span>
+                <Button variant="outline" size="sm" onClick={() => { setBatchMode(false); setSelectedIds(new Set()) }}>取消</Button>
+                <Button size="sm" onClick={deleteSelected} disabled={selectedIds.size === 0} className="bg-[#f87171] hover:bg-[#ef4444] text-white">
+                  删除选中
+                </Button>
+              </FloatingBar>
+            )}
 
             {unconfiguredPlatforms.length > 0 && (
               <p className="text-xs text-muted-foreground">{t('models.hiddenNoKeys', { platforms: unconfiguredPlatforms.join(', ') })}</p>

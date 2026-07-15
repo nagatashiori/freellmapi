@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -6,6 +7,7 @@ import { useI18n } from '@/i18n'
 import { CopyButton } from '@/components/copy-button'
 import { Switch } from '@/components/ui/switch'
 import { Tooltip } from '@/components/tooltip'
+import { Trash2 } from 'lucide-react'
 import {
   cleanQuotaLabel,
   formatContext,
@@ -64,6 +66,7 @@ export function ModelTableHead() {
           </Tooltip>
         </th>
         <th className="py-2 pr-3 font-medium text-right">{t('models.columnOn')}</th>
+        <th className="py-2 pr-2 w-8"></th>
       </tr>
     </thead>
   )
@@ -157,11 +160,21 @@ export const dragDots = (
 // The collapsed header row for a logical-model group: name, provider count,
 // union vision/tools badges, the best member's axis bars + score, and a single
 // switch that enables/disables every provider in the group.
-export function GroupHeaderCells({ group, rank, dragHandle, onToggleGroup }: {
+export function GroupHeaderCells({ group, rank, dragHandle, onToggleGroup, onDeleteGroup, batchMode, selected, onToggleSelect, editingRank, editValue, onEditChange, onEditClick, onEditSubmit, deletingKey }: {
   group: ModelGroupRow
   rank: number
   dragHandle?: ReactNode
   onToggleGroup: (memberIds: number[], enabled: boolean) => void
+  onDeleteGroup?: (group: ModelGroupRow) => void
+  batchMode?: boolean
+  selected?: boolean
+  onToggleSelect?: (modelDbId: number) => void
+  editingRank?: boolean
+  editValue?: string
+  onEditChange?: (v: string) => void
+  onEditClick?: () => void
+  onEditSubmit?: () => void
+  deletingKey?: string | null
 }) {
   const { t } = useI18n()
   const anyEnabled = group.members.some(m => m.enabled)
@@ -180,7 +193,27 @@ export function GroupHeaderCells({ group, rank, dragHandle, onToggleGroup }: {
   return (
     <>
       <td className="py-2 pl-3 pr-1 w-6 align-middle">{dragHandle ?? <span className="text-muted-foreground/30 select-none">·</span>}</td>
-      <td className="py-2 pr-2 w-6 text-center font-mono text-xs text-muted-foreground tabular-nums align-middle">{rank}</td>
+      <td className="py-2 pr-2 w-6 text-center font-mono text-xs text-muted-foreground tabular-nums align-middle">
+        {editingRank ? (
+          <input
+            autoFocus
+            value={editValue ?? String(rank)}
+            onChange={e => onEditChange?.(e.target.value)}
+            onBlur={() => onEditSubmit?.()}
+            onKeyDown={e => { if (e.key === 'Enter') onEditSubmit?.() }}
+            className="w-8 text-center text-xs bg-muted rounded border border-foreground/20 outline-none"
+            onClick={e => e.stopPropagation()}
+          />
+        ) : (
+          <span
+            onClick={e => { e.stopPropagation(); onEditClick?.() }}
+            className="cursor-text hover:text-foreground"
+            title="点击编辑排名"
+          >
+            {rank}
+          </span>
+        )}
+      </td>
       <td className="py-2 pr-3 align-middle">
         <div className="flex items-center gap-1.5 min-w-0">
           <Link to={`/models/chat/${detailId}`} aria-label={t('models.viewProviders')} onClick={e => e.stopPropagation()} className="flex items-center gap-2 flex-wrap text-left min-w-0">
@@ -224,16 +257,50 @@ export function GroupHeaderCells({ group, rank, dragHandle, onToggleGroup }: {
       <td className="py-2 pr-3 align-middle font-mono text-[11px] text-muted-foreground tabular-nums">{guard < 0.999 ? `×${guard.toFixed(2)}` : '—'}</td>
       <td className="py-2 pr-3 align-middle text-right font-mono text-xs font-medium tabular-nums">{best.score !== undefined ? best.score.toFixed(3) : '–'}</td>
       <td className="py-2 pr-3 align-middle text-right" onClick={e => e.stopPropagation()}>
-        <Switch checked={anyEnabled} onCheckedChange={(c) => onToggleGroup(group.members.map(m => m.modelDbId), c)} />
+        <div className="flex items-center gap-1.5 justify-end">
+          {batchMode && (
+            <input
+              type="checkbox"
+              checked={!!selected}
+              onChange={() => group.members.forEach(m => onToggleSelect?.(m.modelDbId))}
+              className="size-3.5 accent-foreground"
+            />
+          )}
+          <Switch checked={anyEnabled} onCheckedChange={(c) => onToggleGroup(group.members.map(m => m.modelDbId), c)} />
+        </div>
+      </td>
+      <td className="py-2 pr-2 align-middle" onClick={e => e.stopPropagation()}>
+        {onDeleteGroup && (
+          <button
+            onClick={() => onDeleteGroup(group)}
+            className={`transition-colors text-[10px] px-1.5 py-0.5 rounded ${
+              deletingKey === group.key
+                ? 'bg-[#f87171]/20 text-[#f87171] border border-[#f87171]/30'
+                : 'text-muted-foreground/40 hover:text-[#f87171]'
+            }`}
+            title="删除此模型组"
+          >
+            {deletingKey === group.key ? '确认?' : <Trash2 className="size-3.5" />}
+          </button>
+        )}
       </td>
     </>
   )
 }
 
-export function SortableGroupRow({ group, rank, onToggleGroup }: {
+export function SortableGroupRow({ group, rank, onToggleGroup, onDeleteGroup, batchMode, selectedIds, onToggleSelect, editingRankId, editRankValue, onEditChange, onEditClick, onEditSubmit, deletingKey }: {
   group: ModelGroupRow
   rank: number
   onToggleGroup: (memberIds: number[], enabled: boolean) => void
+  onDeleteGroup?: (group: ModelGroupRow) => void
+  batchMode?: boolean
+  selectedIds?: Set<number>
+  onToggleSelect?: (modelDbId: number) => void
+  editingRankId?: string | null
+  editRankValue?: string
+  onEditChange?: (v: string) => void
+  onEditClick?: () => void
+  onEditSubmit?: (key: string) => void
 }) {
   const { t } = useI18n()
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: `grp:${group.key}` })
@@ -258,7 +325,18 @@ export function SortableGroupRow({ group, rank, onToggleGroup }: {
       onClick={() => navigate(`/models/chat/${detailId}`)}
       className={`group/row border-b last:border-0 bg-card cursor-pointer transition-colors hover:[&>td]:bg-muted/50 [&>td:first-child]:rounded-l-lg [&>td:last-child]:rounded-r-lg ${isDragging ? 'opacity-50' : ''} ${anyEnabled ? '' : 'opacity-50'}`}
     >
-      <GroupHeaderCells group={group} rank={rank} dragHandle={handle} onToggleGroup={onToggleGroup} />
+      <GroupHeaderCells group={group} rank={rank} dragHandle={handle} onToggleGroup={onToggleGroup}
+        onDeleteGroup={onDeleteGroup}
+        batchMode={batchMode}
+        selected={group.members.some(m => selectedIds?.has(m.modelDbId))}
+        onToggleSelect={onToggleSelect}
+        editingRank={editingRankId === group.key}
+        editValue={editRankValue}
+        onEditChange={onEditChange}
+        onEditClick={onEditClick}
+        onEditSubmit={() => onEditSubmit?.(group.key)}
+        deletingKey={deletingKey}
+      />
     </tr>
   )
 }
