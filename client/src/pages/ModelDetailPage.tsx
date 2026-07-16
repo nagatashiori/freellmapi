@@ -131,9 +131,6 @@ export default function ModelDetailPage() {
   const [probeResults, setProbeResults] = useState<Map<number, ProbeResult>>(new Map())
   const [probingAll, setProbingAll] = useState(false)
   const [localMembers, setLocalMembers] = useState<Row[] | null>(null)
-  // After a "测全部" pass, persist fastest-first provider order to backend
-  // priority so routing follows the same order after refresh/restart.
-  const [latencySorted, setLatencySorted] = useState<Row[] | null>(null)
   // Monotonic generation counter so a stale drag's persistence callback doesn't
   // clobber a newer drag's localMembers. If the user drags twice quickly, the
   // first drag's onSettled would otherwise clear the second drag's optimistic
@@ -218,7 +215,6 @@ export default function ModelDetailPage() {
     if (oldI < 0 || newI < 0) return
     const reordered = arrayMove(displayMembers, oldI, newI)
     setLocalMembers(reordered)
-    setLatencySorted(null)
     const gen = ++dragGeneration.current
     // Persist: build flat priority list from all entries, overriding order for
     // the members of this group.
