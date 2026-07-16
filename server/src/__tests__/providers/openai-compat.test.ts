@@ -243,7 +243,11 @@ describe('OpenAICompatProvider', () => {
   });
 
   it('should validate key using models endpoint', async () => {
-    vi.spyOn(global, 'fetch').mockResolvedValueOnce({ ok: true, status: 200 } as any);
+    const response = new Response(JSON.stringify({ data: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce(response);
     expect(await provider.validateKey('valid')).toBe(true);
   });
 
