@@ -361,9 +361,9 @@ const RESERVED_PLATFORM_SLUGS = new Set<string>([
   'sambanova', // dropped but still reserved
 ]);
 
-/** Valid user platform slug: starts with letter, 1–32 chars [a-z0-9_-]. */
+/** Valid user platform slug: starts with letter, 1-32 chars [a-z0-9_-./]. */
 export function isValidUserPlatformSlug(slug: string): boolean {
-  return /^[a-z][a-z0-9_-]{0,31}$/.test(slug);
+  return /^[a-z][a-z0-9_\-\.\/]{0,31}$/.test(slug);
 }
 
 export function isReservedPlatformSlug(slug: string): boolean {
