@@ -3,6 +3,7 @@ import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { insertHealthyKey } from '../helpers/healthy-key.js';
 
 // Anthropic-compatible Messages API (`POST /v1/messages`). These tests drive
 // the route end-to-end through a mocked Groq upstream and assert the Anthropic
@@ -136,17 +137,14 @@ describe('Anthropic-compatible /v1/messages', () => {
     dashToken = mintDashboardToken();
   });
 
-  beforeEach(async () => {
+  beforeEach(() => {
     const db = getDb();
     db.prepare('DELETE FROM api_keys').run();
     db.prepare('DELETE FROM requests').run();
     db.prepare('DELETE FROM rate_limit_cooldowns').run();
     db.prepare('DELETE FROM rate_limit_usage').run();
     db.prepare("DELETE FROM settings WHERE key = 'anthropic_model_map'").run();
-    const { status } = await request(app, '/api/keys',
-      { platform: 'groq', key: 'gsk_anthropic_test', label: 't' },
-      { Authorization: `Bearer ${dashToken}` });
-    expect(status).toBe(201);
+    insertHealthyKey('groq', 'gsk_anthropic_test', 't');
   });
 
   afterEach(() => vi.restoreAllMocks());
@@ -226,10 +224,7 @@ describe('Anthropic-compatible /v1/messages', () => {
   it('preserves Gemini thought_signature across an Anthropic tool loop (#487)', async () => {
     const db = getDb();
     db.prepare('DELETE FROM api_keys').run();
-    const addGoogle = await request(app, '/api/keys',
-      { platform: 'google', key: 'AIza_anthropic_thought_signature_test', label: 'g' },
-      { Authorization: `Bearer ${dashToken}` });
-    expect(addGoogle.status).toBe(201);
+    insertHealthyKey('google', 'AIza_anthropic_thought_signature_test', 'g');
 
     const capturedBodies = mockGoogleJsonSequence([
       {

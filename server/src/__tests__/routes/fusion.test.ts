@@ -3,6 +3,7 @@ import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { insertHealthyKey } from '../helpers/healthy-key.js';
 import { isFusionModel, fusionConfigSchema, familyKey, diversifyChain } from '../../services/fusion.js';
 import { getOrderedFusionChain, setRoutingStrategy, getRoutingStrategy, type FusionCandidate } from '../../services/router.js';
 import { setCooldown } from '../../services/ratelimit.js';
@@ -147,14 +148,13 @@ describe('fusion route (/v1/chat/completions, model: "fusion")', () => {
     nonToolOpenrouterModel = pick('openrouter', 'AND m.supports_tools = 0');
   });
 
-  beforeEach(async () => {
+  beforeEach(() => {
     const db = getDb();
     db.prepare('DELETE FROM api_keys').run();
     db.prepare('DELETE FROM requests').run();
     db.prepare("DELETE FROM settings WHERE key = 'fusion_config'").run();
     for (const platform of ['groq', 'cerebras', 'openrouter']) {
-      const r = await request(app, 'POST', '/api/keys', { platform, key: `k_${platform}_fusion`, label: 'fusion-test' });
-      expect(r.status).toBe(201);
+      insertHealthyKey(platform, `k_${platform}_fusion`, 'fusion-test');
     }
   });
 
@@ -419,8 +419,7 @@ describe('fusion route (/v1/chat/completions, model: "fusion")', () => {
     const db = getDb();
     // Strip every key, then configure ONLY groq — no cerebras/openrouter/etc.
     db.prepare('DELETE FROM api_keys').run();
-    const r = await request(app, 'POST', '/api/keys', { platform: 'groq', key: 'k_groq_only', label: 'only-groq' });
-    expect(r.status).toBe(201);
+    insertHealthyKey('groq', 'k_groq_only', 'only-groq');
 
     const candidates = getOrderedFusionChain();
     expect(candidates.length).toBeGreaterThan(0);
@@ -433,8 +432,7 @@ describe('fusion route (/v1/chat/completions, model: "fusion")', () => {
   it('auto-panel excludes a model whose only key is on cooldown', async () => {
     const db = getDb();
     db.prepare('DELETE FROM api_keys').run();
-    await request(app, 'POST', '/api/keys', { platform: 'groq', key: 'k_groq_cool', label: 'cool' });
-    const keyId = (db.prepare("SELECT id FROM api_keys WHERE platform = 'groq'").get() as { id: number }).id;
+    const keyId = insertHealthyKey('groq', 'k_groq_cool', 'cool');
 
     const before = getOrderedFusionChain().filter(c => c.platform === 'groq');
     expect(before.length).toBeGreaterThan(0);
