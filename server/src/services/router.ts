@@ -182,30 +182,19 @@ const MAX_PENALTY = 10;            // cap so a model doesn't sink forever
 const DECAY_INTERVAL_MS = 2 * 60 * 1000; // penalty decays every 2 minutes
 const DECAY_AMOUNT = 1;            // remove this much penalty per decay interval
 
-function sinkModelInDefaultProfile(modelDbId: number): void {
-  try {
-    const db = getDb();
-    const profileId = getDefaultProfileId(db);
-    const row = db.prepare(`
-      SELECT enabled FROM profile_models
-      WHERE profile_id = ? AND model_db_id = ?
-    `).get(profileId, modelDbId) as { enabled: number } | undefined;
-    if (!row) return;
-    const max = db.prepare(`
-      SELECT COALESCE(MAX(priority), 0) AS priority
-      FROM profile_models WHERE profile_id = ?
-    `).get(profileId) as { priority: number };
-    db.prepare(`
-      UPDATE profile_models SET priority = ?
-      WHERE profile_id = ? AND model_db_id = ?
-    `).run(max.priority + 1, profileId, modelDbId);
-  } catch (err: any) {
-    console.warn(`[Router] Failed to sink rate-limited model ${modelDbId}: ${err?.message ?? err}`);
-  }
+// DISABLED: writing 429 sink to the DB permanently overwrote the operator's
+// manual drag-and-drop priority order on /models/chat, which must be the user's
+// source of truth. The in-memory penalty (recordRateLimitHit -> getPenalty,
+// applied in orderChain as `priority + getPenalty`) already demotes a
+// rate-limited model at ROUTING time for the request. The DB sink is therefore
+// redundant for routing and harmful to the UI. Kept as a no-op so the
+// fallback-loop call site compiles without churn.
+function sinkModelInDefaultProfile(_modelDbId: number): void {
+  // intentionally no-op - see comment above
 }
 
-export function sinkRateLimitedModel(modelDbId: number): void {
-  sinkModelInDefaultProfile(modelDbId);
+export function sinkRateLimitedModel(_modelDbId: number): void {
+  sinkModelInDefaultProfile(_modelDbId);
 }
 
 /**

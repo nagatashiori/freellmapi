@@ -208,7 +208,7 @@ export default function ModelDetailPage() {
     .map(e => ({ ...(scoreById.get(e.modelDbId) ?? {}), ...e }))
     .sort((a, b) => (isManual ? a.priority - b.priority : (b.score ?? 0) - (a.score ?? 0)))
 
-  const displayMembers = localMembers ?? latencySorted ?? members
+  const displayMembers = localMembers ?? members
 
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event
@@ -298,37 +298,13 @@ export default function ModelDetailPage() {
       }
       await new Promise(r => setTimeout(r, 200))
     }
-    // Ask the server for a latency-sorted list of providers. The server
-    // re-queries the request log and returns members in fastest-first order
-    // (those with no samples last). The result reorders `displayMembers` so
-    // the user sees the fastest provider bubble to the top of the list.
-    try {
-      const stats = await apiFetch<{ members: { modelDbId: number }[] }>(
-        `/api/fallback/probe-stats?canonical=${encodeURIComponent(canonicalId)}`
-      )
-      const order = new Map(stats.members.map((m, i) => [m.modelDbId, i]))
-      const arr = displayMembers.slice().sort((a, b) => {
-        const ai = order.has(a.modelDbId) ? order.get(a.modelDbId)! : Number.MAX_SAFE_INTEGER
-        const bi = order.has(b.modelDbId) ? order.get(b.modelDbId)! : Number.MAX_SAFE_INTEGER
-        return ai - bi
-      })
-      setLatencySorted(arr)
-      const memberIds = new Set(arr.map(m => m.modelDbId))
-      const priority = new Map(arr.map((m, i) => [m.modelDbId, i + 1]))
-      saveMutation.mutate(entries.map(e => ({
-        modelDbId: e.modelDbId,
-        priority: memberIds.has(e.modelDbId) ? (priority.get(e.modelDbId) ?? e.priority) : e.priority,
-        enabled: e.enabled,
-      })), {
-        onSettled: () => queryClient.invalidateQueries({ queryKey: ['fallback'] }),
-      })
-    } catch (e) {
-      // If the probe-stats call fails, leave the row order alone — the
-      // latency badge and the in-memory probeResults are still useful.
-      console.warn('probe-stats fetch failed', e)
-    }
+    // Probe only updates the latency badges - it does NOT reorder providers
+    // and does NOT write back to the DB. The operator's manual drag order on
+    // /models/chat is the single source of truth for priority; auto-sorting by
+    // probe latency was demoting rate-limited models (which fail fast = low
+    // latency) to the top and permanently overwriting the manual order.
     setProbingAll(false)
-  }, [displayMembers, probingAll, applyProbe, canonicalId, entries, saveMutation, queryClient])
+  }, [displayMembers, probingAll, applyProbe])
 
   const label = members[0]?.groupLabel ?? members[0]?.displayName ?? canonicalId
   const quota = members.length ? groupQuotaBadge(members, t) : null
@@ -388,11 +364,6 @@ export default function ModelDetailPage() {
           <>
             {/* Summary badges */}
             <div className="flex items-center gap-2 flex-wrap">
-              {latencySorted && !localMembers && (
-                <span className="text-[11px] rounded-full px-2 py-0.5 bg-blue-600/15 text-blue-700 dark:bg-blue-400/15 dark:text-blue-400 inline-flex items-center gap-1">
-                  <Activity className="size-3" />已按延迟排序（最快在上）
-                </span>
-              )}
               <span className="text-[11px] rounded-full px-2 py-0.5 bg-muted text-muted-foreground">{t('models.providerCount', { count: members.length })}</span>
               {quota && <span title={quota.title} className="text-[11px] rounded-full px-2 py-0.5 bg-muted text-muted-foreground tabular-nums">{quota.text}</span>}
               {vision && <span title={t('models.visionTitle')} className="text-[11px] rounded-full px-2 py-0.5 bg-cyan-600/15 text-cyan-700 dark:bg-cyan-400/15 dark:text-cyan-400">{t('models.vision')}</span>}
