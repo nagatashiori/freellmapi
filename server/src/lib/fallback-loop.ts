@@ -57,7 +57,7 @@ export const FALLBACK_MAX_RETRIES = 20;
 // abandoned mid-flight instead of only refusing to start the next one.
 export const DEFAULT_FALLBACK_TIME_BUDGET_MS = 45_000;
 export const FALLBACK_TIME_BUDGET_SETTING = 'fallback_time_budget_ms';
-export const DEFAULT_FALLBACK_ATTEMPT_TIMEOUT_MS = 15_000;
+export const DEFAULT_FALLBACK_ATTEMPT_TIMEOUT_MS = 30_000;
 export const FALLBACK_ATTEMPT_TIMEOUT_SETTING = 'fallback_attempt_timeout_ms';
 
 function readMsSetting(settingKey: string, envKey: string, defaultValue: number): number {

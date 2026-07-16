@@ -9,8 +9,8 @@ import type {
   ChatToolChoice,
   ChatContentBlock,
 } from '@freellmapi/shared/types.js';
-import { routeRequest, resolveRoutingChain, routingReserveTokens, type RouteResult, type ChainRow } from '../services/router.js';
-import { getUnifiedApiKey } from '../db/index.js';
+import { routeRequest, resolveRoutingChain, resolveModelGroupCandidates, routingReserveTokens, type RouteResult, type ChainRow } from '../services/router.js';
+import { getDb, getUnifiedApiKey } from '../db/index.js';
 import { contentToString } from '../lib/content.js';
 import { repairToolArguments, toolSchemaMap } from '../lib/tool-args.js';
 import { rescueInlineToolCalls, startsWithDialectMarker, couldBecomeDialectMarker, containsDialectMarker } from '../lib/tool-call-rescue.js';
@@ -20,6 +20,7 @@ import { extractApiToken, timingSafeStringEqual, getStickyModel, setStickyModel 
 import { runFallbackLoop, newFallbackState, recordUpstreamSuccess, type ExhaustionBody, setFallbackHeaders, type AttemptRecord } from '../lib/fallback-loop.js';
 import { applyTokenBudget, tokenBudgetMessage } from '../lib/guardrails.js';
 import { resolveAnthropicModel } from '../services/anthropic-map.js';
+import { isUnifyEnabled, getModelGroups, resolveRequestedIdToMembers } from '../services/model-groups.js';
 import { buildModelListing } from '../services/model-listing.js';
 
 // Anthropic-compatible Messages API (`POST /v1/messages`). This is a thin
@@ -424,7 +425,28 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
       // disabled high/mid/light members still get attempted.
       profileChain = chainResult.chain.filter(e => e.enabled);
     } catch {
-      // Profile not found or empty — fall through to auto-routing
+      // Profile not found or empty - fall through to auto-routing
+    }
+  }
+
+  // Unify group pin (mirrors the OpenAI route): when the client sends a
+  // concrete catalog model id, resolve it to its whole logical-model group
+  // so a failed provider fails over to its siblings instead of falling
+  // through to the active profile chain. Anthropic and OpenAI surfaces now
+  // behave identically for a pinned unify group.
+  let groupChain: ChainRow[] | undefined;
+  if (resolved.pinned && body.model) {
+    const members = isUnifyEnabled() ? resolveRequestedIdToMembers(body.model, getModelGroups()) : null;
+    if (members && members.length > 0) {
+      groupChain = resolveModelGroupCandidates(members);
+      if (groupChain.length === 0) {
+        const db = getDb();
+        const placeholders = members.map(() => '?').join(',');
+        const anyEnabled = db.prepare(`SELECT 1 FROM models WHERE id IN (${placeholders}) AND enabled = 1 LIMIT 1`).get(...members);
+        const reason = anyEnabled ? 'has no providers with an enabled key' : 'is disabled';
+        sendError(res, 400, 'invalid_request_error', `Model '${body.model}' ${reason}. Use 'auto' (or omit the 'model' field) to auto-route, or call /v1/models for the available list.`);
+        return;
+      }
     }
   }
 
@@ -445,7 +467,7 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
     state,
     attemptLog,
     clientGone: () => clientGone,
-    route: () => routeRequest(estimatedTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, profileChain),
+    route: () => routeRequest(estimatedTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain ?? profileChain),
     dispatch: async (route, attempt) => {
       if (stream) {
         try {
