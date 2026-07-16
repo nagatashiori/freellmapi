@@ -270,13 +270,10 @@ describe('Fallback API', () => {
     const flipped = original.map((e: any, i: number) => ({
       modelDbId: e.modelDbId,
       priority: i === 0 ? 1 : e.priority + 1,
-      // Flip the first entry's enabled flag so we can assert the profile write.
+      // Flip the first entry's enabled flag so we can assert the default-profile
+      // write and the legacy fallback_config mirror.
       enabled: i === 0 ? !e.enabled : e.enabled,
     }));
-
-    const legacyBefore = db.prepare(
-      'SELECT priority, enabled FROM fallback_config WHERE model_db_id = ?',
-    ).get(target.modelDbId) as { priority: number; enabled: number };
 
     const { status } = await request(app, 'PUT', '/api/fallback', flipped);
     expect(status).toBe(200);
@@ -291,7 +288,10 @@ describe('Fallback API', () => {
     const legacyAfter = db.prepare(
       'SELECT priority, enabled FROM fallback_config WHERE model_db_id = ?',
     ).get(target.modelDbId) as { priority: number; enabled: number };
-    expect(legacyAfter).toEqual(legacyBefore);
+    expect(legacyAfter).toEqual({
+      priority: 1,
+      enabled: flipped[0].enabled ? 1 : 0,
+    });
 
     // Restore original chain for later tests.
     const restore = original.map((e: any, i: number) => ({
