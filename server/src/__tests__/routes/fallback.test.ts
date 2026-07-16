@@ -247,11 +247,7 @@ describe('Fallback API', () => {
     await request(app, 'PUT', '/api/fallback', restore);
   });
 
-  // Regression: PUT /api/fallback used to only write fallback_config while
-  // model:"auto" walked profile_models for active_profile_id — so dashboard
-  // toggles/order never affected AUTO and disabled "garbage" models kept
-  // getting selected after cooldowns.
-  it('PUT /api/fallback dual-writes priority+enabled into active profile_models', async () => {
+  it('PUT /api/fallback updates the Default routing profile only', async () => {
     const db = getDb();
     const { body: original } = await request(app, 'GET', '/api/fallback');
     expect(original.length).toBeGreaterThan(1);
@@ -278,6 +274,10 @@ describe('Fallback API', () => {
       enabled: i === 0 ? !e.enabled : e.enabled,
     }));
 
+    const legacyBefore = db.prepare(
+      'SELECT priority, enabled FROM fallback_config WHERE model_db_id = ?',
+    ).get(target.modelDbId) as { priority: number; enabled: number };
+
     const { status } = await request(app, 'PUT', '/api/fallback', flipped);
     expect(status).toBe(200);
 
@@ -288,11 +288,10 @@ describe('Fallback API', () => {
     expect(pm.priority).toBe(1);
     expect(pm.enabled).toBe(flipped[0].enabled ? 1 : 0);
 
-    const fc = db.prepare(
+    const legacyAfter = db.prepare(
       'SELECT priority, enabled FROM fallback_config WHERE model_db_id = ?',
     ).get(target.modelDbId) as { priority: number; enabled: number };
-    expect(fc.priority).toBe(pm.priority);
-    expect(fc.enabled).toBe(pm.enabled);
+    expect(legacyAfter).toEqual(legacyBefore);
 
     // Restore original chain for later tests.
     const restore = original.map((e: any, i: number) => ({

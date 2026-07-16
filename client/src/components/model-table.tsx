@@ -65,6 +65,11 @@ export function ModelTableHead({ showProbe = false }: { showProbe?: boolean }) {
             <span className="underline decoration-dotted underline-offset-2 cursor-help">{t('strategies.scoreColumn')}</span>
           </Tooltip>
         </th>
+        <th className="py-2 pr-3 font-medium text-center">
+          <Tooltip text="24h 内所有 provider 成功探测的平均延迟（综合）">
+            <span className="underline decoration-dotted underline-offset-2 cursor-help">24h 平均</span>
+          </Tooltip>
+        </th>
         {showProbe && <th className="py-2 pr-3 font-medium text-center">测试</th>}
         <th className="py-2 pr-3 font-medium text-right">{t('models.columnOn')}</th>
         <th className="py-2 pr-2 w-8"></th>
@@ -141,9 +146,15 @@ export function RowContent({
       <td className="py-2 pr-3 align-middle text-right font-mono text-xs font-medium tabular-nums">
         {row.score !== undefined ? row.score.toFixed(3) : '–'}
       </td>
+      <td className="py-2 pr-3 align-middle text-center font-mono text-[11px] text-muted-foreground tabular-nums">
+        {row.latencyStats && row.latencyStats.sampleCount > 0
+          ? <span title={`24h 成功探测 ${row.latencyStats.sampleCount} 次`}>{row.latencyStats.avgMs}ms</span>
+          : '—'}
+      </td>
       <td className="py-2 pr-3 align-middle text-right">
         <Switch checked={row.enabled} onCheckedChange={(c) => onToggle(row.modelDbId, c)} />
       </td>
+      <td className="py-2 pr-2 w-8" />
     </>
   )
 }
@@ -217,7 +228,7 @@ export const dragDots = (
 // The collapsed header row for a logical-model group: name, provider count,
 // union vision/tools badges, the best member's axis bars + score, and a single
 // switch that enables/disables every provider in the group.
-export function GroupHeaderCells({ group, rank, dragHandle, onToggleGroup, onDeleteGroup, batchMode, selected, onToggleSelect, editingRank, editValue, onEditChange, onEditClick, onEditSubmit, deletingKey, probeStatus, probeLatency, onProbeGroup, probingAll, showProbe = false }: {
+export function GroupHeaderCells({ group, rank, dragHandle, onToggleGroup, onDeleteGroup, batchMode, selected, onToggleSelect, editingRank, editValue, onEditChange, onEditClick, onEditSubmit, deletingKey, probeStatus, probeLatency, avgLatency, onProbeGroup, probingAll, showProbe = false }: {
   group: ModelGroupRow
   rank: number
   dragHandle?: ReactNode
@@ -234,6 +245,7 @@ export function GroupHeaderCells({ group, rank, dragHandle, onToggleGroup, onDel
   deletingKey?: string | null
   probeStatus?: string
   probeLatency?: number
+  avgLatency?: { avgMs: number; sampleCount: number }
   onProbeGroup?: (group: ModelGroupRow) => void
   probingAll?: boolean
   showProbe?: boolean
@@ -318,6 +330,11 @@ export function GroupHeaderCells({ group, rank, dragHandle, onToggleGroup, onDel
       <td className="py-2 pr-3 align-middle"><AxisBar value={best.intelligence} color="#a855f7" /></td>
       <td className="py-2 pr-3 align-middle font-mono text-[11px] text-muted-foreground tabular-nums">{guard < 0.999 ? `×${guard.toFixed(2)}` : '—'}</td>
       <td className="py-2 pr-3 align-middle text-right font-mono text-xs font-medium tabular-nums">{best.score !== undefined ? best.score.toFixed(3) : '–'}</td>
+      <td className="py-2 pr-3 align-middle text-center font-mono text-[11px] text-muted-foreground tabular-nums" onClick={e => e.stopPropagation()}>
+        {avgLatency && avgLatency.sampleCount > 0
+          ? <span title={`24h 成功探测 ${avgLatency.sampleCount} 次`}>{avgLatency.avgMs}ms</span>
+          : '—'}
+      </td>
       {showProbe && (
         <td className="py-2 pr-3 align-middle text-right" onClick={e => e.stopPropagation()}>
           {onProbeGroup && (() => {
@@ -379,7 +396,7 @@ export function GroupHeaderCells({ group, rank, dragHandle, onToggleGroup, onDel
   )
 }
 
-export function SortableGroupRow({ group, rank, onToggleGroup, onDeleteGroup, batchMode, selectedIds, onToggleSelect, editingRankId, editRankValue, onEditChange, onEditClick, onEditSubmit, deletingKey, probeStatus, probeLatency, onProbeGroup, probingAll, showProbe = false }: {
+export function SortableGroupRow({ group, rank, onToggleGroup, onDeleteGroup, batchMode, selectedIds, onToggleSelect, editingRankId, editRankValue, onEditChange, onEditClick, onEditSubmit, deletingKey, probeStatus, probeLatency, avgLatency, onProbeGroup, probingAll, showProbe = false }: {
   group: ModelGroupRow
   rank: number
   onToggleGroup: (memberIds: number[], enabled: boolean) => void
@@ -395,6 +412,7 @@ export function SortableGroupRow({ group, rank, onToggleGroup, onDeleteGroup, ba
   deletingKey?: string | null
   probeStatus?: string
   probeLatency?: number
+  avgLatency?: { avgMs: number; sampleCount: number }
   onProbeGroup?: (group: ModelGroupRow) => void
   probingAll?: boolean
   showProbe?: boolean
@@ -435,6 +453,7 @@ export function SortableGroupRow({ group, rank, onToggleGroup, onDeleteGroup, ba
         deletingKey={deletingKey}
         probeStatus={probeStatus}
         probeLatency={probeLatency}
+        avgLatency={avgLatency}
         onProbeGroup={onProbeGroup}
         probingAll={probingAll}
         showProbe={showProbe}

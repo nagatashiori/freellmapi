@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Activity, RefreshCw, Download, Search, CheckSquare, Square, Save, Trash2, Sparkles } from 'lucide-react'
+import { Activity, RefreshCw, Download, Search, CheckSquare, Square, Save, Trash2 } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
 import { PageHeader } from '@/components/page-header'
 import { Button } from '@/components/ui/button'
@@ -43,17 +43,6 @@ interface DiscoverResult {
 
 type CatalogMode = 'add' | 'remove'
 
-interface RankSummary {
-  lastRun?: string | null
-  total?: number
-  known?: number
-  unknown?: number
-  nonchat?: number
-  unifyGroups?: number
-  success?: boolean
-  error?: string
-}
-
 export default function StatusPage() {
   const qc = useQueryClient()
 
@@ -61,21 +50,6 @@ export default function StatusPage() {
     queryKey: ['probe-settings'],
     queryFn: () => apiFetch('/api/fallback/probe-settings'),
     refetchInterval: 10_000,
-  })
-
-  const { data: rankStatus, refetch: refetchRank } = useQuery<RankSummary>({
-    queryKey: ['rank-recalibrate-status'],
-    queryFn: () => apiFetch('/api/keys/model-catalog/recalibrate/status'),
-  })
-
-  const runRecalibrate = useMutation({
-    mutationFn: () =>
-      apiFetch('/api/keys/model-catalog/recalibrate', { method: 'POST', body: '{}' }) as Promise<RankSummary>,
-    onSuccess: () => {
-      refetchRank()
-      qc.invalidateQueries({ queryKey: ['fallback'] })
-      qc.invalidateQueries({ queryKey: ['fallback', 'routing'] })
-    },
   })
 
   const { data: platformsData, refetch: refetchPlatforms } = useQuery<{ platforms: CatalogPlatform[] }>({
@@ -153,7 +127,13 @@ export default function StatusPage() {
       setImportMsg(`已更新 +${data.added} 个（已有跳过 ${data.skipped}）。新增模型默认关闭，探测成功后才会开启。`)
       if (platform) fetchModels.mutate(platform)
       refetchPlatforms()
+      // Keep all 5 pages in sync: new local model rows affect fallback chain,
+      // model list, health, routing-status, and this page's platform counts.
       qc.invalidateQueries({ queryKey: ['fallback'] })
+      qc.invalidateQueries({ queryKey: ['models'] })
+      qc.invalidateQueries({ queryKey: ['health'] })
+      qc.invalidateQueries({ queryKey: ['routing-status'] })
+      qc.invalidateQueries({ queryKey: ['keys'] })
     },
     onError: (e: any) => setImportMsg(e.message || '更新失败'),
   })
@@ -170,6 +150,10 @@ export default function StatusPage() {
       if (platform) fetchModels.mutate(platform)
       refetchPlatforms()
       qc.invalidateQueries({ queryKey: ['fallback'] })
+      qc.invalidateQueries({ queryKey: ['models'] })
+      qc.invalidateQueries({ queryKey: ['health'] })
+      qc.invalidateQueries({ queryKey: ['routing-status'] })
+      qc.invalidateQueries({ queryKey: ['keys'] })
     },
     onError: (e: any) => setImportMsg(e.message || '删除失败'),
   })
@@ -246,51 +230,14 @@ export default function StatusPage() {
 
   return (
     <div className="space-y-6 max-w-3xl">
-      <PageHeader title="健康检查与模型目录" description="探测间隔、供应商模型更新，以及绝对排名自动校准" />
+      <PageHeader title="健康检查与模型目录" description="探测间隔、供应商模型更新，以及运行时模型组去重" />
 
-      {/* 绝对排名自动校准 */}
-      <section className="rounded-xl border bg-card p-5 space-y-3">
-        <div>
-          <h3 className="text-sm font-medium mb-1">绝对排名 + 模型组去重</h3>
-          <p className="text-xs text-muted-foreground">
-            1）按研究报告写 <code className="text-[11px]">intelligence_rank</code>（未知→900 垫底）；
-            2）同核心名去重合并成<strong className="text-foreground font-medium">一个模型组</strong>
-            （如 gpt-5-5 / gpt-5.5 / GPT-5.5 → 一组，多提供方）。
-            导入/同步新模型后<strong className="text-foreground font-medium">自动运行</strong>；也可点按钮重跑。
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            size="sm"
-            onClick={() => runRecalibrate.mutate()}
-            disabled={runRecalibrate.isPending}
-          >
-            {runRecalibrate.isPending
-              ? <RefreshCw className="size-3.5 animate-spin" />
-              : <Sparkles className="size-3.5" />}
-            {runRecalibrate.isPending ? '校准中…' : '重新校准排名与分组'}
-          </Button>
-          {(runRecalibrate.data || rankStatus)?.lastRun && (
-            <span className="text-[11px] text-muted-foreground">
-              上次：{(runRecalibrate.data || rankStatus)?.lastRun}
-              {typeof (runRecalibrate.data || rankStatus)?.known === 'number' && (
-                <> · 已知 {(runRecalibrate.data || rankStatus)?.known}
-                  · 未知 {(runRecalibrate.data || rankStatus)?.unknown}
-                  · 分组 {(runRecalibrate.data || rankStatus)?.unifyGroups}
-                  · 共 {(runRecalibrate.data || rankStatus)?.total}</>
-              )}
-            </span>
-          )}
-        </div>
-        {runRecalibrate.isError && (
-          <p className="text-xs text-[#f87171]">{(runRecalibrate.error as Error)?.message || '校准失败'}</p>
-        )}
-        {runRecalibrate.isSuccess && (
-          <p className="text-xs text-[#4ade80]">
-            已校准：已知 {runRecalibrate.data?.known} · 未知 {runRecalibrate.data?.unknown} ·
-            非 chat {runRecalibrate.data?.nonchat} · 合并组 {runRecalibrate.data?.unifyGroups}
-          </p>
-        )}
+      <section className="rounded-xl border bg-card p-5 space-y-2">
+        <h3 className="text-sm font-medium">模型组去重</h3>
+        <p className="text-xs text-muted-foreground">
+          同核心名会在运行时自动合并成一个模型组（如 gpt-5-5 / gpt-5.5 / GPT-5.5）。
+          不再写绝对排名，不再把未知模型设为 900，也不需要手动重跑校准。
+        </p>
       </section>
 
       <section className="rounded-xl border bg-card p-5 space-y-5">

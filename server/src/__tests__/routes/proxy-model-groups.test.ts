@@ -5,6 +5,7 @@ import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { setUnifyEnabled } from '../../services/model-groups.js';
 import { setRoutingStrategy } from '../../services/router.js';
+import { getDefaultProfileId } from '../../services/routing-groups.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 
 let dashToken = '';
@@ -29,7 +30,7 @@ function authHeaders() {
   return { Authorization: `Bearer ${getUnifiedApiKey()}` };
 }
 
-// Insert a catalog row + fallback_config entry, returning its model_db_id.
+// Insert a catalog row + Default routing-profile entry.
 function addModel(platform: string, modelId: string, displayName: string, priority: number): number {
   const db = getDb();
   const info = db.prepare(`
@@ -38,7 +39,10 @@ function addModel(platform: string, modelId: string, displayName: string, priori
     VALUES (?, ?, ?, 5, 5, 'Large', 100, NULL, NULL, NULL, '~10M', 131072, 1, 0)
   `).run(platform, modelId, displayName);
   const id = Number(info.lastInsertRowid);
-  db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(id, priority);
+  db.prepare(`
+    INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
+    VALUES (?, ?, ?, 1)
+  `).run(getDefaultProfileId(db), id, priority);
   return id;
 }
 
@@ -75,7 +79,7 @@ describe('Model unification (group the same model across providers)', () => {
 
   beforeEach(() => {
     const db = getDb();
-    // fallback_config FK-references models(id), so clear it before the rows.
+    db.prepare("DELETE FROM profile_models WHERE model_db_id IN (SELECT id FROM models WHERE model_id IN ('tum-groq', 'tum-cerebras'))").run();
     db.prepare("DELETE FROM fallback_config WHERE model_db_id IN (SELECT id FROM models WHERE model_id IN ('tum-groq', 'tum-cerebras'))").run();
     db.prepare("DELETE FROM models WHERE model_id IN ('tum-groq', 'tum-cerebras')").run();
     db.prepare('DELETE FROM api_keys').run();
@@ -129,8 +133,10 @@ describe('Model unification (group the same model across providers)', () => {
     const sess = { ...authHeaders(), 'x-session-id': 'sticky-test-1' };
     const groqId = db.prepare("SELECT id FROM models WHERE model_id = 'tum-groq'").get() as { id: number };
     const cerebrasId = db.prepare("SELECT id FROM models WHERE model_id = 'tum-cerebras'").get() as { id: number };
+    const defaultProfileId = getDefaultProfileId(db);
     const setPriority = (modelDbId: number, p: number) =>
-      db.prepare('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?').run(p, modelDbId);
+      db.prepare('UPDATE profile_models SET priority = ? WHERE profile_id = ? AND model_db_id = ?')
+        .run(p, defaultProfileId, modelDbId);
     // Both providers stay healthy throughout, so the only thing that can move the
     // route between turns is stickiness — never a cooldown.
     vi.spyOn(global, 'fetch').mockImplementation(async (url: any, init?: any) => {

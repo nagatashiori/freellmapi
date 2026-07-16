@@ -78,7 +78,7 @@ describe('applyCatalog', () => {
     initDb(':memory:');
   });
 
-  it('inserts a new model with a fallback_config row', () => {
+  it('inserts a new model with disabled routing membership', () => {
     const models = existingAsCatalogModels();
     models.push(baseModel({ modelId: 'brand-new-model', displayName: 'Brand New' }));
 
@@ -89,8 +89,15 @@ describe('applyCatalog', () => {
       .prepare("SELECT id, enabled FROM models WHERE platform = 'groq' AND model_id = 'brand-new-model'")
       .get() as { id: number; enabled: number };
     expect(row.enabled).toBe(1);
-    const fb = getDb().prepare('SELECT id FROM fallback_config WHERE model_db_id = ?').get(row.id);
-    expect(fb).toBeTruthy();
+    const fb = getDb().prepare('SELECT enabled FROM fallback_config WHERE model_db_id = ?').get(row.id) as { enabled: number };
+    expect(fb.enabled).toBe(0);
+    const pm = getDb().prepare(`
+      SELECT pm.enabled
+      FROM profile_models pm
+      JOIN profiles p ON p.id = pm.profile_id
+      WHERE pm.model_db_id = ? AND (p.type = 'default' OR LOWER(p.name) = 'default')
+    `).get(row.id) as { enabled: number };
+    expect(pm.enabled).toBe(0);
   });
 
   it('caps GitHub GPT-4.1 catalog context at the routable free-tier limit (#426)', () => {

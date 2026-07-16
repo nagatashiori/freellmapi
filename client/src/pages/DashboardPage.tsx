@@ -92,6 +92,8 @@ export default function DashboardPage() {
         body: JSON.stringify({ enabled: newEnabled, fallbackEnabled: newEnabled }),
       })
       qc.invalidateQueries({ queryKey: ['fallback'] })
+      qc.invalidateQueries({ queryKey: ['models'] })
+      qc.invalidateQueries({ queryKey: ['routing-status'] })
     } catch {
       // Revert on error
       patchEnabledInCache(modelDbId, currentEnabled)
@@ -103,7 +105,10 @@ export default function DashboardPage() {
       try {
         await Promise.all(models.map(m => apiFetch(`/api/models/${m.modelDbId}`, { method: 'DELETE' })))
         qc.invalidateQueries({ queryKey: ['fallback'] })
+        qc.invalidateQueries({ queryKey: ['models'] })
         qc.invalidateQueries({ queryKey: ['health'] })
+        qc.invalidateQueries({ queryKey: ['routing-status'] })
+        qc.invalidateQueries({ queryKey: ['model-catalog-platforms'] })
       } catch { /* ignore */ }
       setDeletingId(null)
     } else {
@@ -205,7 +210,12 @@ export default function DashboardPage() {
     const probing = pr?.status === 'probing'
     const color = ok ? '#4ade80' : err ? '#f87171' : limited ? '#fbbf24' : '#6b7280'
     const isEnabled = pr && pr.enabled !== undefined ? pr.enabled : entry.enabled
-    const modelHistory = modelHistoryMap.get(entry.modelDbId)
+    // 24h average latency (server-computed from probe history). The mini
+    // timeline still uses the local probe-history cache; the number beside
+    // it is the authoritative value the server ships with /api/fallback.
+    const ls = entry.latencyStats
+    const avgMs = ls?.avgMs ?? 0
+    const avgN = ls?.sampleCount ?? 0
 
     return (
       <div key={entry.modelDbId} className="border-b border-border/20 last:border-0" style={{ opacity: isEnabled ? 1 : 0.4 }}>
@@ -220,7 +230,14 @@ export default function DashboardPage() {
           )}
           <span className="text-xs font-medium flex-1 truncate">{entry.displayName || entry.modelId}</span>
           {/* Mini timeline */}
-          <MiniTimeline history={modelHistory} />
+          <MiniTimeline history={modelHistoryMap.get(entry.modelDbId)} />
+          {/* 24h average latency (success only) */}
+          <span
+            className="text-[10px] text-muted-foreground w-16 tabular-nums text-right"
+            title={avgN > 0 ? `24h 平均延迟（${avgN} 次成功探测）` : '24h 内无成功探测'}
+          >
+            {avgN > 0 ? `24h ${avgMs}ms` : '—'}
+          </span>
           <span className="text-[10px] text-muted-foreground w-16 tabular-nums text-right">
             {pr && pr.status !== 'probing' ? (pr.latency > 0 ? pr.latency + 'ms' : '-') : '-'}
           </span>

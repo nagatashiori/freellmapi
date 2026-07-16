@@ -77,6 +77,13 @@ export function isRetryableError(err: any): boolean {
     || msg.includes('unparseable inline tool-call dialect');
 }
 
+export function isRateLimitError(err: any): boolean {
+  const status = typeof err?.status === 'number' ? err.status : 0;
+  if (status === 429) return true;
+  const msg = (err?.message ?? '').toLowerCase();
+  return msg.includes('429') || msg.includes('rate limit') || msg.includes('too many requests') || msg.includes('quota');
+}
+
 // A 401 / invalid-API-key error from a provider. KEY-fatal, not request-fatal:
 // the same request is fine on the provider's sibling key or on another provider,
 // so the fallback loop rotates past the bad key (and triggers an immediate

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { ChevronLeft, Save, Trash2, RefreshCw, Activity } from 'lucide-react'
@@ -131,6 +131,32 @@ export default function ModelDetailPage() {
   const [probeResults, setProbeResults] = useState<Map<number, ProbeResult>>(new Map())
   const [probingAll, setProbingAll] = useState(false)
   const [localMembers, setLocalMembers] = useState<Row[] | null>(null)
+  // After a "测全部" pass, persist fastest-first provider order to backend
+  // priority so routing follows the same order after refresh/restart.
+  const [latencySorted, setLatencySorted] = useState<Row[] | null>(null)
+  // Monotonic generation counter so a stale drag's persistence callback doesn't
+  // clobber a newer drag's localMembers. If the user drags twice quickly, the
+  // first drag's onSettled would otherwise clear the second drag's optimistic
+  // state (the second mutate is still in-flight when the first settles).
+  const dragGeneration = useRef(0)
+
+  // 24h average latency across every provider serving this model, computed
+  // server-side in the same query that builds /api/fallback. Sample-weighted:
+  // providers with more successful probes count more.
+  const groupMembers = entries
+    .filter(e => e.keyCount > 0 && (e.canonicalId ?? e.modelId) === canonicalId)
+  const groupAvgInfo = (() => {
+    let sum = 0
+    let total = 0
+    for (const e of groupMembers) {
+      const ls = e.latencyStats
+      if (ls && ls.sampleCount > 0) {
+        sum += ls.avgMs * ls.sampleCount
+        total += ls.sampleCount
+      }
+    }
+    return { avgMs: total > 0 ? Math.round(sum / total) : 0, sampleCount: total }
+  })()
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -157,6 +183,8 @@ export default function ModelDetailPage() {
       queryClient.invalidateQueries({ queryKey: ['fallback'] })
       queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
       queryClient.invalidateQueries({ queryKey: ['models'] })
+      queryClient.invalidateQueries({ queryKey: ['health'] })
+      queryClient.invalidateQueries({ queryKey: ['model-catalog-platforms'] })
     },
   })
   const modelDeleteMutation = useMutation({
@@ -165,6 +193,8 @@ export default function ModelDetailPage() {
       queryClient.invalidateQueries({ queryKey: ['fallback'] })
       queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
       queryClient.invalidateQueries({ queryKey: ['models'] })
+      queryClient.invalidateQueries({ queryKey: ['health'] })
+      queryClient.invalidateQueries({ queryKey: ['model-catalog-platforms'] })
     },
   })
 
@@ -178,7 +208,7 @@ export default function ModelDetailPage() {
     .map(e => ({ ...(scoreById.get(e.modelDbId) ?? {}), ...e }))
     .sort((a, b) => (isManual ? a.priority - b.priority : (b.score ?? 0) - (a.score ?? 0)))
 
-  const displayMembers = localMembers ?? members
+  const displayMembers = localMembers ?? latencySorted ?? members
 
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event
@@ -188,6 +218,8 @@ export default function ModelDetailPage() {
     if (oldI < 0 || newI < 0) return
     const reordered = arrayMove(displayMembers, oldI, newI)
     setLocalMembers(reordered)
+    setLatencySorted(null)
+    const gen = ++dragGeneration.current
     // Persist: build flat priority list from all entries, overriding order for
     // the members of this group.
     const memberIds = new Set(reordered.map(m => m.modelDbId))
@@ -198,7 +230,10 @@ export default function ModelDetailPage() {
       enabled: e.enabled,
     }))
     saveMutation.mutate(all, {
-      onSettled: () => { setLocalMembers(null); queryClient.invalidateQueries({ queryKey: ['fallback'] }) },
+      onSettled: () => {
+        if (dragGeneration.current === gen) setLocalMembers(null)
+        queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      },
     })
   }
 
@@ -263,8 +298,37 @@ export default function ModelDetailPage() {
       }
       await new Promise(r => setTimeout(r, 200))
     }
+    // Ask the server for a latency-sorted list of providers. The server
+    // re-queries the request log and returns members in fastest-first order
+    // (those with no samples last). The result reorders `displayMembers` so
+    // the user sees the fastest provider bubble to the top of the list.
+    try {
+      const stats = await apiFetch<{ members: { modelDbId: number }[] }>(
+        `/api/fallback/probe-stats?canonical=${encodeURIComponent(canonicalId)}`
+      )
+      const order = new Map(stats.members.map((m, i) => [m.modelDbId, i]))
+      const arr = displayMembers.slice().sort((a, b) => {
+        const ai = order.has(a.modelDbId) ? order.get(a.modelDbId)! : Number.MAX_SAFE_INTEGER
+        const bi = order.has(b.modelDbId) ? order.get(b.modelDbId)! : Number.MAX_SAFE_INTEGER
+        return ai - bi
+      })
+      setLatencySorted(arr)
+      const memberIds = new Set(arr.map(m => m.modelDbId))
+      const priority = new Map(arr.map((m, i) => [m.modelDbId, i + 1]))
+      saveMutation.mutate(entries.map(e => ({
+        modelDbId: e.modelDbId,
+        priority: memberIds.has(e.modelDbId) ? (priority.get(e.modelDbId) ?? e.priority) : e.priority,
+        enabled: e.enabled,
+      })), {
+        onSettled: () => queryClient.invalidateQueries({ queryKey: ['fallback'] }),
+      })
+    } catch (e) {
+      // If the probe-stats call fails, leave the row order alone — the
+      // latency badge and the in-memory probeResults are still useful.
+      console.warn('probe-stats fetch failed', e)
+    }
     setProbingAll(false)
-  }, [members, probingAll, applyProbe])
+  }, [displayMembers, probingAll, applyProbe, canonicalId, entries, saveMutation, queryClient])
 
   const label = members[0]?.groupLabel ?? members[0]?.displayName ?? canonicalId
   const quota = members.length ? groupQuotaBadge(members, t) : null
@@ -324,6 +388,11 @@ export default function ModelDetailPage() {
           <>
             {/* Summary badges */}
             <div className="flex items-center gap-2 flex-wrap">
+              {latencySorted && !localMembers && (
+                <span className="text-[11px] rounded-full px-2 py-0.5 bg-blue-600/15 text-blue-700 dark:bg-blue-400/15 dark:text-blue-400 inline-flex items-center gap-1">
+                  <Activity className="size-3" />已按延迟排序（最快在上）
+                </span>
+              )}
               <span className="text-[11px] rounded-full px-2 py-0.5 bg-muted text-muted-foreground">{t('models.providerCount', { count: members.length })}</span>
               {quota && <span title={quota.title} className="text-[11px] rounded-full px-2 py-0.5 bg-muted text-muted-foreground tabular-nums">{quota.text}</span>}
               {vision && <span title={t('models.visionTitle')} className="text-[11px] rounded-full px-2 py-0.5 bg-cyan-600/15 text-cyan-700 dark:bg-cyan-400/15 dark:text-cyan-400">{t('models.vision')}</span>}
@@ -332,6 +401,14 @@ export default function ModelDetailPage() {
               <span className="text-[11px] rounded-full px-2 py-0.5 bg-[#f87171]/15 text-[#f87171]">{errN} 错误</span>
               {limN > 0 && <span className="text-[11px] rounded-full px-2 py-0.5 bg-[#fbbf24]/15 text-[#fbbf24]">{limN} 限流</span>}
               {unkN > 0 && <span className="text-[11px] rounded-full px-2 py-0.5 bg-muted text-muted-foreground">{unkN} 未知</span>}
+              {groupAvgInfo.sampleCount > 0 && (
+                <span
+                  title="24h 内所有 provider 成功探测的平均延迟（按成功探测次数加权平均）"
+                  className="text-[11px] rounded-full px-2 py-0.5 bg-blue-600/15 text-blue-700 dark:bg-blue-400/15 dark:text-blue-400 tabular-nums"
+                >
+                  24h 平均 {groupAvgInfo.avgMs}ms · {groupAvgInfo.sampleCount} 次
+                </span>
+              )}
             </div>
 
             {/* Per-provider health + test (main request) */}
@@ -343,7 +420,7 @@ export default function ModelDetailPage() {
                 </div>
               </div>
               <div className="divide-y divide-border/40">
-                {members.map(m => {
+                {displayMembers.map(m => {
                   const pr = probeResults.get(m.modelDbId)
                   const status = pr?.status || healthMap.get(m.modelDbId) || 'unknown'
                   const meta = statusMeta(status)
@@ -359,8 +436,18 @@ export default function ModelDetailPage() {
                         )}
                         <span className="text-xs font-medium w-24 shrink-0 truncate">{providerLabel(m)}</span>
                         <code className="text-[11px] font-mono text-muted-foreground truncate flex-1 min-w-[8rem]">{m.modelId}</code>
-                        <span className="text-[10px] text-muted-foreground w-14 text-right tabular-nums">
+                        <span className="text-[10px] text-muted-foreground w-14 text-right tabular-nums" title="本次探测的延迟">
                           {pr && pr.status !== 'probing' ? (pr.latency > 0 ? `${pr.latency}ms` : '-') : '-'}
+                        </span>
+                        <span
+                          className="text-[10px] text-muted-foreground w-16 text-right tabular-nums"
+                          title={m.latencyStats && m.latencyStats.sampleCount > 0
+                            ? `24h 成功探测 ${m.latencyStats.sampleCount} 次的平均延迟`
+                            : '24h 内无成功探测'}
+                        >
+                          {m.latencyStats && m.latencyStats.sampleCount > 0
+                            ? `24h ${m.latencyStats.avgMs}ms`
+                            : '24h —'}
                         </span>
                         <span className="text-[10px] w-8 text-right text-muted-foreground">{isEnabled ? '开' : '关'}</span>
                         <span className="text-[10px] w-12 text-right font-medium" style={{ color: meta.color }}>{meta.label}</span>

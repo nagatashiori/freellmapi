@@ -10,7 +10,10 @@ import {
   upsertModelOverrides,
   type ModelOverridePatch,
 } from '../services/model-state.js';
-import { syncOneModelEnabledToActiveProfile } from '../services/chain-sync.js';
+import {
+  deleteRoutingModelMemberships,
+  setDefaultRoutingModelEnabled,
+} from '../services/routing-groups.js';
 
 export const modelsRouter = Router();
 
@@ -162,12 +165,7 @@ modelsRouter.patch('/:id', (req: Request, res: Response) => {
     }
 
     if (parsed.data.fallbackEnabled !== undefined) {
-      const flag = parsed.data.fallbackEnabled ? 1 : 0;
-      db.prepare('UPDATE fallback_config SET enabled = ? WHERE model_db_id = ?')
-        .run(flag, id);
-      // AUTO reads profile_models for active_profile_id — keep enabled in sync
-      // with the fallback chain the dashboard toggle edits.
-      syncOneModelEnabledToActiveProfile(db, id, flag);
+      setDefaultRoutingModelEnabled(db, id, parsed.data.fallbackEnabled);
     }
   });
   applyUpdate();
@@ -193,6 +191,7 @@ modelsRouter.delete('/:id', (req: Request, res: Response) => {
     if (isCatalogManagedModel(row)) {
       recordCatalogModelTombstone(db, 'chat', row.platform, row.model_id);
     }
+    deleteRoutingModelMemberships(db, id);
     db.prepare('DELETE FROM fallback_config WHERE model_db_id = ?').run(id);
     db.prepare('DELETE FROM models WHERE id = ?').run(id);
     if (row.platform === 'custom') deleteUnusedCustomEndpointKey(db, row.key_id);

@@ -14,7 +14,14 @@ import { getModelGroups } from '../services/model-groups.js';
 import { getPenaltyInspector } from '../services/penalty-inspector.js';
 import { decrypt } from '../lib/crypto.js';
 import { resolveProvider, getProvider } from '../providers/index.js';
-import { mirrorFallbackConfigToActiveProfile, syncChainEntriesToActiveProfile } from '../services/chain-sync.js';
+import {
+  getActiveRoutingChain,
+  getDefaultProfileId,
+  getDefaultRoutingChain,
+  replaceRoutingChain,
+  setDefaultRoutingModelEnabled,
+  upsertRoutingEntries,
+} from '../services/routing-groups.js';
 
 export const fallbackRouter = Router();
 
@@ -66,21 +73,22 @@ fallbackRouter.put('/routing', (req: Request, res: Response) => {
 // Get fallback chain (with dynamic penalties)
 fallbackRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
+  const defaultProfileId = getDefaultProfileId(db);
   const rows = db.prepare(`
-    SELECT fc.model_db_id, fc.priority, fc.enabled,
+    SELECT pm.model_db_id, pm.priority, pm.enabled,
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.speed_rank, m.size_label, m.rpm_limit, m.rpd_limit,
            m.tpm_limit, m.tpd_limit, m.context_window,
            m.monthly_token_budget, m.supports_vision, m.supports_tools,
            m.key_id, ak.label AS key_label,
            mo.overrides_json IS NOT NULL AS has_overrides
-    FROM fallback_config fc
-    JOIN models m ON m.id = fc.model_db_id
+    FROM profile_models pm
+    JOIN models m ON m.id = pm.model_db_id
     LEFT JOIN api_keys ak ON ak.id = m.key_id
     LEFT JOIN model_overrides mo ON mo.platform = m.platform AND mo.model_id = m.model_id
-    WHERE m.enabled = 1
-    ORDER BY fc.priority ASC
-  `).all() as any[];
+    WHERE pm.profile_id = ? AND m.enabled = 1
+    ORDER BY pm.priority ASC
+  `).all(defaultProfileId) as any[];
 
   // Count usable keys per platform — enabled AND healthy/unknown status. Unified
   // with /token-usage and the routing scorer (#456) so budget pooling is computed
@@ -218,24 +226,12 @@ fallbackRouter.put('/', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const update = db.prepare(`
-    UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ?
-  `);
-
-  // Dual-write: /models/chat edits fallback_config, but model:"auto" walks
-  // profile_models for active_profile_id. Keep both tables in lockstep so a
-  // drag-reorder or toggle on the dashboard actually changes AUTO routing.
-  const updateAll = db.transaction(() => {
-    for (const entry of parsed.data) {
-      update.run(entry.priority, entry.enabled ? 1 : 0, entry.modelDbId);
-    }
-    syncChainEntriesToActiveProfile(db, parsed.data.map(e => ({
-      modelDbId: e.modelDbId,
-      priority: e.priority,
-      enabled: e.enabled,
-    })));
-  });
-  updateAll();
+  const defaultProfileId = getDefaultProfileId(db);
+  upsertRoutingEntries(db, defaultProfileId, parsed.data.map(entry => ({
+    modelDbId: entry.modelDbId,
+    priority: entry.priority,
+    enabled: entry.enabled,
+  })));
 
   res.json({ success: true });
 });
@@ -296,16 +292,13 @@ fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
     models = db.prepare(`SELECT m.id FROM models m ORDER BY ${orderBy}`).all() as { id: number }[];
   }
 
-  const update = db.prepare('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?');
-  const reorder = db.transaction(() => {
-    for (let i = 0; i < models.length; i++) {
-      update.run(i + 1, models[i].id);
-    }
-    // Sort rewrites every fallback priority — mirror the full table so the
-    // active profile's AUTO chain does not keep the pre-sort order.
-    mirrorFallbackConfigToActiveProfile(db);
-  });
-  reorder();
+  const current = getDefaultRoutingChain(db);
+  const enabledById = new Map(current.map(entry => [entry.model_db_id, entry.enabled]));
+  replaceRoutingChain(db, getDefaultProfileId(db), models.map((model, index) => ({
+    modelDbId: model.id,
+    priority: index + 1,
+    enabled: enabledById.get(model.id) ?? 0,
+  })));
 
   res.json({ success: true, preset });
 });
@@ -322,40 +315,12 @@ fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
   `).all() as { platform: string }[];
   const platformSet = new Set(platforms.map(p => p.platform));
 
-  // Check if there is an active profile
-  const settingRow = db.prepare(`SELECT value FROM settings WHERE key = 'active_profile_id'`).get() as { value: string } | undefined;
-  const activeProfileId = settingRow ? (parseInt(settingRow.value) || null) : null;
-
-  // Verify active profile still exists
-  const activeProfile = activeProfileId
-    ? db.prepare('SELECT id FROM profiles WHERE id = ?').get(activeProfileId) as any
-    : null;
-
-  let rawModels: { model_db_id: number; platform: string; model_id: string; display_name: string; monthly_token_budget: string; priority: number; enabled: number; rpm_limit: number | null; rpd_limit: number | null; tpm_limit: number | null; tpd_limit: number | null }[];
-
-  if (activeProfile) {
-    // Profile mode: use profile_models chain (all models in profile, checked against enabled)
-    rawModels = db.prepare(`
-      SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name, m.monthly_token_budget,
-             pm.priority, pm.enabled,
-             m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit
-      FROM profile_models pm
-      JOIN models m ON m.id = pm.model_db_id
-      WHERE pm.profile_id = ? AND m.enabled = 1
-      ORDER BY pm.priority ASC
-    `).all(activeProfileId) as any[];
-  } else {
-    // Default mode: use fallback_config (only include enabled models)
-    rawModels = db.prepare(`
-      SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name, m.monthly_token_budget,
-             fc.priority, fc.enabled,
-             m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit
-      FROM fallback_config fc
-      JOIN models m ON m.id = fc.model_db_id
-      WHERE m.enabled = 1
-      ORDER BY fc.priority ASC
-    `).all() as any[];
-  }
+  const rawModels = getActiveRoutingChain(db) as {
+    model_db_id: number; platform: string; model_id: string; display_name: string;
+    monthly_token_budget: string; priority: number; enabled: number;
+    rpm_limit: number | null; rpd_limit: number | null;
+    tpm_limit: number | null; tpd_limit: number | null;
+  }[];
 
   // Build per-model breakdown (only platforms with keys), preserving enabled state
   const usageRows = db.prepare(`
@@ -410,13 +375,15 @@ fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
 // the enabled flag alone.
 async function probeModelUpstream(modelDbId: number) {
   const db = getDb();
+  const defaultProfileId = getDefaultProfileId(db);
   const model = db.prepare(`
     SELECT m.id, m.platform, m.model_id, m.display_name, m.key_id, m.enabled AS model_enabled,
-           COALESCE(fc.enabled, 0) AS chain_enabled
+           COALESCE(pm.enabled, 0) AS chain_enabled
     FROM models m
-    LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
+    LEFT JOIN profile_models pm
+      ON pm.model_db_id = m.id AND pm.profile_id = ?
     WHERE m.id = ?
-  `).get(modelDbId) as {
+  `).get(defaultProfileId, modelDbId) as {
     id: number; platform: string; model_id: string; display_name: string;
     key_id: number | null; model_enabled: number; chain_enabled: number;
   } | undefined;
@@ -445,77 +412,36 @@ async function probeModelUpstream(modelDbId: number) {
   }
 
   const provider = resolveProvider(model.platform, keyRow.base_url) || getProvider(model.platform);
-  if (!provider || !provider.baseUrl) {
-    return { ok: false, httpStatus: 0, error: 'No provider/baseUrl for platform ' + model.platform, latency: 0, model, status: 'error' };
+  if (!provider) {
+    return { ok: false, httpStatus: 0, error: 'No provider for platform ' + model.platform, latency: 0, model, status: 'error' };
   }
 
-  const url = provider.baseUrl.replace(/\/$/, '') + '/chat/completions';
-  // Hard total wall-clock budget for ONE probe. AbortController alone is not
-  // enough: some upstreams accept the TCP connection then stall on body, and
-  // a bare await resp.text() can outlive the intended 15s UX budget.
   const PROBE_TIMEOUT_MS = 15000;
   const start = Date.now();
-  const ctrl = new AbortController();
-  let result: { status: number; body: string };
+  let status = 'error';
+  let error = '';
+  let httpStatus = 0;
   try {
-    let tmr: NodeJS.Timeout | undefined;
-    const fetchPromise = (async () => {
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + apiKey,
-          ...(provider.extraHeaders || {}),
-        },
-        body: JSON.stringify({
-          model: model.model_id,
-          messages: [{ role: 'user', content: 'Say OK' }],
-          max_tokens: 3,
-          temperature: 0,
-        }),
-        signal: ctrl.signal,
-      });
-      const body = await resp.text();
-      return { status: resp.status, body };
-    })();
-    const timeoutPromise = new Promise<{ status: number; body: string }>((_, reject) => {
-      tmr = setTimeout(() => {
-        try { ctrl.abort(); } catch (_) {}
-        const e = new Error('timeout');
-        e.name = 'AbortError';
-        reject(e);
-      }, PROBE_TIMEOUT_MS);
-    });
-    try {
-      result = await Promise.race([fetchPromise, timeoutPromise]);
-    } finally {
-      if (tmr) clearTimeout(tmr);
+    const response = await provider.chatCompletion(
+      apiKey,
+      [{ role: 'user', content: 'Say OK' }],
+      model.model_id,
+      { max_tokens: 3, temperature: 0, timeoutMs: PROBE_TIMEOUT_MS },
+    );
+    if (response.choices?.[0]) {
+      status = 'ok';
+      httpStatus = 200;
+    } else {
+      error = 'No choices in response';
     }
-  } catch (fetchErr: any) {
-    result = { status: 0, body: (fetchErr && fetchErr.name === 'AbortError') ? 'timeout' : String((fetchErr && fetchErr.message) || fetchErr) };
+  } catch (probeError: any) {
+    httpStatus = Number(probeError?.status) || 0;
+    error = String(probeError?.message || probeError || 'Probe failed');
+    if (httpStatus === 429) status = 'rate_limited';
+    else if (/abort|timeout/i.test(error)) status = 'timeout';
   }
 
   const latency = Math.min(Date.now() - start, PROBE_TIMEOUT_MS + 50);
-  let status = 'error';
-  let error = '';
-  if (result.status === 200) {
-    try {
-      const j = JSON.parse(result.body);
-      if (j.choices && j.choices[0]) status = 'ok';
-      else { status = 'error'; error = 'No choices in response'; }
-    } catch (e) { status = 'error'; error = 'Parse error: ' + result.body.substring(0, 100); }
-  } else if (result.status === 0) {
-    status = result.body === 'timeout' ? 'timeout' : 'error';
-    error = result.body;
-  } else if (result.status === 429) {
-    status = 'rate_limited';
-    try { const j = JSON.parse(result.body); error = j.error?.message || j.message || result.body.substring(0, 200); }
-    catch (e) { error = result.body.substring(0, 200); }
-  } else {
-    status = 'error';
-    try { const j = JSON.parse(result.body); error = j.error?.message || j.message || j.error?.code || result.body.substring(0, 200); }
-    catch (e) { error = result.body.substring(0, 200); }
-  }
 
   // Persist request log
   try {
@@ -525,26 +451,23 @@ async function probeModelUpstream(modelDbId: number) {
     `).run(model.platform, model.model_id, model.model_id, status === 'ok' ? 'success' : (status === 'rate_limited' ? 'error' : 'error'), latency, error || null);
   } catch (e) { /* best effort */ }
 
-  // Auto enable/disable THIS channel (one provider model row) everywhere it matters
+  // Probe changes the Default routing group's switch only. high/mid/light are
+  // explicit operator-curated groups and must never be rewritten by a probe.
   let finalEnabled = (status === 'ok');
   try {
     if (status === 'ok') {
-      db.prepare('UPDATE fallback_config SET enabled = 1 WHERE model_db_id = ?').run(modelDbId);
       db.prepare('UPDATE models SET enabled = 1 WHERE id = ?').run(modelDbId);
-      db.prepare('UPDATE profile_models SET enabled = 1 WHERE model_db_id = ?').run(modelDbId);
-      const hasDefault = db.prepare('SELECT 1 AS x FROM profile_models WHERE profile_id = 1 AND model_db_id = ?').get(modelDbId);
-      if (!hasDefault) {
-        const maxP = db.prepare('SELECT COALESCE(MAX(priority),0)+1 AS p FROM profile_models WHERE profile_id = 1').get() as { p: number };
-        db.prepare('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (1, ?, ?, 1)').run(modelDbId, maxP.p);
-      }
+      setDefaultRoutingModelEnabled(db, modelDbId, true);
       finalEnabled = true;
     } else if (status === 'error' || status === 'timeout') {
-      db.prepare('UPDATE fallback_config SET enabled = 0 WHERE model_db_id = ?').run(modelDbId);
-      db.prepare('UPDATE profile_models SET enabled = 0 WHERE model_db_id = ?').run(modelDbId);
+      setDefaultRoutingModelEnabled(db, modelDbId, false);
       finalEnabled = false;
     } else if (status === 'rate_limited') {
-      const row = db.prepare('SELECT enabled FROM fallback_config WHERE model_db_id = ?').get(modelDbId) as { enabled: number } | undefined;
-      finalEnabled = !!(row && row.enabled);
+      const row = db.prepare(`
+        SELECT enabled FROM profile_models
+        WHERE profile_id = ? AND model_db_id = ?
+      `).get(defaultProfileId, modelDbId) as { enabled: number } | undefined;
+      finalEnabled = row?.enabled === 1;
     }
   } catch (e) { /* best effort */ }
 
@@ -563,9 +486,10 @@ async function probeModelUpstream(modelDbId: number) {
 
 // ── Health: per-model status from recent requests ──────────────────────────
 // Returns the latest request status per (platform, model_id) joined to the
-// fallback_config rows. Uses model_id (the actual routed model) — not
-// requested_model (what the client typed, usually NULL) — and matches
-// case-insensitively against models.model_id. Without LOWER(), mapleleaf and
+// Default routing profile rows.
+// Uses model_id (the actual routed model) — not requested_model (what the
+// client typed, usually NULL) — and matches case-insensitively against
+// models.model_id. Without LOWER(), mapleleaf and
 // other platforms whose model_id casing diverges from the requests log show
 // as 'unknown' (gray) on the dashboard. (#376)
 fallbackRouter.get('/health', (_req: Request, res: Response) => {
@@ -576,9 +500,13 @@ fallbackRouter.get('/health', (_req: Request, res: Response) => {
   ).all() as { platform: string; lmodel: string; status: string }[];
   const healthMap = new Map<string, string>();
   for (const r of lastReqs) healthMap.set(r.platform + ':' + r.lmodel, r.status);
-  const rows = db.prepare(
-    "SELECT fc.model_db_id, m.platform, LOWER(m.model_id) as lmodel FROM fallback_config fc JOIN models m ON m.id = fc.model_db_id"
-  ).all() as { model_db_id: number; platform: string; lmodel: string }[];
+  const defaultProfileId = getDefaultProfileId(db);
+  const rows = db.prepare(`
+    SELECT pm.model_db_id, m.platform, LOWER(m.model_id) AS lmodel
+    FROM profile_models pm
+    JOIN models m ON m.id = pm.model_db_id
+    WHERE pm.profile_id = ?
+  `).all(defaultProfileId) as { model_db_id: number; platform: string; lmodel: string }[];
   const result = rows.map(r => ({
     modelDbId: r.model_db_id,
     healthStatus: healthMap.get(r.platform + ':' + r.lmodel) || 'unknown',
@@ -589,7 +517,8 @@ fallbackRouter.get('/health', (_req: Request, res: Response) => {
 
 // ── Probe: test a specific model ───────────────────────────────────────────
 fallbackRouter.post('/probe/:id', async (req: Request, res: Response) => {
-  const modelDbId = parseInt(req.params.id, 10);
+  const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const modelDbId = parseInt(rawId, 10);
   if (isNaN(modelDbId)) { res.status(400).json({ error: 'Invalid id' }); return; }
   try {
     const result = await probeModelUpstream(modelDbId);
@@ -609,20 +538,24 @@ fallbackRouter.post('/probe-all', async (req: Request, res: Response) => {
   let models: { id: number; platform: string; model_id: string }[];
   if (Array.isArray(body.ids) && body.ids.length) {
     const placeholders = body.ids.map(() => '?').join(',');
-    models = db.prepare(`SELECT m.id, m.platform, m.model_id FROM models m WHERE m.id IN (${placeholders})`).all(...body.ids.map(Number));
+    models = db.prepare(`SELECT m.id, m.platform, m.model_id FROM models m WHERE m.id IN (${placeholders})`)
+      .all(...body.ids.map(Number)) as { id: number; platform: string; model_id: string }[];
   } else {
     const limit = Math.min(Math.max(parseInt(body.limit, 10) || 200, 1), 600);
     const onlyEnabled = !!body.onlyEnabled;
+    const defaultProfileId = getDefaultProfileId(db);
     models = db.prepare(`
-      SELECT m.id, m.platform, m.model_id FROM models m
-      JOIN fallback_config fc ON fc.model_db_id = m.id
+      SELECT m.id, m.platform, m.model_id
+      FROM models m
+      JOIN profile_models pm
+        ON pm.model_db_id = m.id AND pm.profile_id = ?
       WHERE EXISTS (
         SELECT 1 FROM api_keys ak WHERE ak.platform = m.platform AND ak.enabled = 1
       )
-      ${onlyEnabled ? 'AND fc.enabled = 1 AND m.enabled = 1' : ''}
-      ORDER BY fc.enabled DESC, m.intelligence_rank ASC
+      ${onlyEnabled ? 'AND pm.enabled = 1 AND m.enabled = 1' : ''}
+      ORDER BY pm.enabled DESC, m.intelligence_rank ASC
       LIMIT ?
-    `).all(limit);
+    `).all(defaultProfileId, limit) as { id: number; platform: string; model_id: string }[];
   }
 
   // Concurrent but bounded. Serial 200x15s feels stuck forever on dashboard.
@@ -656,7 +589,7 @@ fallbackRouter.post('/probe-all', async (req: Request, res: Response) => {
   // stamp last run
   try {
     const now = new Date().toISOString();
-    const existing = db.prepare("SELECT value FROM settings WHERE key='health_check_last_run'").pluck(true).get();
+    const existing = db.prepare("SELECT value FROM settings WHERE key='health_check_last_run'").get() as { value: string } | undefined;
     if (existing !== undefined && existing !== null) {
       db.prepare("UPDATE settings SET value = ? WHERE key = 'health_check_last_run'").run(now);
     } else {
@@ -669,8 +602,10 @@ fallbackRouter.post('/probe-all', async (req: Request, res: Response) => {
 // ── Get/set health check interval ─────────────────────────────────────────
 fallbackRouter.get('/probe-settings', (_req: Request, res: Response) => {
   const db = getDb();
-  const interval = parseInt(db.prepare("SELECT value FROM settings WHERE key='health_check_interval_ms'").pluck(true).get() as string || '3600000', 10);
-  const lastRun = db.prepare("SELECT value FROM settings WHERE key='health_check_last_run'").pluck(true).get() as string | null || null;
+  const intervalRow = db.prepare("SELECT value FROM settings WHERE key='health_check_interval_ms'").get() as { value: string } | undefined;
+  const lastRow = db.prepare("SELECT value FROM settings WHERE key='health_check_last_run'").get() as { value: string } | undefined;
+  const interval = parseInt(intervalRow?.value || '3600000', 10);
+  const lastRun = lastRow?.value || null;
   res.json({ intervalMs: interval, lastRun });
 });
 
@@ -681,7 +616,7 @@ fallbackRouter.put('/probe-settings', (req: Request, res: Response) => {
     res.status(400).json({ error: 'Interval must be >= 60000ms' });
     return;
   }
-  const existing = db.prepare("SELECT value FROM settings WHERE key='health_check_interval_ms'").pluck(true).get();
+  const existing = db.prepare("SELECT value FROM settings WHERE key='health_check_interval_ms'").get() as { value: string } | undefined;
   if (existing) {
     db.prepare("UPDATE settings SET value = ? WHERE key = 'health_check_interval_ms'").run(String(intervalMs));
   } else {

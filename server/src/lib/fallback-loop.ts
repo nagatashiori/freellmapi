@@ -16,7 +16,7 @@
 // the fire-and-forget key revalidation kicked off on an upstream 401 (below).
 
 import type { RouteResult } from '../services/router.js';
-import { recordRateLimitHit, recordSuccess, hasOtherUsableKey, formatResetEta } from '../services/router.js';
+import { recordRateLimitHit, recordSuccess, hasOtherUsableKey, formatResetEta, sinkRateLimitedModel } from '../services/router.js';
 import {
   recordRequest,
   recordTokens,
@@ -29,6 +29,7 @@ import {
 } from '../services/ratelimit.js';
 import {
   isRetryableError,
+  isRateLimitError,
   isKeyAuthError,
   isDailyQuotaExhaustedError,
   isPaymentRequiredError,
@@ -56,21 +57,31 @@ export const FALLBACK_MAX_RETRIES = 20;
 // abandoned mid-flight instead of only refusing to start the next one.
 export const DEFAULT_FALLBACK_TIME_BUDGET_MS = 45_000;
 export const FALLBACK_TIME_BUDGET_SETTING = 'fallback_time_budget_ms';
+export const DEFAULT_FALLBACK_ATTEMPT_TIMEOUT_MS = 15_000;
+export const FALLBACK_ATTEMPT_TIMEOUT_SETTING = 'fallback_attempt_timeout_ms';
 
-export function getFallbackTimeBudgetMs(): number {
+function readMsSetting(settingKey: string, envKey: string, defaultValue: number): number {
   let stored: string | undefined;
   try {
-    stored = getSetting(FALLBACK_TIME_BUDGET_SETTING);
+    stored = getSetting(settingKey);
   } catch {
-    stored = undefined; // DB not ready — never throw on the proxy hot path
+    stored = undefined;
   }
-  const candidates = [stored, process.env.FALLBACK_TIME_BUDGET_MS];
+  const candidates = [stored, process.env[envKey]];
   for (const raw of candidates) {
     if (raw === undefined || raw.trim() === '') continue;
     const n = Number(raw);
     if (Number.isFinite(n) && n >= 0) return n;
   }
-  return DEFAULT_FALLBACK_TIME_BUDGET_MS;
+  return defaultValue;
+}
+
+export function getFallbackTimeBudgetMs(): number {
+  return readMsSetting(FALLBACK_TIME_BUDGET_SETTING, 'FALLBACK_TIME_BUDGET_MS', DEFAULT_FALLBACK_TIME_BUDGET_MS);
+}
+
+export function getFallbackAttemptTimeoutMs(): number {
+  return readMsSetting(FALLBACK_ATTEMPT_TIMEOUT_SETTING, 'FALLBACK_ATTEMPT_TIMEOUT_MS', DEFAULT_FALLBACK_ATTEMPT_TIMEOUT_MS);
 }
 
 // Mutable per-request skip state threaded through the loop and mutated by
@@ -554,6 +565,7 @@ export async function runFallbackLoop(hooks: FallbackHooks): Promise<void> {
         continue;
       }
       if (isRetryableError(err)) {
+        if (isRateLimitError(err)) sinkRateLimitedModel(route.modelDbId);
         recordRetryableFailure(route, err, hooks.state);
         attempts.push({ platform: route.platform, modelId: route.modelId, keyOrdinal: keyOrdinal(route), errorClass: classifyAttemptError(err) });
         lastError = err;

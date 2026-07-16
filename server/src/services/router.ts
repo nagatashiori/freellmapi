@@ -13,6 +13,13 @@ import { isUnifyEnabled, getModelGroups, resolveRequestedIdToMembers } from './m
 import type { BaseProvider } from '../providers/base.js';
 import type { Platform } from '@freellmapi/shared/types.js';
 import type { Db } from '../db/types.js';
+import {
+  getActiveRoutingChain,
+  getDefaultProfileId,
+  getDefaultRoutingChain,
+  getRoutingChain,
+  getRoutingProfileIdByName,
+} from './routing-groups.js';
 
 class RouteError extends Error {
   status: number;
@@ -174,6 +181,32 @@ const PENALTY_PER_429 = 3;        // each 429 adds this many priority positions
 const MAX_PENALTY = 10;            // cap so a model doesn't sink forever
 const DECAY_INTERVAL_MS = 2 * 60 * 1000; // penalty decays every 2 minutes
 const DECAY_AMOUNT = 1;            // remove this much penalty per decay interval
+
+function sinkModelInDefaultProfile(modelDbId: number): void {
+  try {
+    const db = getDb();
+    const profileId = getDefaultProfileId(db);
+    const row = db.prepare(`
+      SELECT enabled FROM profile_models
+      WHERE profile_id = ? AND model_db_id = ?
+    `).get(profileId, modelDbId) as { enabled: number } | undefined;
+    if (!row) return;
+    const max = db.prepare(`
+      SELECT COALESCE(MAX(priority), 0) AS priority
+      FROM profile_models WHERE profile_id = ?
+    `).get(profileId) as { priority: number };
+    db.prepare(`
+      UPDATE profile_models SET priority = ?
+      WHERE profile_id = ? AND model_db_id = ?
+    `).run(max.priority + 1, profileId, modelDbId);
+  } catch (err: any) {
+    console.warn(`[Router] Failed to sink rate-limited model ${modelDbId}: ${err?.message ?? err}`);
+  }
+}
+
+export function sinkRateLimitedModel(modelDbId: number): void {
+  sinkModelInDefaultProfile(modelDbId);
+}
 
 /**
  * Record a 429 for a model — increases its penalty so it sinks in priority.
@@ -528,51 +561,13 @@ const GLOBAL_SORT_ALIASES: Record<string, string> = {
 };
 
 function getActiveChain(db: Db): ChainRow[] {
-  const activeProfileSetting = db.prepare("SELECT value FROM settings WHERE key = 'active_profile_id'").get() as { value: string } | undefined;
-  if (activeProfileSetting) {
-    const profileId = parseInt(activeProfileSetting.value, 10);
-    const chain = db.prepare(`
-      SELECT pm.model_db_id, pm.priority, pm.enabled,
-             m.platform, m.model_id, m.display_name, m.intelligence_rank,
-             m.size_label, m.monthly_token_budget,
-             m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-             m.supports_tools, m.context_window, m.key_id
-      FROM profile_models pm
-      JOIN models m ON m.id = pm.model_db_id AND m.enabled = 1
-      WHERE pm.profile_id = ?
-      ORDER BY pm.priority ASC
-    `).all(profileId) as ChainRow[];
-    
-    if (chain.length > 0) return chain;
-  }
-
-  return db.prepare(`
-    SELECT fc.model_db_id, fc.priority, fc.enabled,
-           m.platform, m.model_id, m.display_name, m.intelligence_rank,
-           m.size_label, m.monthly_token_budget,
-           m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-           m.supports_tools, m.context_window, m.key_id
-    FROM fallback_config fc
-    JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
-    ORDER BY fc.priority ASC
-  `).all() as ChainRow[];
+  return getActiveRoutingChain(db) as ChainRow[];
 }
 
 function getChainByProfileName(db: Db, name: string): ChainRow[] | null {
-  const profile = db.prepare("SELECT id FROM profiles WHERE LOWER(name) = ?").get(name.toLowerCase()) as { id: number } | undefined;
-  if (!profile) return null;
-
-  return db.prepare(`
-    SELECT pm.model_db_id, pm.priority, pm.enabled,
-           m.platform, m.model_id, m.display_name, m.intelligence_rank,
-           m.size_label, m.monthly_token_budget,
-           m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-           m.supports_tools, m.context_window, m.key_id
-    FROM profile_models pm
-    JOIN models m ON m.id = pm.model_db_id AND m.enabled = 1
-    WHERE pm.profile_id = ?
-    ORDER BY pm.priority ASC
-  `).all(profile.id) as ChainRow[];
+  const profileId = getRoutingProfileIdByName(db, name);
+  if (profileId == null) return null;
+  return getRoutingChain(db, profileId) as ChainRow[];
 }
 
 function getChainByGlobalSort(db: Db, globalAxis: string): ChainRow[] {
@@ -826,11 +821,10 @@ export function routePinnedModel(modelDbId: number, estimatedTokens = 1000, skip
 /**
  * Resolve a logical model group's member db ids to an ordered ChainRow[] for
  * strict group-pin routing (the "unify" feature). Each enabled member is
- * hydrated as a ChainRow carrying its REAL fallback_config.priority, then
+ * hydrated as a ChainRow carrying its Default routing-profile priority, then
  * ordered by the active strategy via orderChain — so 'priority' honors the
  * manual within-group order and scored strategies use live scores (priority as
- * the tiebreaker). Members disabled in the chain (fallback_config.enabled = 0)
- * are dropped.
+ * the tiebreaker). Members disabled in the Default routing profile are dropped.
  *
  * Pass the result to routeRequest() as `prefetchedChain` and DO NOT pass a
  * `preferredModelDbId` that isn't already one of these rows — otherwise the
@@ -842,22 +836,12 @@ export function resolveModelGroupCandidates(memberDbIds: number[]): ChainRow[] {
   const strategy = getRoutingStrategy();
   if (strategy !== 'priority') refreshStatsCache(db);
 
-  const selectMember = db.prepare(`
-    SELECT m.id as model_db_id, COALESCE(fc.priority, 0) as priority,
-           COALESCE(fc.enabled, 1) as enabled,
-           m.platform, m.model_id, m.display_name, m.intelligence_rank,
-           m.size_label, m.monthly_token_budget,
-           m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-           m.supports_tools, m.context_window, m.key_id
-    FROM models m
-    LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
-    WHERE m.id = ? AND m.enabled = 1
-  `);
-
+  const defaultChain = getDefaultRoutingChain(db) as ChainRow[];
+  const byId = new Map(defaultChain.map(row => [row.model_db_id, row]));
   const rows: ChainRow[] = [];
   for (const id of memberDbIds) {
-    const row = selectMember.get(id) as ChainRow | undefined;
-    if (row && row.enabled) rows.push(row);
+    const row = byId.get(id);
+    if (row?.enabled) rows.push(row);
   }
   return orderChain(rows, strategy);
 }
@@ -1110,16 +1094,7 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
   const strategy = getRoutingStrategy();
   refreshStatsCache(db);
 
-  const chain = db.prepare(`
-    SELECT fc.model_db_id, fc.priority, fc.enabled,
-           m.platform, m.model_id, m.display_name, m.intelligence_rank,
-           m.size_label, m.monthly_token_budget,
-           m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-           m.supports_tools, m.context_window
-    FROM fallback_config fc
-    JOIN models m ON m.id = fc.model_db_id
-    WHERE m.enabled = 1
-  `).all() as ChainRow[];
+  const chain = getActiveRoutingChain(db) as ChainRow[];
 
   // For display we score under 'balanced' weights when in priority mode, so the
   // table still shows a meaningful ranking even with the bandit turned off.
@@ -1159,26 +1134,12 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
 // Used to give image requests a clear "enable a vision model" error instead of
 // the generic exhaustion message when none is configured (#118, #125).
 export function hasEnabledVisionModel(): boolean {
-  const db = getDb();
-  const row = db.prepare(`
-    SELECT COUNT(*) as cnt
-    FROM fallback_config fc
-    JOIN models m ON m.id = fc.model_db_id
-    WHERE fc.enabled = 1 AND m.enabled = 1 AND m.supports_vision = 1
-  `).get() as { cnt: number };
-  return row.cnt > 0;
+  return getActiveRoutingChain(getDb()).some(row => row.enabled === 1 && row.supports_vision === 1);
 }
 
 // Whether at least one tool-capable model is enabled in the fallback chain.
 // Same role as hasEnabledVisionModel: a clear up-front error for tool-bearing
 // requests beats routing them to a model that mangles the tool call.
 export function hasEnabledToolsModel(): boolean {
-  const db = getDb();
-  const row = db.prepare(`
-    SELECT COUNT(*) as cnt
-    FROM fallback_config fc
-    JOIN models m ON m.id = fc.model_db_id
-    WHERE fc.enabled = 1 AND m.enabled = 1 AND m.supports_tools = 1
-  `).get() as { cnt: number };
-  return row.cnt > 0;
+  return getActiveRoutingChain(getDb()).some(row => row.enabled === 1 && row.supports_tools === 1);
 }

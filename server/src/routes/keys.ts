@@ -508,88 +508,6 @@ const customProviderSchema = z.object({
   { message: 'model or models is required' },
 );
 
-/**
- * Classify custom models into auto:high / mid / light by **name keywords**.
- * Tuned from FreeLLMAPI live ranking (stability/speed/intelligence score) +
- * known agent flagships (Kimi K2.6, DeepSeek-V4, MiniMax, Hermes, …).
- *
- * high  ≈ score ≥ ~0.72 / 智能档 75–100 / coding·agent 旗舰
- * mid   ≈ score ~0.50–0.72 / 中等通用
- * light ≈ 小模型、lite、8B 级、快翻快摘要
- *
- * A model may land in more than one pool (e.g. flash flagships → high+mid).
- */
-function classifyAutoPools(modelId: string): Array<'high' | 'mid' | 'light'> {
-  const s = modelId.toLowerCase().replace(/[[\]]/g, '');
-
-  // Non-chat / media / safety — skip profile pools
-  if (
-    /embed|embedding|rerank|bge-|tts|whisper|sensevoice|voxtral|orpheus|audio|speech|image|video|vision-only|safety|safeguard|guard|moderat/i.test(
-      s,
-    )
-  ) {
-    return [];
-  }
-
-  const pools: Array<'high' | 'mid' | 'light'> = [];
-
-  // ── HIGH: flagship / agent / top of your leaderboard (#1–~32, score≳0.71)
-  // Families: Kimi/Moonshot, DeepSeek-V4, MiniMax, Hermes, Mistral Large,
-  // Gemini 3.x, Nemotron Ultra/Super, Qwen3.5-397B / Coder, GPT-OSS-120B,
-  // Codestral/Devstral, Gemma-4-31B, GPT-4.1, Command-A, GLM-5, Kat-Coder…
-  const high =
-    /kimi|moonshot|k2\.6|k2\.7|k2-6|k2-7/i.test(s) ||
-    /deepseek-v4|deepseek\/deepseek-v4|deepseek-ai\/deepseek-v4/i.test(s) ||
-    /minimax|m2\.7|m2-7/i.test(s) ||
-    /hermes|405b/i.test(s) ||
-    /mistral-large|mistralai\/mistral-large|675b/i.test(s) ||
-    /gemini-3|gemini\/gemini-3/i.test(s) ||
-    /nemotron-3-ultra|ultra-550|nemotron-3-super|super-120|nemotron-3-120/i.test(s) ||
-    /qwen3\.5-397|qwen3\.5-122|397b|122b-a10b/i.test(s) ||
-    /qwen3-coder|qwen3\.coder|coder-next|coder:480|coder-480/i.test(s) ||
-    /gpt-oss-120|gpt-oss\/120/i.test(s) ||
-    /codestral|devstral|kat-coder|mistral-code/i.test(s) ||
-    /gemma-4-31|gemma4:31/i.test(s) ||
-    /gpt-4\.1|gpt-4o(?!.*mini)/i.test(s) ||
-    /command-a|command_a|command\.a/i.test(s) ||
-    /glm-5|glm\/5|z-ai\/glm-5/i.test(s) ||
-    /magistral-medium/i.test(s) ||
-    /big-pickle|llama-4-maverick/i.test(s);
-
-  // ── LIGHT: small / cheap / translate-ish (your score ~0.29 band + micros)
-  // Prefer exact small markers; do NOT put flagship *-flash here alone.
-  const light =
-    /flash-lite|lite$|-lite|instant/i.test(s) ||
-    /(?:^|[^0-9])([1-9]|1[0-4])b(?:[^0-9]|$)/i.test(s) || // 1b–14b only
-    /nano-9|nano-12|ministral-3|ministral-8|laguna-xs|lfm|liquid|granite.*micro|1\.2b|3b-instruct|tiny/i.test(
-      s,
-    ) ||
-    /mercury|step-3\.[57]-flash|stepfun\/step-3/i.test(s);
-
-  // ── MID: solid general (your ~0.50–0.72) — medium, 20–70B, mid flash, etc.
-  const mid =
-    /mistral-medium|mistral-small|ministral-14|medium|gpt-oss-20|oss-20b/i.test(s) ||
-    /glm-4\.7|glm-4\.6|glm-4-7|zai-glm/i.test(s) ||
-    /(?:^|[^0-9])(20|24|26|27|30|32|35|36|49|70|80)b(?:[^0-9]|$)/i.test(s) ||
-    /llama-3|llama3|llama-4-scout|scout/i.test(s) ||
-    /gemma-4-26|gemma4:26|nano-30|nemotron-3-nano|nemotron-nano/i.test(s) ||
-    /compound|command-r|command_r|seed-oss|hy3|mimo|laguna-m|north-mini|dracarys/i.test(
-      s,
-    ) ||
-    /qwen3\.5-35|qwen3\.6|qwen3-next|qwen3\.5-?27|deepseek-r1|distill/i.test(s) ||
-    /gemini-2\.5-flash(?!-lite)|magistral-small|mistral-code-agent/i.test(s) ||
-    /poolside\/laguna-m|cohere\/north/i.test(s);
-
-  if (high) pools.push('high');
-  if (mid) pools.push('mid');
-  // light only if not already a clear high flagship (avoid kimi-lite false positive)
-  if (light && !high) pools.push('light');
-  // flash alone (not lite): mid, unless already high (deepseek-v4-flash is high)
-  if (!high && !mid && !light && /flash/i.test(s)) pools.push('mid');
-  if (pools.length === 0) pools.push('mid');
-  return pools;
-}
-
 function ensureModelInProfile(db: ReturnType<typeof getDb>, modelDbId: number, profileId: number): void {
   const exists = db.prepare(
     'SELECT 1 FROM profile_models WHERE profile_id = ? AND model_db_id = ?',
@@ -893,27 +811,12 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
         'SELECT id, supports_tools, supports_vision FROM models WHERE platform = ? AND model_id = ?',
       ).get(platform, modelId) as { id: number; supports_tools: number; supports_vision: number };
 
-      // Append to the fallback chain if not already present.
-      const inChain = db.prepare('SELECT 1 FROM fallback_config WHERE model_db_id = ?').get(modelRow.id);
-      if (!inChain) {
-        const max = db.prepare('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config').get() as { m: number };
-        db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(modelRow.id, max.m + 1);
-      }
-
-      // Also attach to routing profiles so plain `auto` and `auto:high|mid|light`
-      // can pick newly registered custom models without a manual Profile edit.
-      ensureModelInProfile(db, modelRow.id, 1); // Default
-      for (const pool of classifyAutoPools(modelId)) {
-        const prof = db.prepare('SELECT id FROM profiles WHERE LOWER(name) = ?').get(pool) as { id: number } | undefined;
-        if (prof) ensureModelInProfile(db, modelRow.id, prof.id);
-      }
-      // Named third-party endpoints (modelscope, locedge…) → Third-Party profile
-      if (multiKey || platform !== 'custom') {
-        const tp = db.prepare(
-          "SELECT id FROM profiles WHERE LOWER(name) = 'third-party' LIMIT 1",
-        ).get() as { id: number } | undefined;
-        if (tp) ensureModelInProfile(db, modelRow.id, tp.id);
-      }
+      // User-registered models join Default only. high/mid/light and other
+      // named routing groups are explicit operator-curated groups.
+      const defaultProfile = db.prepare(
+        "SELECT id FROM profiles WHERE type = 'default' OR LOWER(name) = 'default' ORDER BY CASE WHEN type = 'default' THEN 0 ELSE 1 END LIMIT 1",
+      ).get() as { id: number } | undefined;
+      if (defaultProfile) ensureModelInProfile(db, modelRow.id, defaultProfile.id);
 
       registered.push({
         modelDbId: modelRow.id,
@@ -1219,4 +1122,373 @@ keysRouter.patch('/:id', (req: Request, res: Response) => {
   if (enabled !== undefined) response.enabled = enabled;
   if (label !== undefined) response.label = label;
   res.json(response);
+});
+
+// ── Model catalog sync (Status page "供应商模型更新") ─────────────────────
+// These four endpoints power the StatusPage provider-model-update UI, which
+// diffs each provider's remote /v1/models list against the local catalog so
+// the operator can pull in new models or drop stale local ones without touching
+// the upstream key. All four are read/_write on the SAME models + fallback_config
+// + profile_models tables the rest of the app uses, so changes are immediately
+// visible to Dashboard / Fallback / ModelDetail (which invalidate the shared
+// ['fallback'] / ['models'] / ['health'] query keys).
+
+interface CatalogPlatformOut {
+  platform: string;
+  keyCount: number;
+  modelCount: number;
+  canDiscover: boolean;
+  baseUrl: string | null;
+  listUrl: string | null;
+  kind: 'channel' | 'builtin';
+}
+
+// Resolve the URL we should hit for GET /models on a given platform.
+// - builtin catalog providers: the registered provider's baseUrl (or validateUrl)
+// - named user platforms + classic custom + aihub: the base_url stored on api_keys
+function catalogListUrlFor(platform: string): { listUrl: string | null; canDiscover: boolean; baseUrl: string | null } {
+  const db = getDb();
+  // user/named/custom/aihub: base_url lives on api_keys
+  const keyRow = db.prepare(
+    `SELECT base_url FROM api_keys
+      WHERE platform = ? AND base_url IS NOT NULL AND TRIM(base_url) != ''
+      LIMIT 1`,
+  ).get(platform) as { base_url: string } | undefined;
+  if (keyRow?.base_url) {
+    const base = keyRow.base_url.replace(/\/+$/, '');
+    return { listUrl: `${base}/models`, canDiscover: true, baseUrl: base };
+  }
+  // builtin: use the in-memory provider registration ( baseUrl or validateUrl )
+  const prov = resolveProvider(platform as any);
+  if (prov) {
+    // OpenAICompatProvider keeps baseUrl private; validateUrl (if set) is the
+    // catalog list endpoint, otherwise <baseUrl>/models. We don't have a public
+    // accessor, so read the same constant from the providers/index registrations
+    // mirror below to avoid changing BaseProvider.
+    const known: Record<string, string> = {
+      google: 'https://generativelanguage.googleapis.com/v1beta',
+      groq: 'https://api.groq.com/openai/v1',
+      cerebras: 'https://api.cerebras.ai/v1',
+      nvidia: 'https://integrate.api.nvidia.com/v1',
+      mistral: 'https://api.mistral.ai/v1',
+      openrouter: 'https://openrouter.ai/api/v1',
+      github: 'https://models.github.ai/catalog/models',
+      zhipu: 'https://open.bigmodel.cn/api/paas/v4',
+      huggingface: 'https://router.huggingface.co/v1',
+      ollama: 'https://ollama.com/v1',
+      kilo: 'https://api.kilo.ai/api/gateway/v1',
+      pollinations: 'https://text.pollinations.ai/openai/v1',
+    };
+    const url = known[platform];
+    if (url) {
+      // github validateUrl is the catalog endpoint itself (no /models suffix)
+      if (platform === 'github') return { listUrl: url, canDiscover: true, baseUrl: null };
+      return { listUrl: `${url}/models`, canDiscover: true, baseUrl: null };
+    }
+  }
+  return { listUrl: null, canDiscover: false, baseUrl: null };
+}
+
+// GET /api/keys/model-catalog/platforms
+// Lists every platform that has at least one key, with local model count and
+// whether remote discovery is possible. This is what populates the platform
+// dropdown on the Status page.
+keysRouter.get('/model-catalog/platforms', (_req: Request, res: Response) => {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT k.platform,
+           COUNT(DISTINCT k.id) AS key_count,
+           (SELECT COUNT(*) FROM models m WHERE m.platform = k.platform) AS model_count
+      FROM api_keys k
+     GROUP BY k.platform
+     ORDER BY k.platform
+  `).all() as { platform: string; key_count: number; model_count: number }[];
+
+  const platforms: CatalogPlatformOut[] = rows.map(r => {
+    const { listUrl, canDiscover, baseUrl } = catalogListUrlFor(r.platform);
+    const isChannel = !!(baseUrl || isUserPlatform(r.platform)) || r.platform === 'custom' || r.platform === 'aihub';
+    return {
+      platform: r.platform,
+      keyCount: r.key_count,
+      modelCount: r.model_count,
+      canDiscover,
+      baseUrl,
+      listUrl,
+      kind: isChannel ? 'channel' : 'builtin',
+    };
+  });
+
+  res.json({ platforms });
+});
+
+// POST /api/keys/model-catalog/discover  { platform }
+// Fetches the remote /v1/models for the chosen platform and diffs it against
+// the local catalog. Returns the full remote list annotated with
+// alreadyRegistered / localOnly / existsOtherPlatform so the UI can show
+// "可更新" vs "已有" vs "远端已下架".
+keysRouter.post('/model-catalog/discover', async (req: Request, res: Response) => {
+  const parsed = z.object({ platform: z.string().min(1) }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: 'platform is required' } });
+    return;
+  }
+  const platform = parsed.data.platform.trim().toLowerCase();
+
+  // Resolve list URL + an API key to authorize the request (first enabled key
+  // for this platform). For builtin providers the key is still stored in
+  // api_keys; for named/custom/aihub the base_url + key both live there.
+  const { listUrl, canDiscover, baseUrl } = catalogListUrlFor(platform);
+  if (!canDiscover || !listUrl) {
+    res.status(400).json({ error: { message: `Platform "${platform}" does not support model discovery` } });
+    return;
+  }
+
+  const db = getDb();
+  const keyRow = db.prepare(
+    `SELECT encrypted_key, iv, auth_tag FROM api_keys
+      WHERE platform = ? AND enabled = 1
+      ORDER BY CASE WHEN status = 'healthy' THEN 0 ELSE 1 END, created_at DESC
+      LIMIT 1`,
+  ).get(platform) as { encrypted_key: string; iv: string; auth_tag: string } | undefined;
+  let apiKey = '';
+  if (keyRow) {
+    try { apiKey = decrypt(keyRow.encrypted_key, keyRow.iv, keyRow.auth_tag); } catch { /* keyless */ }
+  }
+
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'User-Agent': 'FreeLLMAPI-catalog-discover/1.0',
+  };
+  if (apiKey && apiKey !== 'no-key') headers.Authorization = `Bearer ${apiKey}`;
+
+  let upstream: globalThis.Response;
+  try {
+    upstream = await fetch(listUrl, {
+      method: 'GET',
+      headers,
+      signal: AbortSignal.timeout(30_000),
+      redirect: 'manual',
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(502).json({ error: { message: `Failed to reach ${listUrl}: ${msg}` } });
+    return;
+  }
+
+  if (upstream.status >= 300 && upstream.status < 400) {
+    res.status(400).json({ error: { message: 'Redirects are not followed; point baseUrl directly at the API root (…/v1)' } });
+    return;
+  }
+
+  const text = await upstream.text();
+  if (!upstream.ok) {
+    res.status(502).json({ error: { message: `Upstream /models returned ${upstream.status}: ${text.slice(0, 300)}` } });
+    return;
+  }
+
+  let body: unknown;
+  try { body = JSON.parse(text); } catch {
+    res.status(502).json({ error: { message: 'Upstream /models did not return JSON' } });
+    return;
+  }
+
+  const rawList: unknown[] = Array.isArray(body)
+    ? body
+    : Array.isArray((body as { data?: unknown }).data)
+      ? ((body as { data: unknown[] }).data)
+      : Array.isArray((body as { models?: unknown }).models)
+        ? ((body as { models: unknown[] }).models)
+        : [];
+
+  // Local model ids for THIS platform, and a global set for existsOtherPlatform
+  const localIds = new Set(
+    (db.prepare('SELECT model_id FROM models WHERE platform = ?').all(platform) as { model_id: string }[])
+      .map(r => r.model_id),
+  );
+  const allLocalIds = new Set(
+    (db.prepare('SELECT model_id FROM models').all() as { model_id: string }[]).map(r => r.model_id),
+  );
+
+  const models: Array<{
+    id: string; name: string; ownedBy?: string;
+    alreadyRegistered: boolean; modelDbId?: number | null;
+    localEnabled?: boolean | null; localOnly?: boolean; existsOtherPlatform?: boolean;
+  }> = [];
+  const seen = new Set<string>();
+  for (const item of rawList) {
+    if (!item || typeof item !== 'object') continue;
+    const id = String((item as any).id ?? (item as any).model ?? '').trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const ownedBy = (item as any).owned_by;
+    const localRow = db.prepare(
+      'SELECT id, enabled FROM models WHERE platform = ? AND model_id = ? LIMIT 1',
+    ).get(platform, id) as { id: number; enabled: number } | undefined;
+    const alreadyOnThis = !!localRow;
+    const onOther = allLocalIds.has(id) && !alreadyOnThis;
+    models.push({
+      id,
+      name: String((item as any).name ?? id),
+      ownedBy: typeof ownedBy === 'string' ? ownedBy : undefined,
+      alreadyRegistered: alreadyOnThis,
+      modelDbId: localRow?.id ?? null,
+      localEnabled: localRow ? localRow.enabled === 1 : null,
+      localOnly: false,
+      existsOtherPlatform: onOther,
+    });
+  }
+  models.sort((a, b) => a.id.localeCompare(b.id));
+
+  // localOnly: local models this platform has but the remote list no longer lists.
+  const remoteIds = new Set(models.map(m => m.id));
+  const localOnlyRows = db.prepare(
+    'SELECT id, model_id, display_name, enabled FROM models WHERE platform = ?',
+  ).all(platform) as { id: number; model_id: string; display_name: string; enabled: number }[];
+  const localOnly = localOnlyRows
+    .filter(r => !remoteIds.has(r.model_id))
+    .map(r => ({
+      id: r.model_id,
+      name: r.display_name,
+      alreadyRegistered: true,
+      modelDbId: r.id,
+      localEnabled: r.enabled === 1,
+      localOnly: true,
+      existsOtherPlatform: false,
+    }));
+
+  const all = [...models, ...localOnly];
+  res.json({
+    platform,
+    listUrl,
+    total: models.length,
+    registered: localIds.size,
+    newCount: models.filter(m => !m.alreadyRegistered).length,
+    localOnly: localOnly.length,
+    models: all,
+  });
+});
+
+// POST /api/keys/model-catalog/import  { platform, modelIds, enable }
+// Adds selected remote model ids to the local catalog for `platform`. Models
+// are inserted disabled by default (enable:false) so the Dashboard probe can
+// verify them before they enter the routing chain. Re-uses the same
+// ensureModelInProfile + fallback_config invariant as POST /custom and
+// catalog-sync, so the new rows show up on every page immediately.
+keysRouter.post('/model-catalog/import', (req: Request, res: Response) => {
+  const parsed = z.object({
+    platform: z.string().min(1),
+    modelIds: z.array(z.string().min(1)).max(500),
+    enable: z.boolean().optional(),
+  }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
+    return;
+  }
+  const platform = parsed.data.platform.trim().toLowerCase();
+  const enable = parsed.data.enable === true;
+  const db = getDb();
+
+  // The platform must already have a key (we discover via its credentials).
+  const hasKey = db.prepare(
+    'SELECT 1 FROM api_keys WHERE platform = ? LIMIT 1',
+  ).get(platform);
+  if (!hasKey) {
+    res.status(400).json({ error: { message: `No key for platform "${platform}"` } });
+    return;
+  }
+
+  // key_id binding: classic custom binds to its endpoint key; named/aihub keep NULL.
+  const bindKeyId = platform === 'custom'
+    ? (db.prepare("SELECT id FROM api_keys WHERE platform = 'custom' ORDER BY created_at DESC LIMIT 1").get() as { id: number } | undefined)?.id ?? null
+    : null;
+
+  const defaultProfile = db.prepare(
+    "SELECT id FROM profiles WHERE type = 'default' OR LOWER(name) = 'default' ORDER BY CASE WHEN type = 'default' THEN 0 ELSE 1 END LIMIT 1",
+  ).get() as { id: number } | undefined;
+
+  let added = 0;
+  let skipped = 0;
+  const inserted: { modelId: string; modelDbId: number }[] = [];
+
+  const tx = db.transaction(() => {
+    for (const rawId of parsed.data.modelIds) {
+      const modelId = rawId.trim();
+      if (!modelId) continue;
+      const existing = db.prepare(
+        'SELECT id FROM models WHERE platform = ? AND model_id = ?',
+      ).get(platform, modelId) as { id: number } | undefined;
+      if (existing) { skipped++; continue; }
+
+      const meta = calibrateModelMeta(modelId);
+      const displayName = niceDisplayName(modelId);
+      const info = db.prepare(`
+        INSERT INTO models
+          (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
+           enabled, key_id, supports_tools, supports_vision)
+        VALUES (@platform, @modelId, @displayName, @intelRank, @speedRank, @sizeLabel,
+           @enabled, @keyId, 1, 0)
+      `).run({
+        platform,
+        modelId,
+        displayName,
+        intelRank: meta.intelligenceRank,
+        speedRank: 35,
+        sizeLabel: meta.sizeLabel,
+        enabled: enable ? 1 : 0,
+        keyId: bindKeyId,
+      });
+      const modelDbId = Number(info.lastInsertRowid);
+
+      // fallback_config row — same invariant catalog-sync keeps (enabled=0 until probe).
+      const maxPri = (db.prepare('SELECT COALESCE(MAX(priority), 0) AS mx FROM fallback_config').get() as { mx: number }).mx;
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, ?)').run(modelDbId, maxPri + 1, enable ? 1 : 0);
+
+      // profile membership: Default always; keeps it visible on Fallback page.
+      if (defaultProfile) ensureModelInProfile(db, modelDbId, defaultProfile.id);
+
+      added++;
+      inserted.push({ modelId, modelDbId });
+    }
+  });
+  tx();
+
+  res.json({ added, skipped, platform, models: inserted });
+});
+
+// POST /api/keys/model-catalog/remove  { platform, modelIds }
+// Deletes selected local model rows for `platform` (cascades fallback_config +
+// profile_models). Mirrors DELETE /api/models/:id so the Fallback / Detail
+// pages stay consistent after a Status-page cleanup.
+keysRouter.post('/model-catalog/remove', (req: Request, res: Response) => {
+  const parsed = z.object({
+    platform: z.string().min(1),
+    modelIds: z.array(z.string().min(1)).max(500),
+  }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
+    return;
+  }
+  const platform = parsed.data.platform.trim().toLowerCase();
+  const db = getDb();
+
+  const removed: { modelId: string }[] = [];
+  let removedCount = 0;
+  const tx = db.transaction(() => {
+    for (const rawId of parsed.data.modelIds) {
+      const modelId = rawId.trim();
+      if (!modelId) continue;
+      const row = db.prepare(
+        'SELECT id FROM models WHERE platform = ? AND model_id = ? LIMIT 1',
+      ).get(platform, modelId) as { id: number } | undefined;
+      if (!row) continue;
+      db.prepare('DELETE FROM fallback_config WHERE model_db_id = ?').run(row.id);
+      db.prepare('DELETE FROM profile_models WHERE model_db_id = ?').run(row.id);
+      db.prepare('DELETE FROM models WHERE id = ?').run(row.id);
+      removedCount++;
+      removed.push({ modelId });
+    }
+  });
+  tx();
+
+  res.json({ removed: removedCount, platform, models: removed });
 });

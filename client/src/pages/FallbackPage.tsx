@@ -44,6 +44,14 @@ import { ModelsTabs } from '@/components/models-tabs'
 import { Tooltip } from '@/components/tooltip'
 import { PenaltyInspector } from '@/components/penalty-inspector'
 
+// Routing group tab labels
+const ROUTING_PROFILES = [
+  { key: 'default', label: 'Default (AUTO)' },
+  { key: 'high', label: 'high' },
+  { key: 'mid', label: 'mid' },
+  { key: 'light', label: 'light' },
+] as const
+
 // `tKey` is the i18n suffix under `strategies.*` (label) and `strategies.*Blurb`.
 // It differs from the routing `key` for Manual, whose strategy id is 'priority'.
 const STRATEGIES: { key: RoutingStrategy; tKey: string }[] = [
@@ -105,6 +113,21 @@ export default function FallbackPage() {
   })
 
   const { probeResults, probingAll, probeProgress, doProbeAll, doProbeGroup } = useProbe()
+  // Per-group 24h latency aggregate. Computed locally from the per-row
+  // `latencyStats` the server already sends (no extra fetch). Sample-weighted
+  // so a provider with 100 probes counts more than one with 5.
+  function groupLatencyFor(members: any[]): { avgMs: number; sampleCount: number } {
+    let sum = 0
+    let total = 0
+    for (const m of members) {
+      const ls = m.latencyStats
+      if (ls && ls.sampleCount > 0) {
+        sum += ls.avgMs * ls.sampleCount
+        total += ls.sampleCount
+      }
+    }
+    return { avgMs: total > 0 ? Math.round(sum / total) : 0, sampleCount: total }
+  }
 
   const saveMutation = useMutation({
     mutationFn: (data: { modelDbId: number; priority: number; enabled: boolean }[]) =>
@@ -127,23 +150,109 @@ export default function FallbackPage() {
   // Merge fallback metadata with live scores, keyed by model.
   const scoreById = new Map((routing?.scores ?? []).map(s => [s.modelDbId, s]))
   const allEntries = localEntries ?? entries
-  const configured = allEntries.filter(e => e.keyCount > 0)
-  const unconfiguredPlatforms = [...new Set(allEntries.filter(e => e.keyCount === 0).map(e => e.platform))]
-
-  // Entry fields win on overlap: the routing snapshot also carries `enabled`
-  // (and identity fields), which would otherwise clobber unsaved local toggles.
-  const rows: Row[] = configured.map(e => ({ ...(scoreById.get(e.modelDbId) ?? {}), ...e }))
 
   const sensors = useSensors(
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   )
 
-  function handleSave() {
-    saveMutation.mutate(allEntries.map(e => ({ modelDbId: e.modelDbId, priority: e.priority, enabled: e.enabled })))
-  }
+  let configured: any[]
+  let unconfiguredPlatforms: string[]
+  let rows: Row[]
 
   const hasChanges = localEntries !== null
+
+  // ── Routing group tabs (Default / high / mid / light) ──────────────
+  const [activeProfile, setActiveProfile] = useState<string>('default')
+  const isDefaultTab = activeProfile === 'default'
+
+  // routing-status: lightweight per-group stats for the tab strip
+  const { data: routingStatus } = useQuery<{ groups: any[] }>({
+    queryKey: ['routing-status'],
+    queryFn: () => apiFetch('/api/profiles/routing-status'),
+    refetchInterval: 30_000,
+  })
+  const statusByGroup = new Map(routingStatus?.groups?.map(g => [g.name, g]) ?? [])
+
+  const { data: profileEntries = [] } = useQuery<FallbackEntry[]>({
+    queryKey: ['profile-models', activeProfile],
+    queryFn: () => apiFetch(`/api/profiles/${statusByGroup.get(activeProfile)?.profileId ?? 3}/models`),
+    enabled: !isDefaultTab && statusByGroup.has(activeProfile),
+  })
+
+  // Membership mutation: add/remove models from routing groups
+  const membershipMutation = useMutation({
+    mutationFn: (payload: { modelDbIds: number[]; add: string[]; remove: string[] }) =>
+      apiFetch('/api/profiles/membership', { method: 'POST', body: JSON.stringify(payload) }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['routing-status'] })
+      if (!isDefaultTab) queryClient.invalidateQueries({ queryKey: ['profile-models', activeProfile] })
+      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+    },
+  })
+
+  // Save handler depends on active tab
+  function handleSave() {
+    if (isDefaultTab) {
+      saveMutation.mutate(allEntries.map(e => ({ modelDbId: e.modelDbId, priority: e.priority, enabled: e.enabled })))
+    } else {
+      const pid = statusByGroup.get(activeProfile)?.profileId
+      if (!pid) return
+      const entries = profileEntries.map((e: any, i: number) => ({
+        modelDbId: e.modelDbId ?? e.id,
+        priority: e.priority ?? i + 1,
+        enabled: e.enabled !== undefined ? e.enabled : true,
+      }))
+      profileReorderMutation.mutate(entries)
+    }
+  }
+
+  // Reorder mutation for high/mid/light profiles
+  const profileReorderMutation = useMutation({
+    mutationFn: (data: { modelDbId: number; priority: number; enabled: boolean }[]) =>
+      apiFetch(`/api/profiles/${statusByGroup.get(activeProfile)?.profileId ?? 3}/reorder`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['profile-models', activeProfile] })
+      queryClient.invalidateQueries({ queryKey: ['routing-status'] })
+    },
+  })
+
+  // Determine the data source: fallback or profile models
+  const effectiveEntries: FallbackEntry[] = isDefaultTab ? (localEntries ?? entries) : (profileEntries as any)
+  // Profile API returns snake_case and no keyCount; normalize so buildGroups works.
+  if (isDefaultTab) {
+    configured = effectiveEntries.filter((e: any) => e.keyCount > 0)
+    unconfiguredPlatforms = [...new Set(effectiveEntries.filter((e: any) => e.keyCount === 0).map((e: any) => e.platform))]
+    rows = configured.map(e => ({ ...(scoreById.get(e.modelDbId) ?? {}), ...e }))
+  } else {
+    // For routing groups, skip keyCount filter (profile only contains its members)
+    // and normalize field names from snake_case (profiles API) to camelCase.
+    configured = effectiveEntries.map((e: any) => ({
+      modelDbId: e.model_db_id ?? e.modelDbId,
+      priority: e.priority ?? 0,
+      enabled: e.enabled === true || e.enabled === 1,
+      platform: e.platform,
+      modelId: e.model_id ?? e.modelId,
+      displayName: e.display_name ?? e.displayName,
+      intelligenceRank: e.intelligence_rank ?? e.intelligenceRank ?? 999,
+      speedRank: e.speed_rank ?? e.speedRank ?? 50,
+      sizeLabel: e.size_label ?? e.sizeLabel ?? 'medium',
+      rpmLimit: e.rpm_limit ?? e.rpmLimit ?? null,
+      rpdLimit: e.rpd_limit ?? e.rpdLimit ?? null,
+      tpmLimit: e.tpm_limit ?? e.tpmLimit ?? null,
+      tpdLimit: e.tpd_limit ?? e.tpdLimit ?? null,
+      contextWindow: e.context_window ?? e.contextWindow ?? null,
+      monthlyTokenBudget: e.monthly_token_budget ?? e.monthlyTokenBudget ?? '',
+      keyCount: 1, // profile members always have a key (added via key platform)
+      supportsVision: e.supports_vision ?? e.supportsVision ?? false,
+      supportsTools: e.supports_tools ?? e.supportsTools ?? false,
+    }))
+    unconfiguredPlatforms = []
+    rows = configured
+  }
 
   // ── Model unification: a model served by several providers is always shown as
   // one logical row that links to its own page (the on/off toggle was removed). ─
@@ -266,6 +375,10 @@ export default function FallbackPage() {
         apiFetch(`/api/models/${m.modelDbId}`, { method: 'DELETE' })
       )).then(() => {
         queryClient.invalidateQueries({ queryKey: ['fallback'] })
+        queryClient.invalidateQueries({ queryKey: ['models'] })
+        queryClient.invalidateQueries({ queryKey: ['health'] })
+        queryClient.invalidateQueries({ queryKey: ['routing-status'] })
+        queryClient.invalidateQueries({ queryKey: ['model-catalog-platforms'] })
         setDeletingGroup(null)
       }).catch(() => setDeletingGroup(null))
     } else {
@@ -280,6 +393,10 @@ export default function FallbackPage() {
       apiFetch(`/api/models/${id}`, { method: 'DELETE' })
     )).then(() => {
       queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      queryClient.invalidateQueries({ queryKey: ['models'] })
+      queryClient.invalidateQueries({ queryKey: ['health'] })
+      queryClient.invalidateQueries({ queryKey: ['routing-status'] })
+      queryClient.invalidateQueries({ queryKey: ['model-catalog-platforms'] })
       setSelectedIds(new Set())
       setBatchMode(false)
     })
@@ -364,6 +481,59 @@ export default function FallbackPage() {
         </section>
 
         <PenaltyInspector />
+
+        {/* Routing groups tab bar */}
+        <section className="rounded-3xl border bg-card p-5">
+          <div className="flex flex-wrap items-center justify-between mb-3">
+            <h2 className="text-sm font-medium">路由组</h2>
+            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+              {ROUTING_PROFILES.filter(p => p.key !== 'default').map(p => {
+                const s = statusByGroup.get(p.key)
+                if (!s) return null
+                return (
+                  <span key={p.key} className="tabular-nums">
+                    {p.key}↑{s.servable ?? '?'}
+                  </span>
+                )
+              })}
+            </div>
+          </div>
+          <div className="inline-flex flex-wrap items-center gap-1 rounded-xl border p-1">
+            {ROUTING_PROFILES.map(p => {
+              const s = statusByGroup.get(p.key)
+              const servable = s?.servable ?? '?'
+              const topName = s?.top?.displayName ?? ''
+              const isActive = activeProfile === p.key
+              const label = p.key === 'default' ? 'Default (AUTO)' : `${p.key} (${servable})`
+              return (
+                <button
+                  key={p.key}
+                  onClick={() => {
+                    if (hasChanges && !window.confirm('放弃未保存的更改？')) return
+                    setActiveProfile(p.key)
+                  }}
+                  className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
+                    isActive
+                      ? 'bg-foreground text-background font-medium'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+                  }`}
+                  title={topName ? `Top: ${topName}` : undefined}
+                >
+                  {label}
+                  {topName && isActive && (
+                    <span className="ml-1.5 opacity-60 font-normal">↑ {topName}</span>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+          {!isDefaultTab && (
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              编辑 {activeProfile} 路由组顺序。Auto 请求用 {activeProfile} 组的排列。
+              修改 Default 不会影响 {activeProfile}。
+            </p>
+          )}
+        </section>
 
         {/* Unified routing / fallback table */}
         {isLoading ? (
@@ -506,6 +676,7 @@ export default function FallbackPage() {
                             deletingKey={deletingGroup}
                             probeStatus={ps.status}
                             probeLatency={ps.latency}
+                            avgLatency={groupLatencyFor(g.members)}
                             onProbeGroup={handleProbeGroup}
                             probingAll={probingAll}
                             showProbe
@@ -542,6 +713,7 @@ export default function FallbackPage() {
                           deletingKey={deletingGroup}
                           probeStatus={ps.status}
                           probeLatency={ps.latency}
+                          avgLatency={groupLatencyFor(g.members)}
                           onProbeGroup={handleProbeGroup}
                           probingAll={probingAll}
                           showProbe
@@ -572,6 +744,20 @@ export default function FallbackPage() {
             {batchMode && (
               <FloatingBar show={batchMode}>
                 <span className="text-xs text-muted-foreground">{selectedIds.size} 个模型已选择</span>
+                {selectedIds.size > 0 && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-muted-foreground">加入</span>
+                    {['high', 'mid', 'light'].map(p => (
+                      <Button key={p} size="sm" variant="outline"
+                        onClick={() => membershipMutation.mutate({ modelDbIds: [...selectedIds], add: [p], remove: [] })}
+                        disabled={membershipMutation.isPending}
+                        className="text-xs"
+                      >
+                        {p}
+                      </Button>
+                    ))}
+                  </div>
+                )}
                 <Button variant="outline" size="sm" onClick={() => { setBatchMode(false); setSelectedIds(new Set()) }}>取消</Button>
                 <Button size="sm" onClick={deleteSelected} disabled={selectedIds.size === 0} className="bg-[#f87171] hover:bg-[#ef4444] text-white">
                   删除选中

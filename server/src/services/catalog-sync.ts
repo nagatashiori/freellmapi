@@ -11,6 +11,11 @@ import {
   deleteTombstonedCatalogModels,
   isCatalogModelTombstoned,
 } from './model-state.js';
+import {
+  deleteRoutingModelMemberships,
+  ensureModelInProfile,
+  getDefaultProfileId,
+} from './routing-groups.js';
 
 // Generative-media modalities are routed into the separate media_models table
 // (see services/media.ts), never into the chat `models` table.
@@ -264,7 +269,9 @@ export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['
         applyModelOverrides(db, m.platform, m.modelId);
         counts.updated++;
       } else {
-        insertModel.run({ ...fields, platform: m.platform, modelId: m.modelId, enabled: m.enabled ? 1 : 0 });
+        const insert = insertModel.run({ ...fields, platform: m.platform, modelId: m.modelId, enabled: m.enabled ? 1 : 0 });
+        const modelDbId = Number(insert.lastInsertRowid);
+        ensureModelInProfile(db, getDefaultProfileId(db), modelDbId, 0);
         applyModelOverrides(db, m.platform, m.modelId);
         counts.inserted++;
       }
@@ -281,7 +288,7 @@ export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['
       .all() as { id: number }[];
     if (missingFb.length > 0) {
       const maxPriority = (db.prepare('SELECT COALESCE(MAX(priority), 0) AS mx FROM fallback_config').get() as { mx: number }).mx;
-      const addFb = db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)');
+      const addFb = db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 0)');
       missingFb.forEach((r, i) => addFb.run(r.id, maxPriority + 1 + i));
     }
 
@@ -317,6 +324,7 @@ export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['
       if (!hasProvider(c.platform as Platform)) continue; // not catalog-managed by this binary
       if (isUserPlatform(c.platform)) continue;
       if (!inCatalog.has(`${c.platform}:${c.model_id}`)) {
+        deleteRoutingModelMemberships(db, c.id);
         deleteFb.run(c.id);
         deleteModel.run(c.id);
         counts.removed++;

@@ -8,6 +8,7 @@ import {
   setRoutingStrategy,
 } from '../../services/router.js';
 import { setCooldown } from '../../services/ratelimit.js';
+import { getDefaultProfileId, replaceRoutingChain } from '../../services/routing-groups.js';
 
 describe('Router', () => {
   beforeAll(() => {
@@ -21,14 +22,13 @@ describe('Router', () => {
     // bandit (now the default strategy) doesn't reorder by score.
     setRoutingStrategy('priority');
     db.prepare('DELETE FROM api_keys').run();
-    // Disable active profile so the router falls back to fallback_config
-    db.prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
-    // Reset fallback order to intelligence ranking
-    const models = db.prepare('SELECT id, intelligence_rank FROM models ORDER BY intelligence_rank ASC').all() as any[];
-    const update = db.prepare('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?');
-    for (let i = 0; i < models.length; i++) {
-      update.run(i + 1, models[i].id);
-    }
+    // Reset Default routing profile to intelligence ranking.
+    const models = db.prepare('SELECT id, intelligence_rank FROM models ORDER BY intelligence_rank ASC').all() as { id: number }[];
+    replaceRoutingChain(db, getDefaultProfileId(db), models.map((model, index) => ({
+      modelDbId: model.id,
+      priority: index + 1,
+      enabled: true,
+    })));
   });
 
   afterEach(() => {
@@ -159,9 +159,13 @@ describe('Router', () => {
        LIMIT 1
     `).get() as { id: number };
 
-    db.prepare('UPDATE fallback_config SET priority = 1000, enabled = 1').run();
-    db.prepare('UPDATE fallback_config SET priority = 1 WHERE model_db_id = ?').run(github.id);
-    db.prepare('UPDATE fallback_config SET priority = 2 WHERE model_db_id = ?').run(groq.id);
+    const defaultProfileId = getDefaultProfileId(db);
+    const all = db.prepare('SELECT model_db_id FROM profile_models WHERE profile_id = ?').all(defaultProfileId) as { model_db_id: number }[];
+    replaceRoutingChain(db, defaultProfileId, all.map((entry, index) => ({
+      modelDbId: entry.model_db_id,
+      priority: entry.model_db_id === github.id ? 1 : entry.model_db_id === groq.id ? 2 : index + 100,
+      enabled: true,
+    })));
     db.prepare(`
       UPDATE models SET tpm_limit = NULL, tpd_limit = NULL
        WHERE id IN (?, ?)

@@ -176,11 +176,13 @@ export function deleteTombstonedCatalogModels(db: Db): number {
         ON t.kind = 'media' AND t.platform = mm.platform AND t.model_id = mm.model_id
   `).all() as { id: number }[];
 
+  const deleteChatMemberships = db.prepare('DELETE FROM profile_models WHERE model_db_id = ?');
   const deleteChatFallback = db.prepare('DELETE FROM fallback_config WHERE model_db_id = ?');
   const deleteChat = db.prepare('DELETE FROM models WHERE id = ?');
   const deleteMedia = db.prepare('DELETE FROM media_models WHERE id = ?');
 
   for (const row of chatRows) {
+    deleteChatMemberships.run(row.id);
     deleteChatFallback.run(row.id);
     deleteChat.run(row.id);
   }

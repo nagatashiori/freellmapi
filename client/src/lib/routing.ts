@@ -31,6 +31,15 @@ export interface FallbackEntry {
   keyLabel?: string | null
   hasOverrides?: boolean
   keyCount: number
+  // 24h probe latency aggregate from the server. avgMs and sampleCount are
+  // success-only; `last*` describe the most recent probe regardless of status.
+  latencyStats?: {
+    avgMs: number
+    sampleCount: number
+    lastStatus: string | null
+    lastLatency: number | null
+    lastAt: string | null
+  }
   // Logical-model grouping (sent by the server when unify is relevant). Absent
   // for ungrouped rows; the UI falls back to a per-row "solo" group then.
   groupKey?: string

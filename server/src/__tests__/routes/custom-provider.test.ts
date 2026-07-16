@@ -84,7 +84,7 @@ describe('Custom Provider Endpoints', () => {
     expect(status).toBe(400);
   });
 
-  it('registers a custom endpoint, model, and fallback entry', async () => {
+  it('registers a custom endpoint, model, and Default profile entry', async () => {
     const { status, body } = await post(app, '/api/keys/custom', {
       baseUrl: 'http://127.0.0.1:11434/v1/',
       model: 'qwen3:4b',
@@ -100,8 +100,13 @@ describe('Custom Provider Endpoints', () => {
     expect(key.base_url).toBe('http://127.0.0.1:11434/v1');
     const model = db.prepare("SELECT * FROM models WHERE platform = 'custom' AND model_id = 'qwen3:4b'").get() as any;
     expect(model).toBeDefined();
-    const fc = db.prepare('SELECT * FROM fallback_config WHERE model_db_id = ?').get(model.id);
-    expect(fc).toBeDefined();
+    const profileModel = db.prepare(`
+      SELECT 1
+      FROM profile_models pm
+      JOIN profiles p ON p.id = pm.profile_id
+      WHERE pm.model_db_id = ? AND (p.type = 'default' OR LOWER(p.name) = 'default')
+    `).get(model.id);
+    expect(profileModel).toBeDefined();
   });
 
   it('reuses the single custom key when a second model is added', async () => {
@@ -195,8 +200,13 @@ describe('Custom Provider Endpoints', () => {
     expect(status).toBe(201);
     const db = getDb();
     expect((db.prepare("SELECT COUNT(*) AS n FROM api_keys WHERE platform = 'custom'").get() as { n: number }).n).toBe(1);
-    const fc = db.prepare('SELECT * FROM fallback_config WHERE model_db_id = ?').get(body.modelDbId);
-    expect(fc).toBeDefined();
+    const profileModel = db.prepare(`
+      SELECT 1
+      FROM profile_models pm
+      JOIN profiles p ON p.id = pm.profile_id
+      WHERE pm.model_db_id = ? AND (p.type = 'default' OR LOWER(p.name) = 'default')
+    `).get(body.modelDbId);
+    expect(profileModel).toBeDefined();
   });
 
   it('surfaces a clear error when the custom endpoint speaks NDJSON, not OpenAI (#189)', async () => {
@@ -338,7 +348,12 @@ describe('Custom Provider Endpoints', () => {
       const models = db.prepare("SELECT model_id FROM models WHERE platform = 'custom' AND key_id = ?").all((keys[0] as any).id) as any[];
       expect(models.map(m => m.model_id).sort()).toEqual(['gemma3:1b', 'phi4:14b']);
       for (const m of body.models) {
-        expect(db.prepare('SELECT 1 FROM fallback_config WHERE model_db_id = ?').get(m.modelDbId)).toBeDefined();
+        expect(db.prepare(`
+          SELECT 1
+          FROM profile_models pm
+          JOIN profiles p ON p.id = pm.profile_id
+          WHERE pm.model_db_id = ? AND (p.type = 'default' OR LOWER(p.name) = 'default')
+        `).get(m.modelDbId)).toBeDefined();
       }
     });
 

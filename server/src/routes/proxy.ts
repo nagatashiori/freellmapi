@@ -17,7 +17,7 @@ import { isFusionModel, runFusion, fusionConfigSchema, FusionError, FUSION_MODEL
 import { isRetryableError, isPaymentRequiredError, isModelNotFoundError, isModelAccessForbiddenError } from '../lib/error-classify.js';
 import { logRequest } from '../lib/request-log.js';
 import { parseCacheDirective, cacheActive, isCacheableTemperature, computeCacheKey, getCachedResponse, storeCachedResponse } from '../services/cache.js';
-import { runFallbackLoop, newFallbackState, recordUpstreamSuccess, exhaustedRetryError, setFallbackHeaders, type AttemptRecord } from '../lib/fallback-loop.js';
+import { runFallbackLoop, newFallbackState, recordUpstreamSuccess, exhaustedRetryError, setFallbackHeaders, getFallbackAttemptTimeoutMs, type AttemptRecord } from '../lib/fallback-loop.js';
 import { applyTokenBudget, tokenBudgetMessage } from '../lib/guardrails.js';
 import { samplingParamSchemaFields, pickSamplingParams, supportedParametersForPlatforms } from '../lib/sampling-params.js';
 import { enforceJsonContent } from '../lib/structured-output.js';
@@ -726,6 +726,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
   }
 
   const pinnedModelId = requestedModel && !isAutoModel(requestedModel) ? requestedModel : null;
+  const attemptTimeoutMs = getFallbackAttemptTimeoutMs();
   const state = newFallbackState();
   const attemptLog: AttemptRecord[] = [];
   let clientGone = false;
@@ -784,7 +785,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
             route.apiKey,
             messages,
             route.modelId,
-            { temperature, max_tokens, top_p, stop },
+            { temperature, max_tokens, top_p, stop, timeoutMs: attemptTimeoutMs },
             quotaContextForRoute(route, 'chat/completions'),
           );
 
@@ -1436,6 +1437,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   // ('auto' or omitted). Logged with every request row so pinned vs auto
   // traffic and failover overrides are visible.
   const pinnedModelId = requestedModel && !isAutoModel(requestedModel) ? requestedModel : null;
+  const attemptTimeoutMs = getFallbackAttemptTimeoutMs();
 
   // Retry loop: on 429/rate limit, skip that model+key and try the next one.
   // The attempt iteration, cooldown/skip/penalty bookkeeping, and exhaustion
@@ -1542,7 +1544,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         try {
           const gen = route.provider.streamChatCompletion(
             route.apiKey, outboundMessages, route.modelId,
-            { temperature, max_tokens, top_p, stop, tools, tool_choice, parallel_tool_calls, ...samplingParams },
+            { temperature, max_tokens, top_p, stop, tools, tool_choice, parallel_tool_calls, timeoutMs: attemptTimeoutMs, ...samplingParams },
             quotaContextForRoute(route, 'chat/completions'),
           );
 

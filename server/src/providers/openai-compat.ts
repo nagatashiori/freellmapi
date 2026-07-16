@@ -231,7 +231,7 @@ export class OpenAICompatProvider extends BaseProvider {
         ...extendedBodyParams(this.platform, options),
         stream: true,
       }),
-    }, this.timeoutMs);
+    }, options?.timeoutMs ?? this.timeoutMs);
 
     recordQuotaObservationsFromResponse(res, {
       platform: this.platform,

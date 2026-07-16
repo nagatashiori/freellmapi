@@ -1,6 +1,11 @@
 import fs from 'fs';
 import { z } from 'zod';
 import type { Db } from '../db/types.js';
+import {
+  getDefaultProfileId,
+  setDefaultRoutingModelEnabled,
+  upsertRoutingEntries,
+} from './routing-groups.js';
 import { getDb } from '../db/index.js';
 import { encrypt } from '../lib/crypto.js';
 import { resolveProvider } from '../providers/index.js';
@@ -177,17 +182,17 @@ function normalizeModelEntry(entry: z.infer<typeof modelEntrySchema>): Normalize
   return { ...entry, modelId, displayName: entry.displayName?.trim() || modelId };
 }
 
-function ensureFallbackRow(db: Db, modelDbId: number, enabled = true, updateExisting = true): void {
-  const existing = db.prepare('SELECT 1 FROM fallback_config WHERE model_db_id = ?').get(modelDbId);
+function ensureDefaultRoutingRow(db: Db, modelDbId: number, enabled = true, updateExisting = true): void {
+  const profileId = getDefaultProfileId(db);
+  const existing = db.prepare(`
+    SELECT enabled FROM profile_models
+    WHERE profile_id = ? AND model_db_id = ?
+  `).get(profileId, modelDbId) as { enabled: number } | undefined;
   if (existing) {
-    if (updateExisting) {
-      db.prepare('UPDATE fallback_config SET enabled = ? WHERE model_db_id = ?').run(enabled ? 1 : 0, modelDbId);
-    }
+    if (updateExisting) setDefaultRoutingModelEnabled(db, modelDbId, enabled);
     return;
   }
-  const max = db.prepare('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config').get() as { m: number };
-  db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, ?)')
-    .run(modelDbId, max.m + 1, enabled ? 1 : 0);
+  setDefaultRoutingModelEnabled(db, modelDbId, enabled);
 }
 
 function registerCustomProvider(db: Db, input: z.infer<typeof customProviderSchema>): number {
@@ -232,7 +237,7 @@ function registerCustomProvider(db: Db, input: z.infer<typeof customProviderSche
       keyId,
     );
     const row = db.prepare("SELECT id FROM models WHERE platform = 'custom' AND model_id = ?").get(model.modelId) as { id: number };
-    ensureFallbackRow(db, row.id, model.fallbackEnabled !== false);
+    ensureDefaultRoutingRow(db, row.id, model.fallbackEnabled !== false);
     registered++;
   }
   return registered;
@@ -282,7 +287,7 @@ function upsertModel(db: Db, input: z.infer<typeof modelSchema>): void {
       input.supportsTools ? 1 : 0,
     );
     const created = db.prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?').get(platform, modelId) as { id: number };
-    ensureFallbackRow(db, created.id, input.fallbackEnabled ?? input.enabled !== false);
+    ensureDefaultRoutingRow(db, created.id, input.fallbackEnabled ?? input.enabled !== false);
     return;
   }
 
@@ -318,21 +323,22 @@ function upsertModel(db: Db, input: z.infer<typeof modelSchema>): void {
   if (isCatalogManagedModel(existing) && Object.keys(patch).length > 0) {
     upsertModelOverrides(db, platform, modelId, patch);
   }
-  ensureFallbackRow(db, existing.id, input.fallbackEnabled ?? input.enabled !== false, input.fallbackEnabled !== undefined);
+  ensureDefaultRoutingRow(db, existing.id, input.fallbackEnabled ?? input.enabled !== false, input.fallbackEnabled !== undefined);
 }
 
 function applyFallback(db: Db, entries: z.infer<typeof fallbackEntrySchema>[]): number {
-  const update = db.prepare('UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ?');
-  let changed = 0;
-  entries.forEach((entry, i) => {
+  const resolved = entries.flatMap((entry, index) => {
     const row = db.prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?')
       .get(entry.platform, entry.modelId) as { id: number } | undefined;
-    if (!row) return;
-    ensureFallbackRow(db, row.id, entry.enabled !== false);
-    update.run(entry.priority ?? i + 1, entry.enabled === false ? 0 : 1, row.id);
-    changed++;
+    if (!row) return [];
+    return [{
+      modelDbId: row.id,
+      priority: entry.priority ?? index + 1,
+      enabled: entry.enabled !== false,
+    }];
   });
-  return changed;
+  upsertRoutingEntries(db, getDefaultProfileId(db), resolved);
+  return resolved.length;
 }
 
 export function applyDeclarativeConfig(input: unknown, source = 'inline'): DeclarativeConfigResult {
