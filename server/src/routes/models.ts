@@ -12,6 +12,7 @@ import {
 } from '../services/model-state.js';
 import {
   deleteRoutingModelMemberships,
+  getDefaultProfileId,
   setDefaultRoutingModelEnabled,
 } from '../services/routing-groups.js';
 
@@ -204,16 +205,20 @@ modelsRouter.delete('/:id', (req: Request, res: Response) => {
 // List all models with availability info
 modelsRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
+  const defaultProfileId = getDefaultProfileId(db);
   const models = db.prepare(`
-    SELECT m.*, fc.priority, fc.enabled as fallback_enabled,
+    SELECT m.*,
+           COALESCE(pm.priority, fc.priority) AS priority,
+           COALESCE(pm.enabled, fc.enabled) AS fallback_enabled,
            mo.overrides_json IS NOT NULL AS has_overrides,
            ak.label AS key_label
     FROM models m
+    LEFT JOIN profile_models pm ON pm.model_db_id = m.id AND pm.profile_id = ?
     LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
     LEFT JOIN model_overrides mo ON mo.platform = m.platform AND mo.model_id = m.model_id
     LEFT JOIN api_keys ak ON ak.id = m.key_id
-    ORDER BY COALESCE(fc.priority, m.intelligence_rank) ASC
-  `).all() as any[];
+    ORDER BY COALESCE(pm.priority, fc.priority, m.intelligence_rank) ASC
+  `).all(defaultProfileId) as any[];
 
   // Count keys per platform
   const keyCounts = db.prepare(`

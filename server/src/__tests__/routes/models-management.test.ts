@@ -3,6 +3,7 @@ import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { initDb, getDb } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { getDefaultProfileId } from '../../services/routing-groups.js';
 
 let dashToken = '';
 
@@ -52,11 +53,11 @@ describe('Model management API', () => {
     expect(body.success).toBe(true);
 
     const row = getDb().prepare(`
-      SELECT m.display_name, m.supports_tools, m.context_window, fc.enabled AS fallback_enabled
+      SELECT m.display_name, m.supports_tools, m.context_window, pm.enabled AS fallback_enabled
         FROM models m
-        JOIN fallback_config fc ON fc.model_db_id = m.id
+        JOIN profile_models pm ON pm.model_db_id = m.id AND pm.profile_id = ?
        WHERE m.id = ?
-    `).get(target.id) as { display_name: string; supports_tools: number; context_window: number; fallback_enabled: number };
+    `).get(getDefaultProfileId(getDb()), target.id) as { display_name: string; supports_tools: number; context_window: number; fallback_enabled: number };
     expect(row).toEqual({
       display_name: 'Locally tuned model',
       supports_tools: 1,

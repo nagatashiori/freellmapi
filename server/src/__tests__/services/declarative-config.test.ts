@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { initDb, getDb } from '../../db/index.js';
 import { applyDeclarativeConfig, applyDeclarativeConfigFromEnv } from '../../services/declarative-config.js';
 import { getRoutingStrategy } from '../../services/router.js';
+import { getDefaultProfileId } from '../../services/routing-groups.js';
 
 const ORIGINAL_CONFIG_JSON = process.env.FREEAPI_CONFIG_JSON;
 const ORIGINAL_CONFIG_PATH = process.env.FREEAPI_CONFIG_PATH;
@@ -62,11 +63,11 @@ describe('declarative config import', () => {
     `).get()).toEqual({ display_name: 'Local Chat', supports_tools: 1, context_window: 32000 });
 
     const model = getDb().prepare(`
-      SELECT m.display_name, m.supports_tools, m.context_window, fc.priority, fc.enabled AS fallback_enabled
+      SELECT m.display_name, m.supports_tools, m.context_window, pm.priority, pm.enabled AS fallback_enabled
         FROM models m
-        JOIN fallback_config fc ON fc.model_db_id = m.id
+        JOIN profile_models pm ON pm.model_db_id = m.id AND pm.profile_id = ?
        WHERE m.platform = ? AND m.model_id = ?
-    `).get(target.platform, target.model_id) as {
+    `).get(getDefaultProfileId(getDb()), target.platform, target.model_id) as {
       display_name: string;
       supports_tools: number;
       context_window: number;
@@ -88,11 +89,11 @@ describe('declarative config import', () => {
       models: [{ platform: target.platform, modelId: target.model_id, displayName: 'Edited Again' }],
     });
     expect((getDb().prepare(`
-      SELECT fc.enabled AS fallback_enabled
+      SELECT pm.enabled AS fallback_enabled
         FROM models m
-        JOIN fallback_config fc ON fc.model_db_id = m.id
+        JOIN profile_models pm ON pm.model_db_id = m.id AND pm.profile_id = ?
        WHERE m.platform = ? AND m.model_id = ?
-    `).get(target.platform, target.model_id) as { fallback_enabled: number }).fallback_enabled).toBe(0);
+    `).get(getDefaultProfileId(getDb()), target.platform, target.model_id) as { fallback_enabled: number }).fallback_enabled).toBe(0);
   });
 
   it('applies inline JSON from FREEAPI_CONFIG_JSON idempotently', () => {
