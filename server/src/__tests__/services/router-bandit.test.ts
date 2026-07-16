@@ -24,6 +24,17 @@ vi.mock('../../lib/crypto.js', async () => {
 const ORIGINAL_DEV_MODE = process.env.DEV_MODE;
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 
+function defaultProfileId(): number {
+  const row = getDb().prepare(`
+    SELECT id
+    FROM profiles
+    WHERE type = 'default' OR LOWER(name) = 'default'
+    ORDER BY CASE WHEN type = 'default' THEN 0 ELSE 1 END, id ASC
+    LIMIT 1
+  `).get() as { id: number };
+  return row.id;
+}
+
 // Insert a model + its fallback entry; returns the model id.
 function addModel(opts: {
   platform: string; modelId: string; name: string;
@@ -37,6 +48,8 @@ function addModel(opts: {
   const id = (db.prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?')
     .get(opts.platform, opts.modelId) as { id: number }).id;
   db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(id, opts.priority);
+  db.prepare('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, ?, 1)')
+    .run(defaultProfileId(), id, opts.priority);
   // every platform needs at least one healthy key to be routable
   db.prepare(`
     INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
@@ -78,7 +91,7 @@ describe('bandit router', () => {
     initDb(':memory:');
     // initDb seeds the real catalog; wipe it so each test controls its own
     // models/keys/history (and seeded models don't share a platform with ours).
-    getDb().exec('DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests;');
+    getDb().exec('DELETE FROM fallback_config; DELETE FROM profile_models; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests;');
     vi.clearAllMocks();
     (ratelimit.canMakeRequest as any).mockReturnValue(true);
     (ratelimit.canUseTokens as any).mockReturnValue(true);

@@ -3,6 +3,7 @@ import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { insertHealthyKey } from '../helpers/healthy-key.js';
 
 let dashToken = '';
 
@@ -51,17 +52,12 @@ describe('requested_model analytics logging', () => {
     `).get() as { model_id: string }).model_id;
   });
 
-  beforeEach(async () => {
+  beforeEach(() => {
     const db = getDb();
     db.prepare('DELETE FROM api_keys').run();
     db.prepare('DELETE FROM requests').run();
 
-    const addKey = await request(app, 'POST', '/api/keys', {
-      platform: 'groq',
-      key: 'gsk_pinned_model_test',
-      label: 'pinned-model',
-    });
-    expect(addKey.status).toBe(201);
+    insertHealthyKey('groq', 'gsk_pinned_model_test', 'pinned-model');
 
     const origFetch = global.fetch;
     vi.spyOn(global, 'fetch').mockImplementation(async (url, init) => {

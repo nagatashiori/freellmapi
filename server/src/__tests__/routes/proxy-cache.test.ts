@@ -4,6 +4,7 @@ import { createApp } from '../../app.js';
 import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
 import { clearCache } from '../../services/cache.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { insertHealthyKey } from '../helpers/healthy-key.js';
 
 let dashToken = '';
 
@@ -83,14 +84,13 @@ describe('Response cache (proxy integration)', () => {
     delete process.env.RESPONSE_CACHE;
   });
 
-  beforeEach(async () => {
+  beforeEach(() => {
     const db = getDb();
     db.prepare('DELETE FROM api_keys').run();
     db.prepare('DELETE FROM requests').run();
     db.prepare('DELETE FROM rate_limit_usage').run();
     clearCache();
-    const addKey = await request(app, 'POST', '/api/keys', { platform: 'groq', key: 'gsk_cache_test', label: 'cache' });
-    expect(addKey.status).toBe(201);
+    insertHealthyKey('groq', 'gsk_cache_test', 'cache');
   });
 
   afterEach(() => {

@@ -3,7 +3,7 @@ import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
 import { routeRequest, setRoutingStrategy } from '../../services/router.js';
-import { encrypt } from '../../lib/crypto.js';
+import { insertHealthyKey } from '../helpers/healthy-key.js';
 
 async function post(app: Express, path: string, body: any, key: string) {
   const server = app.listen(0);
@@ -54,6 +54,17 @@ const BUILTIN_TOOL_RESPONSES = {
   }],
 };
 
+function defaultProfileId(): number {
+  const row = getDb().prepare(`
+    SELECT id
+    FROM profiles
+    WHERE type = 'default' OR LOWER(name) = 'default'
+    ORDER BY CASE WHEN type = 'default' THEN 0 ELSE 1 END, id ASC
+    LIMIT 1
+  `).get() as { id: number };
+  return row.id;
+}
+
 describe('Tools-aware routing', () => {
   let app: Express;
   let key: string;
@@ -97,27 +108,29 @@ describe('Tools-aware routing', () => {
 
     // One key for google, whose catalog holds both a non-tool model (gemma)
     // and tool-capable ones (gemini). Put gemma at the top of the chain.
-    const { encrypted, iv, authTag } = encrypt('test-google-key');
-    db.prepare(`
-      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-      VALUES ('google', 'test', ?, ?, ?, 'healthy', 1)
-    `).run(encrypted, iv, authTag);
+    db.prepare('DELETE FROM api_keys').run();
+    insertHealthyKey('google', 'test-google-key', 'test');
 
     const gemma = db.prepare("SELECT id FROM models WHERE platform = 'google' AND LOWER(model_id) LIKE '%gemma%' AND enabled = 1").get() as { id: number } | undefined;
     expect(gemma).toBeDefined();
     db.prepare('UPDATE fallback_config SET priority = 0, enabled = 1 WHERE model_db_id = ?').run(gemma!.id);
+    const profileId = defaultProfileId();
+    db.prepare('UPDATE profile_models SET priority = priority + 100 WHERE profile_id = ?').run(profileId);
+    db.prepare('UPDATE profile_models SET priority = 0, enabled = 1 WHERE profile_id = ? AND model_db_id = ?').run(profileId, gemma!.id);
 
-    // Plain request takes the chain head: gemma.
-    const plain = routeRequest(1000);
-    expect(plain.modelId.toLowerCase()).toContain('gemma');
+    try {
+      // Plain request takes the chain head: gemma.
+      const plain = routeRequest(1000);
+      expect(plain.modelId.toLowerCase()).toContain('gemma');
 
-    // Tool-bearing request must skip past gemma to a tool-capable model.
-    const tooled = routeRequest(1000, undefined, undefined, false, true);
-    expect(tooled.modelId.toLowerCase()).not.toContain('gemma');
-    const flag = db.prepare('SELECT supports_tools FROM models WHERE id = ?').get(tooled.modelDbId) as { supports_tools: number };
-    expect(flag.supports_tools).toBe(1);
-
-    db.prepare('DELETE FROM api_keys').run();
+      // Tool-bearing request must skip past gemma to a tool-capable model.
+      const tooled = routeRequest(1000, undefined, undefined, false, true);
+      expect(tooled.modelId.toLowerCase()).not.toContain('gemma');
+      const flag = db.prepare('SELECT supports_tools FROM models WHERE id = ?').get(tooled.modelDbId) as { supports_tools: number };
+      expect(flag.supports_tools).toBe(1);
+    } finally {
+      db.prepare('DELETE FROM api_keys').run();
+    }
   });
 
   it('lets a tool request through routing when a tool-capable model is enabled (no 422)', async () => {

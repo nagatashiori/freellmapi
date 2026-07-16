@@ -3,6 +3,7 @@ import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { insertHealthyKey } from '../helpers/healthy-key.js';
 
 let dashToken = '';
 
@@ -44,17 +45,12 @@ describe('Provider error redaction', () => {
     dashToken = mintDashboardToken();
   });
 
-  beforeEach(async () => {
+  beforeEach(() => {
     const db = getDb();
     db.prepare('DELETE FROM api_keys').run();
     db.prepare('DELETE FROM requests').run();
 
-    const addKey = await request(app, 'POST', '/api/keys', {
-      platform: 'groq',
-      key: 'gsk_proxy_redaction_test_key',
-      label: 'proxy-redaction',
-    });
-    expect(addKey.status).toBe(201);
+    insertHealthyKey('groq', 'gsk_proxy_redaction_test_key', 'proxy-redaction');
   });
 
   afterEach(() => {

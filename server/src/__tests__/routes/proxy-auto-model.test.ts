@@ -3,6 +3,7 @@ import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { insertHealthyKey } from '../helpers/healthy-key.js';
 
 let dashToken = '';
 
@@ -40,7 +41,7 @@ describe('Virtual "auto" model', () => {
     dashToken = mintDashboardToken();
   });
 
-  beforeEach(async () => {
+  beforeEach(() => {
     const db = getDb();
     // Unification is always on: /v1/models lists one entry per logical model
     // (owned_by = freellmapi, id = canonical slug) that aggregates availability
@@ -49,12 +50,7 @@ describe('Virtual "auto" model', () => {
     db.prepare('DELETE FROM api_keys').run();
     db.prepare('DELETE FROM requests').run();
 
-    const addKey = await request(app, 'POST', '/api/keys', {
-      platform: 'groq',
-      key: 'gsk_auto_model_test',
-      label: 'auto-model',
-    });
-    expect(addKey.status).toBe(201);
+    insertHealthyKey('groq', 'gsk_auto_model_test', 'auto-model');
   });
 
   afterEach(() => {

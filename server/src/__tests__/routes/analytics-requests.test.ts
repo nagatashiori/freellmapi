@@ -21,6 +21,17 @@ async function request(app: Express, path: string) {
   return { status: res.status, body: data };
 }
 
+function utcFixture(daysAgo: number, hour: number) {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - daysAgo);
+  d.setUTCHours(hour, 0, 0, 0);
+  const iso = d.toISOString().replace('.000Z', 'Z');
+  return {
+    db: iso.replace('T', ' ').replace('Z', ''),
+    iso,
+  };
+}
+
 function insertCall(createdAt: string, clientIp: string | null, clientUserAgent: string | null, status = 'success') {
   getDb().prepare(`
     INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, latency_ms, error, created_at, client_ip, client_user_agent)
@@ -43,9 +54,12 @@ describe('GET /api/analytics/requests', () => {
   });
 
   it('returns one row per call, newest first, with caller identity', async () => {
-    insertCall('2026-07-06 10:00:00', '192.168.0.3', 'curl/8.6.0');
-    insertCall('2026-07-06 11:00:00', '192.168.0.15', 'python-httpx/0.27');
-    insertCall('2026-07-06 12:00:00', null, null);
+    const ten = utcFixture(3, 10);
+    const eleven = utcFixture(3, 11);
+    const noon = utcFixture(3, 12);
+    insertCall(ten.db, '192.168.0.3', 'curl/8.6.0');
+    insertCall(eleven.db, '192.168.0.15', 'python-httpx/0.27');
+    insertCall(noon.db, null, null);
 
     const { status, body } = await request(app, '/api/analytics/requests?range=7d');
     expect(status).toBe(200);
@@ -62,16 +76,17 @@ describe('GET /api/analytics/requests', () => {
       clientUserAgent: 'python-httpx/0.27',
     });
     // created_at is emitted as ISO-8601 UTC so the dashboard localizes it.
-    expect(body.rows[1].createdAt).toBe('2026-07-06T11:00:00Z');
+    expect(body.rows[1].createdAt).toBe(eleven.iso);
   });
 
   it('paginates with limit/offset and clamps limit to 500', async () => {
-    for (let i = 0; i < 5; i++) insertCall(`2026-07-06 0${i}:00:00`, '10.0.0.1', 'ua');
+    const fixtures = Array.from({ length: 5 }, (_, i) => utcFixture(3, i));
+    for (const fixture of fixtures) insertCall(fixture.db, '10.0.0.1', 'ua');
 
     const page = await request(app, '/api/analytics/requests?range=7d&limit=2&offset=2');
     expect(page.body.total).toBe(5);
     expect(page.body.rows).toHaveLength(2);
-    expect(page.body.rows[0].createdAt).toBe('2026-07-06T02:00:00Z');
+    expect(page.body.rows[0].createdAt).toBe(fixtures[2].iso);
 
     const clamped = await request(app, '/api/analytics/requests?range=7d&limit=99999');
     expect(clamped.body.rows).toHaveLength(5);

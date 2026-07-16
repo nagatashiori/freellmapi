@@ -3,6 +3,7 @@ import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { insertHealthyKey } from '../helpers/healthy-key.js';
 
 let dashToken = '';
 
@@ -40,17 +41,23 @@ describe('OpenAI multimodal array content', () => {
     dashToken = mintDashboardToken();
   });
 
-  beforeEach(async () => {
+  beforeEach(() => {
     const db = getDb();
     db.prepare('DELETE FROM api_keys').run();
     db.prepare('DELETE FROM requests').run();
 
-    const addKey = await request(app, 'POST', '/api/keys', {
-      platform: 'groq',
-      key: 'gsk_array_content_test',
-      label: 'array-content',
+    insertHealthyKey('groq', 'gsk_array_content_test', 'array-content');
+
+    const origFetch = global.fetch;
+    vi.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
+      const urlStr = typeof url === 'string' ? url : url.toString();
+      if (urlStr.includes('api.groq.com/openai/v1/chat/completions')) {
+        return new Response(JSON.stringify({
+          error: { message: 'mock provider rejection', type: 'invalid_request_error' },
+        }), { status: 401, headers: { 'Content-Type': 'application/json' } }) as any;
+      }
+      return origFetch(url as any, init);
     });
-    expect(addKey.status).toBe(201);
   });
 
   afterEach(() => {

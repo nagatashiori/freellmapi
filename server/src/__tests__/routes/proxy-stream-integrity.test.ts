@@ -4,6 +4,7 @@ import { createApp } from '../../app.js';
 import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
 import { getStickyModel, setStickyModel } from '../../routes/proxy.js';
 import { mintDashboardToken } from '../helpers/auth.js';
+import { insertHealthyKey } from '../helpers/healthy-key.js';
 
 // Stream turn-integrity (#231 audit): the proxy must deliver agent-usable
 // TURNS, not transport bytes. These tests feed crafted upstream SSE bodies
@@ -79,7 +80,7 @@ describe('proxy stream turn-integrity', () => {
     dashToken = mintDashboardToken();
   });
 
-  beforeEach(async () => {
+  beforeEach(() => {
     const db = getDb();
     db.prepare('DELETE FROM api_keys').run();
     db.prepare('DELETE FROM requests').run();
@@ -87,10 +88,7 @@ describe('proxy stream turn-integrity', () => {
     db.prepare('DELETE FROM rate_limit_usage').run();
     // One groq key: the seeded chain has several tool-capable groq models, so
     // failover hops between groq models while staying on this mock.
-    const { status } = await request(app, '/api/keys',
-      { platform: 'groq', key: 'gsk_stream_integrity', label: 't' },
-      { Authorization: `Bearer ${dashToken}` });
-    expect(status).toBe(201);
+    insertHealthyKey('groq', 'gsk_stream_integrity', 't');
   });
 
   afterEach(() => {

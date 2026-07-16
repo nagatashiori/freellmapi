@@ -3,6 +3,7 @@ import { routeRequest, setRoutingStrategy } from '../../services/router.js';
 import * as ratelimit from '../../services/ratelimit.js';
 import { getDb, initDb } from '../../db/index.js';
 import * as crypto from '../../lib/crypto.js';
+import { getDefaultProfileId } from '../../services/routing-groups.js';
 
 // Mock ratelimit to control quota availability
 vi.mock('../../services/ratelimit.js', async () => {
@@ -56,6 +57,7 @@ describe('Routing Key Exhaustion', () => {
     db.prepare("DELETE FROM settings WHERE key = 'active_profile_id'").run();
     db.prepare("DELETE FROM fallback_config").run();
     db.prepare("DELETE FROM profile_models").run();
+    db.prepare("DELETE FROM api_keys").run();
     db.prepare("DELETE FROM models").run();
 
     // Setup: 2 models (Pro and Flash)
@@ -68,6 +70,9 @@ describe('Routing Key Exhaustion', () => {
     
     db.prepare("INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)").run(proId);
     db.prepare("INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 2, 1)").run(flashId);
+    const defaultProfileId = getDefaultProfileId(db);
+    db.prepare("INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, 1, 1)").run(defaultProfileId, proId);
+    db.prepare("INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (?, ?, 2, 1)").run(defaultProfileId, flashId);
     
     // Setup: 2 keys for Google
     db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('google', 'Key A', 'enc', 'iv', 'tag', 'healthy', 1)").run();

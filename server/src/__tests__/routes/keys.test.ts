@@ -6,23 +6,36 @@ import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 
 let dashToken = '';
 
-async function request(app: Express, method: string, path: string, body?: any) {
+function isUndiciBadPort(error: unknown): boolean {
+  const err = error as { message?: string; cause?: { message?: string } };
+  return /bad port/i.test(err.message ?? '') || /bad port/i.test(err.cause?.message ?? '');
+}
+
+async function request(app: Express, method: string, path: string, body?: any, attempt = 0): Promise<{ status: number; body: any }> {
   const server = app.listen(0);
   const addr = server.address() as any;
   const url = `http://127.0.0.1:${addr.port}${path}`;
 
-  const res = await fetch(url, {
-    method,
-    headers: {
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-      ...(isGatedApiPath(path) ? { Authorization: `Bearer ${dashToken}` } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: {
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+        ...(isGatedApiPath(path) ? { Authorization: `Bearer ${dashToken}` } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
 
-  const data = await res.json().catch(() => null);
-  server.close();
-  return { status: res.status, body: data };
+    const data = await res.json().catch(() => null);
+    return { status: res.status, body: data };
+  } catch (error) {
+    if (attempt < 3 && isUndiciBadPort(error)) {
+      return request(app, method, path, body, attempt + 1);
+    }
+    throw error;
+  } finally {
+    server.close();
+  }
 }
 
 async function multipartRequest(
@@ -30,7 +43,8 @@ async function multipartRequest(
   path: string,
   field: 'file' | 'files',
   files: Array<{ filename: string; content: string; type?: string }>,
-) {
+  attempt = 0,
+): Promise<{ status: number; body: any }> {
   const server = app.listen(0);
   const addr = server.address() as any;
   const url = `http://127.0.0.1:${addr.port}${path}`;
@@ -43,17 +57,25 @@ async function multipartRequest(
     );
   }
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      ...(isGatedApiPath(path) ? { Authorization: `Bearer ${dashToken}` } : {}),
-    },
-    body: form,
-  });
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        ...(isGatedApiPath(path) ? { Authorization: `Bearer ${dashToken}` } : {}),
+      },
+      body: form,
+    });
 
-  const data = await res.json().catch(() => null);
-  server.close();
-  return { status: res.status, body: data };
+    const data = await res.json().catch(() => null);
+    return { status: res.status, body: data };
+  } catch (error) {
+    if (attempt < 3 && isUndiciBadPort(error)) {
+      return multipartRequest(app, path, field, files, attempt + 1);
+    }
+    throw error;
+  } finally {
+    server.close();
+  }
 }
 
 describe('Keys API', () => {
