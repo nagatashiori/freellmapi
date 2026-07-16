@@ -53,26 +53,16 @@ describe('Model management API', () => {
     expect(body.success).toBe(true);
 
     const row = getDb().prepare(`
-      SELECT m.display_name, m.supports_tools, m.context_window,
-             pm.enabled AS fallback_enabled,
-             fc.enabled AS legacy_fallback_enabled
+      SELECT m.display_name, m.supports_tools, m.context_window, pm.enabled AS fallback_enabled
         FROM models m
         JOIN profile_models pm ON pm.model_db_id = m.id AND pm.profile_id = ?
-        JOIN fallback_config fc ON fc.model_db_id = m.id
        WHERE m.id = ?
-    `).get(getDefaultProfileId(getDb()), target.id) as {
-      display_name: string;
-      supports_tools: number;
-      context_window: number;
-      fallback_enabled: number;
-      legacy_fallback_enabled: number;
-    };
+    `).get(getDefaultProfileId(getDb()), target.id) as { display_name: string; supports_tools: number; context_window: number; fallback_enabled: number };
     expect(row).toEqual({
       display_name: 'Locally tuned model',
       supports_tools: 1,
       context_window: 123456,
       fallback_enabled: 0,
-      legacy_fallback_enabled: 0,
     });
 
     const override = getDb().prepare('SELECT overrides_json FROM model_overrides WHERE model_id = (SELECT model_id FROM models WHERE id = ?)')

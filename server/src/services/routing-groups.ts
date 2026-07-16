@@ -31,44 +31,6 @@ function profileExists(db: Db, profileId: number): boolean {
   return Boolean(db.prepare('SELECT 1 FROM profiles WHERE id = ?').get(profileId));
 }
 
-function syncFallbackConfigEntries(db: Db, entries: RoutingChainEntry[]): void {
-  const update = db.prepare(`
-    UPDATE fallback_config
-    SET priority = ?, enabled = ?
-    WHERE model_db_id = ?
-  `);
-  const insert = db.prepare(`
-    INSERT INTO fallback_config (model_db_id, priority, enabled)
-    VALUES (?, ?, ?)
-  `);
-
-  for (const entry of entries) {
-    const enabled = entry.enabled ? 1 : 0;
-    const result = update.run(entry.priority, enabled, entry.modelDbId);
-    if (result.changes === 0) {
-      insert.run(entry.modelDbId, entry.priority, enabled);
-    }
-  }
-}
-
-function syncFallbackConfigEnabled(db: Db, modelDbId: number, enabled: boolean | number): void {
-  const flag = enabled ? 1 : 0;
-  const result = db.prepare(`
-    UPDATE fallback_config
-    SET enabled = ?
-    WHERE model_db_id = ?
-  `).run(flag, modelDbId);
-
-  if (result.changes === 0) {
-    const max = db.prepare('SELECT COALESCE(MAX(priority), 0) AS priority FROM fallback_config')
-      .get() as { priority: number };
-    db.prepare(`
-      INSERT INTO fallback_config (model_db_id, priority, enabled)
-      VALUES (?, ?, ?)
-    `).run(modelDbId, max.priority + 1, flag);
-  }
-}
-
 export function getDefaultProfileId(db: Db): number {
   const profile = db.prepare(`
     SELECT id
@@ -126,7 +88,6 @@ export function getDefaultRoutingChain(db: Db): RoutingChainRow[] {
  */
 export function upsertRoutingEntries(db: Db, profileId: number, entries: RoutingChainEntry[]): number {
   if (!profileExists(db, profileId)) throw new Error(`Routing profile ${profileId} not found`);
-  const syncFallbackConfig = profileId === getDefaultProfileId(db);
 
   const update = db.prepare(`
     UPDATE profile_models
@@ -148,7 +109,6 @@ export function upsertRoutingEntries(db: Db, profileId: number, entries: Routing
       }
       touched++;
     }
-    if (syncFallbackConfig) syncFallbackConfigEntries(db, entries);
     return touched;
   });
   return apply();
@@ -211,7 +171,6 @@ export function setRoutingModelEnabled(
 
 export function setDefaultRoutingModelEnabled(db: Db, modelDbId: number, enabled: boolean | number): void {
   setRoutingModelEnabled(db, getDefaultProfileId(db), modelDbId, enabled);
-  syncFallbackConfigEnabled(db, modelDbId, enabled);
 }
 
 export function deleteRoutingModelMemberships(db: Db, modelDbId: number): void {

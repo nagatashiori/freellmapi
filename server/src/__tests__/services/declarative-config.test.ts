@@ -63,13 +63,9 @@ describe('declarative config import', () => {
     `).get()).toEqual({ display_name: 'Local Chat', supports_tools: 1, context_window: 32000 });
 
     const model = getDb().prepare(`
-      SELECT m.display_name, m.supports_tools, m.context_window,
-             pm.priority, pm.enabled AS fallback_enabled,
-             fc.priority AS legacy_priority,
-             fc.enabled AS legacy_fallback_enabled
+      SELECT m.display_name, m.supports_tools, m.context_window, pm.priority, pm.enabled AS fallback_enabled
         FROM models m
         JOIN profile_models pm ON pm.model_db_id = m.id AND pm.profile_id = ?
-        JOIN fallback_config fc ON fc.model_db_id = m.id
        WHERE m.platform = ? AND m.model_id = ?
     `).get(getDefaultProfileId(getDb()), target.platform, target.model_id) as {
       display_name: string;
@@ -77,8 +73,6 @@ describe('declarative config import', () => {
       context_window: number;
       priority: number;
       fallback_enabled: number;
-      legacy_priority: number;
-      legacy_fallback_enabled: number;
     };
     expect(model).toEqual({
       display_name: 'Config Display',
@@ -86,8 +80,6 @@ describe('declarative config import', () => {
       context_window: 654321,
       priority: 1,
       fallback_enabled: 0,
-      legacy_priority: 1,
-      legacy_fallback_enabled: 0,
     });
     expect(getDb().prepare('SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?')
       .get(target.platform, target.model_id)).toBeDefined();
@@ -97,16 +89,11 @@ describe('declarative config import', () => {
       models: [{ platform: target.platform, modelId: target.model_id, displayName: 'Edited Again' }],
     });
     expect((getDb().prepare(`
-      SELECT pm.enabled AS fallback_enabled,
-             fc.enabled AS legacy_fallback_enabled
+      SELECT pm.enabled AS fallback_enabled
         FROM models m
         JOIN profile_models pm ON pm.model_db_id = m.id AND pm.profile_id = ?
-        JOIN fallback_config fc ON fc.model_db_id = m.id
        WHERE m.platform = ? AND m.model_id = ?
-    `).get(getDefaultProfileId(getDb()), target.platform, target.model_id) as {
-      fallback_enabled: number;
-      legacy_fallback_enabled: number;
-    })).toEqual({ fallback_enabled: 0, legacy_fallback_enabled: 0 });
+    `).get(getDefaultProfileId(getDb()), target.platform, target.model_id) as { fallback_enabled: number }).fallback_enabled).toBe(0);
   });
 
   it('applies inline JSON from FREEAPI_CONFIG_JSON idempotently', () => {
