@@ -3,6 +3,7 @@ import { createApp } from './app.js';
 import { initDb, getDb, getSetting } from './db/index.js';
 import { hydrateUserPlatformsFromDb } from './providers/index.js';
 import { startHealthChecker, checkAllKeys } from './services/health.js';
+import { startModelProbeScheduler } from './services/model-probe-scheduler.js';
 import { applyProxyUrl, applyProxyEnabled, applyProxyBypass, flushProxyCache } from './lib/proxy.js';
 import { startWakeDetect } from './lib/wake-detect.js';
 import { startCatalogSync } from './services/catalog-sync.js';
@@ -57,6 +58,7 @@ async function main() {
     console.log(`Server running on http://${display}:${PORT}`);
     console.log(`Proxy endpoint: http://${display}:${PORT}/v1/chat/completions`);
     startHealthChecker(scheduler);
+    startModelProbeScheduler(scheduler);
     startCatalogSync(scheduler);
     startDbBackupPump(getDb(), scheduler, config.dbPath ?? undefined);
 

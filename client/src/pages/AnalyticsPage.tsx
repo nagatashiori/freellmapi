@@ -116,6 +116,29 @@ interface RecentCallsResponse {
   rows: RecentCallRow[]
 }
 
+interface RoutingTraceEvent {
+  attempt: number
+  event: 'start' | 'next' | 'ok' | 'fail'
+  platform: string
+  modelId: string
+  latencyMs: number | null
+  error: string | null
+  createdAt: string
+}
+
+interface RoutingTrace {
+  requestId: string
+  surface: string
+  requestedModel: string | null
+  createdAt: string
+  finalState: RoutingTraceEvent['event']
+  events: RoutingTraceEvent[]
+}
+
+interface RoutingTracesResponse {
+  traces: RoutingTrace[]
+}
+
 // First product token of the UA ("python-requests/2.32.3", "curl/8.6.0", …)
 // is enough to tell callers apart in a narrow cell; full string on hover.
 function shortUserAgent(ua: string | null): string {
@@ -217,6 +240,12 @@ export default function AnalyticsPage() {
   const { data: recentCalls } = useQuery({
     queryKey: ['analytics', 'requests', range],
     queryFn: () => apiFetch<RecentCallsResponse>(`/api/analytics/requests?range=${range}&limit=100`),
+  })
+
+  const { data: routingTraces } = useQuery({
+    queryKey: ['analytics', 'routing-traces', range],
+    queryFn: () => apiFetch<RoutingTracesResponse>(`/api/analytics/routing-traces?range=${range}&limit=30`),
+    refetchInterval: 15_000,
   })
 
   // Savings card shows ONE stable monthly figure regardless of the selected
@@ -476,6 +505,45 @@ export default function AnalyticsPage() {
               </div>
             )}
           </Panel>
+
+          <div className="lg:col-span-2">
+            <Panel title="最近调度链（已发上游证据）">
+              <p className="mb-3 text-xs text-muted-foreground">每条记录是一整个外部请求；“已发上游”说明网关已开始向该提供方派发，随后可看成功、失败和 fallback。</p>
+              {!routingTraces?.traces?.length ? (
+                <p className="text-sm text-muted-foreground text-center py-6">升级后的新调度会显示在这里。</p>
+              ) : (
+                <div className="max-h-[420px] space-y-2 overflow-y-auto">
+                  {routingTraces.traces.map(trace => {
+                    const finalLabel = trace.finalState === 'ok' ? '最终成功' : trace.finalState === 'fail' ? '最终失败' : '进行中'
+                    return (
+                      <details key={trace.requestId} className="rounded-lg border bg-muted/20 px-3 py-2">
+                        <summary className="cursor-pointer list-none text-xs">
+                          <span className={`mr-2 font-medium ${trace.finalState === 'ok' ? 'text-[#4ade80]' : trace.finalState === 'fail' ? 'text-destructive' : 'text-[#fbbf24]'}`}>{finalLabel}</span>
+                          <span className="font-mono text-muted-foreground">{trace.requestId.slice(0, 12)}</span>
+                          <span className="ml-2 text-muted-foreground">{trace.surface} · {trace.events.length} 步 · {formatSqliteUtcToLocalTime(trace.createdAt, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                        </summary>
+                        <div className="mt-2 space-y-1 border-t pt-2 text-[11px]">
+                          {trace.events.map((event, index) => {
+                            const label = event.event === 'start' || event.event === 'next'
+                              ? '已发上游'
+                              : event.event === 'ok' ? '成功返回' : '失败，继续 fallback'
+                            return (
+                              <div key={`${event.attempt}-${event.event}-${index}`} className="flex flex-wrap gap-x-2 text-muted-foreground">
+                                <span className="font-medium text-foreground">#{event.attempt + 1} {label}</span>
+                                <code>{event.platform}/{event.modelId}</code>
+                                {event.latencyMs != null && <span>{event.latencyMs}ms</span>}
+                                {event.error && <span className="text-destructive break-all">{event.error}</span>}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </details>
+                    )
+                  })}
+                </div>
+              )}
+            </Panel>
+          </div>
 
           {/* Recent calls: one line per proxied request with the caller's IP +
               user agent. All local clients share the unified key, so this is

@@ -20,6 +20,7 @@ import {
   getRoutingChain,
   getRoutingProfileIdByName,
 } from './routing-groups.js';
+import { getModelProbeHealth, rankModelGroupCandidates } from './model-health.js';
 
 class RouteError extends Error {
   status: number;
@@ -832,7 +833,12 @@ export function resolveModelGroupCandidates(memberDbIds: number[]): ChainRow[] {
     const row = byId.get(id);
     if (row?.enabled) rows.push(row);
   }
-  return orderChain(rows, strategy);
+  // Logical-model groups have a separate *effective* order: healthy members
+  // lead by measured latency, cooling members stay visible immediately after
+  // them, and the manual profile priority remains untouched as a tie-breaker.
+  // This is deliberately narrower than the global auto chain.
+  const baseOrder = orderChain(rows, strategy);
+  return rankModelGroupCandidates(baseOrder, getModelProbeHealth(db, baseOrder.map(row => row.model_db_id)));
 }
 
 // A panel candidate surfaced to the fusion layer: enough to pick a diverse set

@@ -94,9 +94,11 @@ interface HealthRow {
 
 function statusMeta(status: string) {
   const s = status || 'unknown'
-  if (s === 'ok' || s === 'success') return { label: '健康', color: '#4ade80', key: 'ok' as const }
-  if (s === 'error' || s === 'timeout') return { label: '错误', color: '#f87171', key: 'error' as const }
-  if (s === 'rate_limited') return { label: '限流', color: '#fbbf24', key: 'limited' as const }
+  if (s === 'ok' || s === 'success' || s === 'ready') return { label: '可派发', color: '#4ade80', key: 'ok' as const }
+  if (s === 'error' || s === 'timeout' || s === 'unhealthy') return { label: '异常', color: '#f87171', key: 'error' as const }
+  if (s === 'rate_limited' || s === 'cooling') return { label: '冷却中', color: '#fbbf24', key: 'limited' as const }
+  if (s === 'stale') return { label: '待复测', color: '#60a5fa', key: 'unknown' as const }
+  if (s === 'disabled') return { label: '已关闭', color: '#6b7280', key: 'unknown' as const }
   if (s === 'probing') return { label: '测试中', color: '#6b7280', key: 'probing' as const }
   return { label: '未知', color: '#6b7280', key: 'unknown' as const }
 }
@@ -206,6 +208,12 @@ export default function ModelDetailPage() {
     .sort((a, b) => (isManual ? a.priority - b.priority : (b.score ?? 0) - (a.score ?? 0)))
 
   const displayMembers = localMembers ?? members
+  // The health panel is the actual strict-group dispatch order. The table
+  // below remains the operator's static/manual priority editor.
+  const effectiveMembers = [...displayMembers].sort((a, b) =>
+    (a.effectiveGroupRank ?? Number.MAX_SAFE_INTEGER) - (b.effectiveGroupRank ?? Number.MAX_SAFE_INTEGER)
+    || a.priority - b.priority,
+  )
 
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event
@@ -241,27 +249,15 @@ export default function ModelDetailPage() {
     })))
   }
 
-  const patchEnabledInCache = useCallback((modelDbId: number, enabled: boolean) => {
-    queryClient.setQueryData<FallbackEntry[]>(['fallback'], (old) => {
-      if (!old) return old
-      return old.map(row => row.modelDbId === modelDbId ? { ...row, enabled } : row)
-    })
-  }, [queryClient])
-
   const applyProbe = useCallback((res: ProbeResult) => {
     setProbeResults(prev => new Map(prev).set(res.modelDbId, res))
-    if (typeof res.enabled === 'boolean') {
-      patchEnabledInCache(res.modelDbId, res.enabled)
-    } else if (res.status === 'ok' || res.status === 'success') {
-      patchEnabledInCache(res.modelDbId, true)
-    } else if (res.status === 'error' || res.status === 'timeout') {
-      patchEnabledInCache(res.modelDbId, false)
-    }
+    // Probe outcomes refresh runtime health only. The on/off switch is an
+    // explicit operator decision and must never flip as a probe side effect.
     setTimeout(() => {
       queryClient.invalidateQueries({ queryKey: ['health'] })
       queryClient.invalidateQueries({ queryKey: ['fallback'] })
     }, 400)
-  }, [patchEnabledInCache, queryClient])
+  }, [queryClient])
 
   const doProbe = useCallback(async (modelDbId: number) => {
     setProbeResults(prev => new Map(prev).set(modelDbId, {
@@ -272,7 +268,7 @@ export default function ModelDetailPage() {
       applyProbe(res)
     } catch (e: any) {
       applyProbe({
-        modelDbId, status: 'error', latency: 0, error: e.message || 'request failed', enabled: false,
+        modelDbId, status: 'error', latency: 0, error: e.message || 'request failed',
       })
     }
   }, [applyProbe])
@@ -284,22 +280,20 @@ export default function ModelDetailPage() {
       setProbeResults(prev => new Map(prev).set(m.modelDbId, {
         modelDbId: m.modelDbId, status: 'probing', latency: 0, error: '',
       }))
-      try {
-        const res = await probeOne(m.modelDbId)
-        applyProbe(res)
-      } catch (e: any) {
-        applyProbe({
-          modelDbId: m.modelDbId, status: 'error', latency: 0, error: e.message || 'request failed', enabled: false,
-        })
-      }
-      await new Promise(r => setTimeout(r, 200))
     }
-    // Probe only updates the latency badges - it does NOT reorder providers
-    // and does NOT write back to the DB. The operator's manual drag order on
-    // /models/chat is the single source of truth for priority; auto-sorting by
-    // probe latency was demoting rate-limited models (which fail fast = low
-    // latency) to the top and permanently overwriting the manual order.
-    setProbingAll(false)
+    try {
+      const batch = await apiFetch('/api/fallback/probe-all', {
+        method: 'POST',
+        body: JSON.stringify({ ids: displayMembers.map(m => m.modelDbId), concurrency: 2 }),
+      }) as { results: ProbeResult[] }
+      for (const result of batch.results ?? []) applyProbe(result)
+    } catch (e: any) {
+      for (const m of displayMembers) {
+        applyProbe({ modelDbId: m.modelDbId, status: 'error', latency: 0, error: e.message || 'request failed' })
+      }
+    } finally {
+      setProbingAll(false)
+    }
   }, [displayMembers, probingAll, applyProbe])
 
   const label = members[0]?.groupLabel ?? members[0]?.displayName ?? canonicalId
@@ -311,10 +305,10 @@ export default function ModelDetailPage() {
   let okN = 0, errN = 0, limN = 0, unkN = 0
   for (const m of members) {
     const pr = probeResults.get(m.modelDbId)
-    const st = pr?.status || healthMap.get(m.modelDbId) || 'unknown'
-    if (st === 'ok' || st === 'success') okN++
-    else if (st === 'error' || st === 'timeout') errN++
-    else if (st === 'rate_limited') limN++
+    const st = pr?.status || m.routingHealth?.state || healthMap.get(m.modelDbId) || 'unknown'
+    if (st === 'ok' || st === 'success' || st === 'ready') okN++
+    else if (st === 'error' || st === 'timeout' || st === 'unhealthy') errN++
+    else if (st === 'rate_limited' || st === 'cooling') limN++
     else unkN++
   }
 
@@ -383,16 +377,16 @@ export default function ModelDetailPage() {
               <div className="px-4 py-3 border-b flex items-center justify-between">
                 <div>
                   <h2 className="text-sm font-medium">提供方健康</h2>
-                  <p className="text-xs text-muted-foreground mt-0.5">每个渠道单独测试；成功自动开启，失败自动关闭该渠道。</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">这是真实派发顺序：可派发按成功探测延迟从低到高；冷却渠道紧随其后。测试不改你的手动开关或全局优先级。</p>
                 </div>
               </div>
               <div className="divide-y divide-border/40">
-                {displayMembers.map(m => {
+                {effectiveMembers.map(m => {
                   const pr = probeResults.get(m.modelDbId)
-                  const status = pr?.status || healthMap.get(m.modelDbId) || 'unknown'
+                  const status = pr?.status || m.routingHealth?.state || healthMap.get(m.modelDbId) || 'unknown'
                   const meta = statusMeta(status)
                   const probing = status === 'probing'
-                  const isEnabled = pr && pr.enabled !== undefined ? pr.enabled : m.enabled
+                  const isEnabled = m.enabled
                   return (
                     <div key={m.modelDbId} className="px-4 py-2.5" style={{ opacity: isEnabled ? 1 : 0.45 }}>
                       <div className="flex items-center gap-2 flex-wrap">
@@ -401,6 +395,7 @@ export default function ModelDetailPage() {
                         ) : (
                           <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: meta.color }} />
                         )}
+                        <span title="当前模型组中的有效派发顺序" className="text-[10px] text-muted-foreground tabular-nums">#{m.effectiveGroupRank ?? '-'}</span>
                         <span className="text-xs font-medium w-24 shrink-0 truncate">{providerLabel(m)}</span>
                         <code className="text-[11px] font-mono text-muted-foreground truncate flex-1 min-w-[8rem]">{m.modelId}</code>
                         <span className="text-[10px] text-muted-foreground w-14 text-right tabular-nums" title="本次探测的延迟">
@@ -437,6 +432,14 @@ export default function ModelDetailPage() {
                         <pre className="mt-1.5 text-[10px] text-muted-foreground bg-muted/50 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
                           {pr.error}
                         </pre>
+                      )}
+                      {m.routingHealth?.state === 'cooling' && m.routingHealth.cooldownUntilMs && (
+                        <p className="mt-1 text-[10px] text-[#b7791f] dark:text-[#fbbf24]">
+                          所有可用密钥冷却至 {new Date(m.routingHealth.cooldownUntilMs).toLocaleTimeString()}；到期后会重新参与派发。
+                        </p>
+                      )}
+                      {m.routingHealth?.state === 'disabled' && (
+                        <p className="mt-1 text-[10px] text-muted-foreground">人工关闭：探测可见，但路由不会派发到这里。</p>
                       )}
                     </div>
                   )

@@ -152,4 +152,17 @@ describe('CloudflareProvider', () => {
     expect(capturedBody.messages[1].content).toBe('');
     expect(capturedBody.messages[1].tool_calls).toHaveLength(1);
   });
+
+  it('honors the per-request timeout passed by the fallback router', async () => {
+    const fetchWithTimeout = vi.spyOn(provider as any, 'fetchWithTimeout').mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        choices: [{ message: { role: 'assistant', content: 'ok' } }],
+      }),
+    });
+
+    await provider.chatCompletion('acc:token', [{ role: 'user', content: 'Hi' }], 'model', { timeoutMs: 32_123 });
+
+    expect(fetchWithTimeout.mock.calls[0][2]).toBe(32_123);
+  });
 });

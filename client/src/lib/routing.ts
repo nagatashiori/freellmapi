@@ -45,6 +45,21 @@ export interface FallbackEntry {
   groupKey?: string
   canonicalId?: string
   groupLabel?: string
+  // Effective order is dynamic only inside one logical model group. It does
+  // not replace `priority`, which remains the operator-controlled fallback
+  // chain order shown on /models/chat.
+  effectiveGroupRank?: number
+  routingHealth?: {
+    state: 'ready' | 'cooling' | 'stale' | 'unknown' | 'unhealthy' | 'disabled'
+    lastStatus: string | null
+    lastProbedAt: string | null
+    lastLatencyMs: number | null
+    avgLatencyMs: number | null
+    sampleCount: number
+    cooldownUntilMs: number | null
+    usableKeyCount: number
+    coolingKeyCount: number
+  }
 }
 
 export type RoutingStrategy = 'priority' | 'balanced' | 'smartest' | 'fastest' | 'reliable' | 'custom'

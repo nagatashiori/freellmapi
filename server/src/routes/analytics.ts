@@ -65,6 +65,65 @@ function readLifetimeSettings() {
   return row?.value ?? null;
 }
 
+// Recent dispatch chains, grouped by the external request id. The `start`
+// event is written immediately before the provider call, so the UI can prove
+// that a selected route was sent upstream even if it later timed out/fell back.
+analyticsRouter.get('/routing-traces', (req: Request, res: Response) => {
+  const range = (req.query.range as string) ?? '7d';
+  const since = getSinceTimestamp(range);
+  const requestedLimit = Number(req.query.limit) || 30;
+  const limit = Math.min(Math.max(Math.floor(requestedLimit), 1), 100);
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT * FROM (
+      SELECT id, request_id, surface, attempt, event, platform, model_id,
+             requested_model, latency_ms, input_tokens, output_tokens, error, created_at
+      FROM routing_events
+      WHERE created_at >= ?
+      ORDER BY id DESC
+      LIMIT ?
+    )
+    ORDER BY id ASC
+  `).all(since, limit * 12) as Array<{
+    id: number; request_id: string; surface: string; attempt: number; event: string;
+    platform: string; model_id: string; requested_model: string | null;
+    latency_ms: number | null; input_tokens: number | null; output_tokens: number | null;
+    error: string | null; created_at: string;
+  }>;
+
+  const byRequest = new Map<string, typeof rows>();
+  for (const row of rows) {
+    const events = byRequest.get(row.request_id);
+    if (events) events.push(row);
+    else byRequest.set(row.request_id, [row]);
+  }
+  const traces = [...byRequest.values()]
+    .sort((a, b) => b[b.length - 1].id - a[a.length - 1].id)
+    .slice(0, limit)
+    .map(events => {
+      const last = events[events.length - 1];
+      return {
+        requestId: last.request_id,
+        surface: events[0].surface,
+        requestedModel: events.find(event => event.requested_model)?.requested_model ?? null,
+        createdAt: events[0].created_at.replace(' ', 'T') + 'Z',
+        finalState: last.event,
+        events: events.map(event => ({
+          attempt: event.attempt,
+          event: event.event,
+          platform: event.platform,
+          modelId: event.model_id,
+          latencyMs: event.latency_ms,
+          inputTokens: event.input_tokens,
+          outputTokens: event.output_tokens,
+          error: event.error,
+          createdAt: event.created_at.replace(' ', 'T') + 'Z',
+        })),
+      };
+    });
+  res.json({ traces });
+});
+
 // Summary stats
 analyticsRouter.get('/summary', (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';

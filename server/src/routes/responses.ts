@@ -23,7 +23,7 @@ import {
   traceRouteEvent,
   logRequest,
 } from './proxy.js';
-import { runFallbackLoop, newFallbackState, recordUpstreamSuccess, setFallbackHeaders, type AttemptRecord } from '../lib/fallback-loop.js';
+import { runFallbackLoop, newFallbackState, recordUpstreamSuccess, setFallbackHeaders, getFallbackAttemptTimeoutMs, type AttemptRecord } from '../lib/fallback-loop.js';
 import { applyTokenBudget, tokenBudgetMessage } from '../lib/guardrails.js';
 import { samplingParamSchemaFields, pickSamplingParams, type ResponseFormat } from '../lib/sampling-params.js';
 import { enforceJsonContent } from '../lib/structured-output.js';
@@ -352,6 +352,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
       : { type: 'json_object' } as ResponseFormat;
   }
 
+  const attemptTimeoutMs = getFallbackAttemptTimeoutMs();
   const completionOpts = {
     temperature: reqData.temperature ?? undefined,
     max_tokens: reqData.max_output_tokens ?? undefined,
@@ -360,6 +361,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
     tool_choice,
     parallel_tool_calls: reqData.parallel_tool_calls ?? undefined,
     ...samplingParams,
+    timeoutMs: attemptTimeoutMs,
   };
 
   const estimatedInputTokens = messages.reduce(

@@ -122,4 +122,17 @@ describe('CohereProvider', () => {
     vi.spyOn(global, 'fetch').mockResolvedValueOnce({ ok: true } as any);
     expect(await provider.validateKey('valid')).toBe(true);
   });
+
+  it('honors the per-request timeout passed by the fallback router', async () => {
+    const fetchWithTimeout = vi.spyOn(provider as any, 'fetchWithTimeout').mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        choices: [{ message: { role: 'assistant', content: 'ok' } }],
+      }),
+    });
+
+    await provider.chatCompletion('k', [{ role: 'user', content: 'Hi' }], 'command-a', { timeoutMs: 32_123 });
+
+    expect(fetchWithTimeout.mock.calls[0][2]).toBe(32_123);
+  });
 });

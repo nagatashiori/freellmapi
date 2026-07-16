@@ -16,8 +16,8 @@ import { repairToolArguments, toolSchemaMap } from '../lib/tool-args.js';
 import { rescueInlineToolCalls, startsWithDialectMarker, couldBecomeDialectMarker, containsDialectMarker } from '../lib/tool-call-rescue.js';
 import { sanitizeProviderErrorMessage } from '../lib/error-redaction.js';
 import { logRequest } from '../lib/request-log.js';
-import { extractApiToken, timingSafeStringEqual, getStickyModel, setStickyModel } from './proxy.js';
-import { runFallbackLoop, newFallbackState, recordUpstreamSuccess, type ExhaustionBody, setFallbackHeaders, type AttemptRecord } from '../lib/fallback-loop.js';
+import { extractApiToken, timingSafeStringEqual, getStickyModel, setStickyModel, getRequestGroupId, traceRouteEvent } from './proxy.js';
+import { runFallbackLoop, newFallbackState, recordUpstreamSuccess, getFallbackAttemptTimeoutMs, type ExhaustionBody, setFallbackHeaders, type AttemptRecord } from '../lib/fallback-loop.js';
 import { applyTokenBudget, tokenBudgetMessage } from '../lib/guardrails.js';
 import { resolveAnthropicModel } from '../services/anthropic-map.js';
 import { isUnifyEnabled, getModelGroups, resolveRequestedIdToMembers } from '../services/model-groups.js';
@@ -357,6 +357,7 @@ function rescuedToToolCalls(
 anthropicRouter.post('/messages', async (req: Request, res: Response) => {
   const start = Date.now();
   if (!authenticate(req, res)) return;
+  const requestGroupId = getRequestGroupId(req);
 
   const parsed = messagesSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -395,7 +396,15 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
   const max_tokens = clientMaxTokens
     ?? (budgetCheck.maxTokens != null ? Math.min(DEFAULT_MAX_TOKENS, budgetCheck.maxTokens) : DEFAULT_MAX_TOKENS);
 
-  const completionOptions = { temperature, max_tokens, top_p, top_k: body.top_k ?? undefined, tools, tool_choice };
+  const completionOptions = {
+    temperature,
+    max_tokens,
+    top_p,
+    top_k: body.top_k ?? undefined,
+    tools,
+    tool_choice,
+    timeoutMs: getFallbackAttemptTimeoutMs(),
+  };
   // Capped output reserve so a large max_tokens can't falsely exclude the model
   // pool (#470); input + images count in full.
   const estimatedTotal = estimatedInputTokens + imageCount * IMAGE_TOKEN_ESTIMATE + routingReserveTokens(max_tokens);
@@ -469,17 +478,29 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
     clientGone: () => clientGone,
     route: () => routeRequest(estimatedTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain ?? profileChain),
     dispatch: async (route, attempt) => {
+      traceRouteEvent('Anthropic', {
+        event: attempt === 0 ? 'start' : 'next',
+        requestId: requestGroupId,
+        attempt,
+        platform: route.platform,
+        model: route.modelId,
+        requestedModel: attempt === 0 ? requestedModel : undefined,
+      });
       if (stream) {
         try {
           await streamCompletion(res, route, messages, completionOptions, {
             start, attempt, attemptLog, clientGone: () => clientGone, requestedModel, estimatedInputTokens, tools, pinnedModelId,
             sessionId, pinned: resolved.pinned,
           });
+          traceRouteEvent('Anthropic', { event: 'ok', requestId: requestGroupId, attempt, platform: route.platform, model: route.modelId, latencyMs: Date.now() - start });
           return 'done';
         } catch (err: any) {
           // The stream already committed (message_start sent) and surfaced its
           // own error event; stop without failover or a second response.
-          if (err instanceof StreamAlreadyStarted) return 'committed';
+          if (err instanceof StreamAlreadyStarted) {
+            traceRouteEvent('Anthropic', { event: 'fail', requestId: requestGroupId, attempt, platform: route.platform, model: route.modelId, latencyMs: Date.now() - start, error: sanitizeProviderErrorMessage(err.message) });
+            return 'committed';
+          }
           throw err;
         }
       }
@@ -552,11 +573,13 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
       res.setHeader('X-Routed-Via', `${route.platform}/${route.modelId}`);
       setFallbackHeaders(res, attempt, attemptLog);
       logRequest(route.platform, route.modelId, route.keyId, 'success', promptTokens, completionTokens, Date.now() - start, null, null, pinnedModelId);
+      traceRouteEvent('Anthropic', { event: 'ok', requestId: requestGroupId, attempt, platform: route.platform, model: route.modelId, latencyMs: Date.now() - start, inputTokens: promptTokens, outputTokens: completionTokens });
       res.json(anthropicResponse);
       return 'done';
     },
-    logFailure: (route, err) => {
+    logFailure: (route, err, attempt) => {
       logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, Date.now() - start, sanitizeProviderErrorMessage(err.message), null, pinnedModelId);
+      traceRouteEvent('Anthropic', { event: 'fail', requestId: requestGroupId, attempt, platform: route.platform, model: route.modelId, latencyMs: Date.now() - start, error: sanitizeProviderErrorMessage(err.message) });
     },
     onFatal: (route, err, attempt) => {
       setFallbackHeaders(res, attempt, attemptLog);

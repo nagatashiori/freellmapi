@@ -95,7 +95,7 @@ function shortRequestId(requestId: string): string {
 type TraceEvent = 'start' | 'next' | 'ok' | 'fail';
 
 export function traceRouteEvent(
-  scope: 'Proxy' | 'Responses',
+  scope: 'Proxy' | 'Responses' | 'Anthropic',
   opts: {
     event: TraceEvent;
     requestId: string;
@@ -125,6 +125,31 @@ export function traceRouteEvent(
   if (opts.outputTokens != null) parts.push(`out=${opts.outputTokens}`);
   if (opts.error) parts.push(`err=${JSON.stringify(opts.error)}`);
   console.log(parts.join(' '));
+
+  // Logs rotate quickly in Docker, which made the most important answer —
+  // whether we actually dispatched to upstream — disappear before the
+  // dashboard could show it. Persist this small, redacted event alongside the
+  // existing console line. Failure here is observability-only: it must never
+  // affect a user request or fallback decision.
+  try {
+    getDb().prepare(`
+      INSERT INTO routing_events
+        (request_id, surface, attempt, event, platform, model_id, requested_model, latency_ms, input_tokens, output_tokens, error)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      opts.requestId,
+      scope,
+      opts.attempt,
+      opts.event,
+      opts.platform,
+      opts.model,
+      opts.requestedModel ?? null,
+      opts.latencyMs ?? null,
+      opts.inputTokens ?? null,
+      opts.outputTokens ?? null,
+      opts.error ?? null,
+    );
+  } catch { /* DB migration may not have run yet; routing still proceeds. */ }
 }
 
 // exhaustedRetryError moved to lib/fallback-loop.ts (the shared retry loop needs
@@ -870,7 +895,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
         route.apiKey,
         messages,
         route.modelId,
-        { temperature, max_tokens, top_p, stop },
+        { temperature, max_tokens, top_p, stop, timeoutMs: attemptTimeoutMs },
         quotaContextForRoute(route, 'chat/completions'),
       );
 
@@ -1758,7 +1783,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       } else {
         const result = await route.provider.chatCompletion(
           route.apiKey, outboundMessages, route.modelId,
-          { temperature, max_tokens, top_p, stop, tools, tool_choice, parallel_tool_calls, ...samplingParams },
+          { temperature, max_tokens, top_p, stop, tools, tool_choice, parallel_tool_calls, ...samplingParams, timeoutMs: attemptTimeoutMs },
           quotaContextForRoute(route, 'chat/completions'),
         );
 

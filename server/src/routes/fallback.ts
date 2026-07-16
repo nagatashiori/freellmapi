@@ -14,12 +14,12 @@ import { getModelGroups } from '../services/model-groups.js';
 import { getPenaltyInspector } from '../services/penalty-inspector.js';
 import { decrypt } from '../lib/crypto.js';
 import { resolveProvider, getProvider } from '../providers/index.js';
+import { getModelProbeHealth, getModelRoutingState, rankModelGroupCandidates } from '../services/model-health.js';
 import {
   getActiveRoutingChain,
   getDefaultProfileId,
   getDefaultRoutingChain,
   replaceRoutingChain,
-  setDefaultRoutingModelEnabled,
   upsertRoutingEntries,
 } from '../services/routing-groups.js';
 
@@ -103,6 +103,7 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
   // Get current dynamic penalties
   const penalties = getAllPenalties();
   const penaltyMap = new Map(penalties.map(p => [p.modelDbId, p]));
+  const probeHealthByDbId = getModelProbeHealth(db, rows.map(row => row.model_db_id));
 
   // 24h probe latency aggregate per model (success probes only). Backend
   // computes this so the dashboard / list / detail pages all share one value
@@ -154,10 +155,22 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
   // model served by several providers into one expandable group. Always sent
   // (cheap); the client renders grouped only when its unify toggle is on.
   const groupByDbId = new Map<number, { groupKey: string; canonicalId: string; groupLabel: string }>();
-  for (const g of getModelGroups()) {
+  const allGroups = getModelGroups();
+  for (const g of allGroups) {
     for (const m of g.members) {
       groupByDbId.set(m.model_db_id, { groupKey: g.groupKey, canonicalId: g.canonicalId, groupLabel: g.groupLabel });
     }
+  }
+
+  // This rank is presentation + strict-group-routing metadata only. It is
+  // never persisted into profile_models.priority, so a health probe cannot
+  // overwrite the manual order on /models/chat.
+  const effectiveGroupRankByDbId = new Map<number, number>();
+  for (const group of allGroups) {
+    const configured = rows.filter(row => group.members.some(member => member.model_db_id === row.model_db_id));
+    rankModelGroupCandidates(configured, probeHealthByDbId).forEach((row, index) => {
+      effectiveGroupRankByDbId.set(row.model_db_id, index + 1);
+    });
   }
 
   res.json(rows.map(r => {
@@ -168,6 +181,7 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
       groupKey: group?.groupKey,
       canonicalId: group?.canonicalId,
       groupLabel: group?.groupLabel,
+      effectiveGroupRank: effectiveGroupRankByDbId.get(r.model_db_id) ?? 1,
       priority: r.priority,
       effectivePriority: r.priority + (penalty?.penalty ?? 0),
       penalty: penalty?.penalty ?? 0,
@@ -207,6 +221,20 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
         lastLatency: lastByDbId.get(r.model_db_id)?.latency ?? null,
         lastAt: lastByDbId.get(r.model_db_id)?.at ?? null,
       },
+      routingHealth: (() => {
+        const health = probeHealthByDbId.get(r.model_db_id);
+        return {
+          state: getModelRoutingState(health, r.enabled === 1),
+          lastStatus: health?.lastStatus ?? null,
+          lastProbedAt: health?.lastProbedAt ?? null,
+          lastLatencyMs: health?.lastLatencyMs ?? null,
+          avgLatencyMs: health?.avgLatencyMs ?? null,
+          sampleCount: health?.sampleCount ?? 0,
+          cooldownUntilMs: health?.cooldownUntilMs ?? null,
+          usableKeyCount: health?.usableKeyCount ?? 0,
+          coolingKeyCount: health?.coolingKeyCount ?? 0,
+        };
+      })(),
     };
   }));
 });
@@ -451,25 +479,10 @@ async function probeModelUpstream(modelDbId: number) {
     `).run(model.platform, model.model_id, model.model_id, status === 'ok' ? 'success' : (status === 'rate_limited' ? 'error' : 'error'), latency, error || null);
   } catch (e) { /* best effort */ }
 
-  // Probe changes the Default routing group's switch only. high/mid/light are
-  // explicit operator-curated groups and must never be rewritten by a probe.
-  let finalEnabled = (status === 'ok');
-  try {
-    if (status === 'ok') {
-      db.prepare('UPDATE models SET enabled = 1 WHERE id = ?').run(modelDbId);
-      setDefaultRoutingModelEnabled(db, modelDbId, true);
-      finalEnabled = true;
-    } else if (status === 'error' || status === 'timeout') {
-      setDefaultRoutingModelEnabled(db, modelDbId, false);
-      finalEnabled = false;
-    } else if (status === 'rate_limited') {
-      const row = db.prepare(`
-        SELECT enabled FROM profile_models
-        WHERE profile_id = ? AND model_db_id = ?
-      `).get(defaultProfileId, modelDbId) as { enabled: number } | undefined;
-      finalEnabled = row?.enabled === 1;
-    }
-  } catch (e) { /* best effort */ }
+  // Probes report runtime health only. They must not rewrite the operator's
+  // routing switch: a one-off failure cannot silently disable a chosen route,
+  // and a successful probe cannot silently enable a deliberately disabled one.
+  const finalEnabled = model.chain_enabled === 1 && model.model_enabled === 1;
 
   return {
     ok: status === 'ok',
@@ -484,33 +497,23 @@ async function probeModelUpstream(modelDbId: number) {
   };
 }
 
-// ── Health: per-model status from recent requests ──────────────────────────
-// Returns the latest request status per (platform, model_id) joined to the
-// Default routing profile rows.
-// Uses model_id (the actual routed model) — not requested_model (what the
-// client typed, usually NULL) — and matches case-insensitively against
-// models.model_id. Without LOWER(), mapleleaf and
-// other platforms whose model_id casing diverges from the requests log show
-// as 'unknown' (gray) on the dashboard. (#376)
+// ── Health: durable probe + cooling state for dashboard consumers ──────────
 fallbackRouter.get('/health', (_req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-store, max-age=0');
   const db = getDb();
-  const lastReqs = db.prepare(
-    "SELECT platform, LOWER(model_id) as lmodel, status FROM requests WHERE id IN (SELECT MAX(id) FROM requests WHERE model_id IS NOT NULL AND model_id != '' GROUP BY platform, LOWER(model_id))"
-  ).all() as { platform: string; lmodel: string; status: string }[];
-  const healthMap = new Map<string, string>();
-  for (const r of lastReqs) healthMap.set(r.platform + ':' + r.lmodel, r.status);
   const defaultProfileId = getDefaultProfileId(db);
   const rows = db.prepare(`
-    SELECT pm.model_db_id, m.platform, LOWER(m.model_id) AS lmodel
+    SELECT pm.model_db_id, pm.enabled
     FROM profile_models pm
     JOIN models m ON m.id = pm.model_db_id
     WHERE pm.profile_id = ?
-  `).all(defaultProfileId) as { model_db_id: number; platform: string; lmodel: string }[];
+  `).all(defaultProfileId) as { model_db_id: number; enabled: number }[];
+  const healthByDbId = getModelProbeHealth(db, rows.map(row => row.model_db_id));
   const result = rows.map(r => ({
     modelDbId: r.model_db_id,
-    healthStatus: healthMap.get(r.platform + ':' + r.lmodel) || 'unknown',
-    lastProbedAt: null,
+    healthStatus: getModelRoutingState(healthByDbId.get(r.model_db_id), r.enabled === 1),
+    lastProbedAt: healthByDbId.get(r.model_db_id)?.lastProbedAt ?? null,
+    cooldownUntilMs: healthByDbId.get(r.model_db_id)?.cooldownUntilMs ?? null,
   }));
   res.json(result);
 });
@@ -604,7 +607,7 @@ fallbackRouter.get('/probe-settings', (_req: Request, res: Response) => {
   const db = getDb();
   const intervalRow = db.prepare("SELECT value FROM settings WHERE key='health_check_interval_ms'").get() as { value: string } | undefined;
   const lastRow = db.prepare("SELECT value FROM settings WHERE key='health_check_last_run'").get() as { value: string } | undefined;
-  const interval = parseInt(intervalRow?.value || '3600000', 10);
+  const interval = parseInt(intervalRow?.value || '1800000', 10);
   const lastRun = lastRow?.value || null;
   res.json({ intervalMs: interval, lastRun });
 });

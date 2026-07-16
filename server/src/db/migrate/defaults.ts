@@ -7,6 +7,7 @@ import * as githubGpt41Context from '../migrations/20260630_000001_github_gpt41_
 import * as requestClientInfo from '../migrations/20260706_000001_request_client_info.js';
 import * as customModelToolSupport from '../migrations/20260706_000002_custom_model_tool_support.js';
 import * as routingProfileSource from '../migrations/20260716_000001_routing_profile_source.js';
+import * as routingEvents from '../migrations/20260717_000001_routing_events.js';
 
 export interface MigrationModule {
   up(db: Db): void;
@@ -26,6 +27,7 @@ export const GITHUB_GPT41_CONTEXT_FILENAME = '20260630_000001_github_gpt41_conte
 export const REQUEST_CLIENT_INFO_FILENAME = '20260706_000001_request_client_info.ts';
 export const CUSTOM_MODEL_TOOL_SUPPORT_FILENAME = '20260706_000002_custom_model_tool_support.ts';
 export const ROUTING_PROFILE_SOURCE_FILENAME = '20260716_000001_routing_profile_source.ts';
+export const ROUTING_EVENTS_FILENAME = '20260717_000001_routing_events.ts';
 
 export const DEFAULT_MIGRATIONS: readonly DefaultMigration[] = [
   { filename: LEGACY_BASELINE_FILENAME, module: legacyBaseline },
@@ -36,4 +38,5 @@ export const DEFAULT_MIGRATIONS: readonly DefaultMigration[] = [
   { filename: REQUEST_CLIENT_INFO_FILENAME, module: requestClientInfo },
   { filename: CUSTOM_MODEL_TOOL_SUPPORT_FILENAME, module: customModelToolSupport },
   { filename: ROUTING_PROFILE_SOURCE_FILENAME, module: routingProfileSource },
+  { filename: ROUTING_EVENTS_FILENAME, module: routingEvents },
 ];

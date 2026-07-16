@@ -65,7 +65,7 @@ export class CloudflareProvider extends BaseProvider {
         parallel_tool_calls: options?.parallel_tool_calls,
         ...extendedBodyParams(this.platform, options),
       }),
-    }, CHAT_TIMEOUT_MS);
+    }, options?.timeoutMs ?? CHAT_TIMEOUT_MS);
     recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
@@ -114,7 +114,7 @@ export class CloudflareProvider extends BaseProvider {
         ...extendedBodyParams(this.platform, options),
         stream: true,
       }),
-    }, CHAT_TIMEOUT_MS);
+    }, options?.timeoutMs ?? CHAT_TIMEOUT_MS);
     recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,

@@ -18,7 +18,7 @@ vi.mock('../../providers/index.js', async (importOriginal) => {
 });
 
 const { createApp } = await import('../../app.js');
-const { initDb, getDb, getUnifiedApiKey } = await import('../../db/index.js');
+const { initDb, getDb, getUnifiedApiKey, setSetting } = await import('../../db/index.js');
 const { encrypt } = await import('../../lib/crypto.js');
 const { setRoutingStrategy } = await import('../../services/router.js');
 
@@ -102,6 +102,18 @@ describe('Empty-completion failover', () => {
     expect(rows[0].status).toBe('error');
     expect(rows[0].error).toContain('empty completion');
     expect(rows[1].status).toBe('success');
+  });
+
+  it('/v1/chat/completions (non-stream) passes the configured attempt timeout upstream', async () => {
+    setSetting('fallback_attempt_timeout_ms', '32123');
+    chatCompletion.mockResolvedValueOnce(GOOD_RESULT);
+
+    const { status } = await post(app, '/v1/chat/completions', {
+      messages: [{ role: 'user', content: 'hi' }],
+    }, key);
+
+    expect(status).toBe(200);
+    expect(chatCompletion.mock.calls[0][3]).toMatchObject({ timeoutMs: 32123 });
   });
 
   it('/v1/chat/completions (stream): zero-chunk stream fails over instead of emitting an empty stream', async () => {
