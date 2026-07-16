@@ -1,4 +1,6 @@
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   canMakeRequest,
@@ -212,7 +214,8 @@ describe('Rate Limiter', () => {
   describe('persistent state', () => {
     it('preserves per-key usage and cooldowns after the limiter module reloads', async () => {
       process.env.ENCRYPTION_KEY = '0'.repeat(64);
-      const dbPath = `/tmp/freeapi-ratelimit-${Date.now()}-${Math.random()}.db`;
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'freellmapi-ratelimit-'));
+      const dbPath = path.join(tmpDir, 'freeapi.db');
       const keyId = 4242;
       let db: { close: () => void } | undefined;
 
@@ -243,6 +246,7 @@ describe('Rate Limiter', () => {
       } finally {
         db?.close();
         removeDbFile(dbPath);
+        fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });
   });

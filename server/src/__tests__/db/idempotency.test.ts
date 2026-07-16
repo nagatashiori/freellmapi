@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { initDb } from '../../db/index.js';
 
 /**
@@ -10,39 +13,50 @@ describe('Migration idempotency', () => {
   it('initDb on a fresh in-memory DB then re-run produces identical row counts', () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     // Use a single shared file so both inits hit the same DB.
-    const tmpPath = `/tmp/freeapi-idempotency-${Date.now()}.db`;
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'freellmapi-idempotency-'));
+    const tmpPath = path.join(tmpDir, 'freeapi.db');
+    let db1: Database.Database | undefined;
+    let db2: Database.Database | undefined;
 
-    const db1 = initDb(tmpPath);
-    const before = {
-      models: (db1.prepare('SELECT COUNT(*) AS c FROM models').get() as { c: number }).c,
-      fallback: (db1.prepare('SELECT COUNT(*) AS c FROM fallback_config').get() as { c: number }).c,
-      enabledModels: (db1.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 1').get() as { c: number }).c,
-      disabledModels: (db1.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 0').get() as { c: number }).c,
-      orphanFallbacks: (db1.prepare(`
-        SELECT COUNT(*) AS c FROM fallback_config f
-        LEFT JOIN models m ON f.model_db_id = m.id
-        WHERE m.id IS NULL
-      `).get() as { c: number }).c,
-    };
-    db1.close();
+    try {
+      db1 = initDb(tmpPath);
+      const before = {
+        models: (db1.prepare('SELECT COUNT(*) AS c FROM models').get() as { c: number }).c,
+        fallback: (db1.prepare('SELECT COUNT(*) AS c FROM fallback_config').get() as { c: number }).c,
+        enabledModels: (db1.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 1').get() as { c: number }).c,
+        disabledModels: (db1.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 0').get() as { c: number }).c,
+        orphanFallbacks: (db1.prepare(`
+          SELECT COUNT(*) AS c FROM fallback_config f
+          LEFT JOIN models m ON f.model_db_id = m.id
+          WHERE m.id IS NULL
+        `).get() as { c: number }).c,
+      };
+      db1.close();
+      db1 = undefined;
 
-    // Re-init the same DB file — V1..V9 should all no-op idempotently.
-    const db2 = initDb(tmpPath);
-    const after = {
-      models: (db2.prepare('SELECT COUNT(*) AS c FROM models').get() as { c: number }).c,
-      fallback: (db2.prepare('SELECT COUNT(*) AS c FROM fallback_config').get() as { c: number }).c,
-      enabledModels: (db2.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 1').get() as { c: number }).c,
-      disabledModels: (db2.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 0').get() as { c: number }).c,
-      orphanFallbacks: (db2.prepare(`
-        SELECT COUNT(*) AS c FROM fallback_config f
-        LEFT JOIN models m ON f.model_db_id = m.id
-        WHERE m.id IS NULL
-      `).get() as { c: number }).c,
-    };
-    db2.close();
+      // Re-init the same DB file — V1..V9 should all no-op idempotently.
+      db2 = initDb(tmpPath);
+      const after = {
+        models: (db2.prepare('SELECT COUNT(*) AS c FROM models').get() as { c: number }).c,
+        fallback: (db2.prepare('SELECT COUNT(*) AS c FROM fallback_config').get() as { c: number }).c,
+        enabledModels: (db2.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 1').get() as { c: number }).c,
+        disabledModels: (db2.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 0').get() as { c: number }).c,
+        orphanFallbacks: (db2.prepare(`
+          SELECT COUNT(*) AS c FROM fallback_config f
+          LEFT JOIN models m ON f.model_db_id = m.id
+          WHERE m.id IS NULL
+        `).get() as { c: number }).c,
+      };
+      db2.close();
+      db2 = undefined;
 
-    expect(after).toEqual(before);
-    expect(after.orphanFallbacks).toBe(0);
+      expect(after).toEqual(before);
+      expect(after.orphanFallbacks).toBe(0);
+    } finally {
+      db1?.close();
+      db2?.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('every catalog row has exactly one fallback_config entry', () => {
