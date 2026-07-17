@@ -65,6 +65,25 @@ function readLifetimeSettings() {
   return row?.value ?? null;
 }
 
+// Classify recorded provider errors for operations. Keep the raw message in
+// the response, but never hide it behind the old catch-all "Other" bucket.
+function classifyError(error: string | null): string {
+  const value = error?.trim().toLowerCase();
+  if (!value) return 'No error recorded';
+  if (/\b429\b|rate.?limit|too many requests|quota|resource exhausted/.test(value)) return 'Rate limited or quota';
+  if (/\b401\b|unauthori[sz]ed|authentication|invalid (?:api )?key/.test(value)) return 'Authentication';
+  if (/\b403\b|forbidden|permission denied/.test(value)) return 'Permission denied';
+  if (/\b404\b|not found|does not exist|unknown model|model .*missing/.test(value)) return 'Model not found';
+  if (/stream interrupted|stream error|in-band error frame/.test(value)) return 'Stream interrupted';
+  if (/timeout|timed out|aborterror|operation was aborted|deadline exceeded/.test(value)) return 'Timeout';
+  if (/econnreset|econnrefused|enotfound|eai_again|ehostunreach|socket hang up|connection reset|dns|tls|certificate/.test(value)) return 'Connection or DNS';
+  if (/\b50[012]\b|internal server|bad gateway/.test(value)) return 'Upstream server error';
+  if (/\b50[34]\b|unavailable|overloaded|maintenance/.test(value)) return 'Upstream unavailable';
+  if (/all models exhausted|routing|fallback|no usable key|candidate exhausted/.test(value)) return 'Gateway routing';
+  if (/\b400\b|\b422\b|invalid request|unsupported|not support|capability|tool|context length|too many tokens|content policy|empty completion/.test(value)) return 'Request or capability mismatch';
+  return 'Unknown upstream error';
+}
+
 // Recent dispatch chains, grouped by the external request id. The `start`
 // event is written immediately before the provider call, so the UI can prove
 // that a selected route was sent upstream even if it later timed out/fell back.
@@ -108,6 +127,8 @@ analyticsRouter.get('/routing-traces', (req: Request, res: Response) => {
         requestedModel: events.find(event => event.requested_model)?.requested_model ?? null,
         createdAt: events[0].created_at.replace(' ', 'T') + 'Z',
         finalState: last.event,
+        finalPlatform: last.platform,
+        finalModelId: last.model_id,
         events: events.map(event => ({
           attempt: event.attempt,
           event: event.event,
@@ -117,11 +138,73 @@ analyticsRouter.get('/routing-traces', (req: Request, res: Response) => {
           inputTokens: event.input_tokens,
           outputTokens: event.output_tokens,
           error: event.error,
+          errorCategory: event.error ? classifyError(event.error) : null,
           createdAt: event.created_at.replace(' ', 'T') + 'Z',
         })),
       };
     });
   res.json({ traces });
+});
+
+// Real-traffic quality baseline for the actual route target. Probe rows power
+// v10's live health checks and intentionally stay out of this operator view.
+analyticsRouter.get('/channel-model-baselines', (req: Request, res: Response) => {
+  const range = (req.query.range as string) ?? '7d';
+  const since = getSinceTimestamp(range);
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT
+      platform,
+      model_id,
+      COUNT(*) AS attempts,
+      SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
+      SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS error_count,
+      COUNT(CASE WHEN status = 'success' AND latency_ms IS NOT NULL THEN 1 END) AS latency_count,
+      AVG(CASE WHEN status = 'success' THEN latency_ms ELSE NULL END) AS avg_latency_ms,
+      AVG(CASE WHEN status = 'success' THEN ttfb_ms ELSE NULL END) AS avg_ttfb_ms,
+      AVG(CASE WHEN status = 'success' AND output_tokens > 0 AND latency_ms > 0
+        THEN output_tokens / (latency_ms / 1000.0) ELSE NULL END) AS avg_tokens_per_second,
+      MAX(created_at) AS last_called_at
+    FROM requests
+    WHERE created_at >= ? AND COALESCE(request_type, 'chat') != 'probe'
+    GROUP BY platform, model_id
+    ORDER BY last_called_at DESC, attempts DESC
+  `).all(since) as Array<{
+    platform: string; model_id: string; attempts: number; success_count: number;
+    error_count: number; latency_count: number; avg_latency_ms: number | null;
+    avg_ttfb_ms: number | null; avg_tokens_per_second: number | null; last_called_at: string;
+  }>;
+  const percentileStmt = db.prepare(`
+    SELECT latency_ms FROM requests
+    WHERE created_at >= ? AND platform = ? AND model_id = ?
+      AND status = 'success' AND latency_ms IS NOT NULL
+      AND COALESCE(request_type, 'chat') != 'probe'
+    ORDER BY latency_ms ASC
+    LIMIT 1 OFFSET ?
+  `);
+
+  res.json(rows.map(row => {
+    const percentileAt = (fraction: number): number | null => {
+      if (row.latency_count === 0) return null;
+      const offset = Math.floor((row.latency_count - 1) * fraction);
+      const result = percentileStmt.get(since, row.platform, row.model_id, offset) as { latency_ms: number } | undefined;
+      return result ? Math.round(result.latency_ms) : null;
+    };
+    return {
+      platform: row.platform,
+      modelId: row.model_id,
+      attempts: row.attempts,
+      successCount: row.success_count ?? 0,
+      successRate: Math.round(((row.success_count ?? 0) * 1000) / row.attempts) / 10,
+      errorCount: row.error_count ?? 0,
+      avgLatencyMs: row.avg_latency_ms == null ? null : Math.round(row.avg_latency_ms),
+      p50LatencyMs: percentileAt(0.5),
+      p95LatencyMs: percentileAt(0.95),
+      avgTtfbMs: row.avg_ttfb_ms == null ? null : Math.round(row.avg_ttfb_ms),
+      avgTokensPerSecond: row.avg_tokens_per_second == null ? null : Math.round(row.avg_tokens_per_second * 10) / 10,
+      lastCalledAt: row.last_called_at.replace(' ', 'T') + 'Z',
+    };
+  }));
 });
 
 // Summary stats
@@ -435,47 +518,25 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
   const since = getSinceTimestamp(range);
   const db = getDb();
 
-  // Group errors by category (extract the key part of the error message)
-  const rows = db.prepare(`
-    SELECT
-      platform,
-      model_id,
-      CASE
-        WHEN error LIKE '%429%' OR error LIKE '%rate limit%' OR error LIKE '%too many%' OR error LIKE '%quota%' THEN 'Rate Limited (429)'
-        WHEN error LIKE '%401%' OR error LIKE '%unauthorized%' OR error LIKE '%invalid.*key%' THEN 'Auth Error (401)'
-        WHEN error LIKE '%403%' OR error LIKE '%forbidden%' THEN 'Forbidden (403)'
-        WHEN error LIKE '%404%' OR error LIKE '%not found%' THEN 'Not Found (404)'
-        WHEN error LIKE '%timeout%' OR error LIKE '%ETIMEDOUT%' OR error LIKE '%ECONNREFUSED%' THEN 'Timeout/Connection'
-        WHEN error LIKE '%500%' OR error LIKE '%internal server%' THEN 'Server Error (500)'
-        WHEN error LIKE '%503%' OR error LIKE '%unavailable%' THEN 'Unavailable (503)'
-        ELSE 'Other'
-      END as error_category,
-      COUNT(*) as count
+  const errors = db.prepare(`
+    SELECT platform, model_id, error
     FROM requests
     WHERE status = 'error' AND created_at >= ?
-    GROUP BY platform, error_category
-    ORDER BY count DESC
-  `).all(since) as any[];
-
-  // Also get totals by category
-  const byCategory = db.prepare(`
-    SELECT
-      CASE
-        WHEN error LIKE '%429%' OR error LIKE '%rate limit%' OR error LIKE '%too many%' OR error LIKE '%quota%' THEN 'Rate Limited (429)'
-        WHEN error LIKE '%401%' OR error LIKE '%unauthorized%' OR error LIKE '%invalid.*key%' THEN 'Auth Error (401)'
-        WHEN error LIKE '%403%' OR error LIKE '%forbidden%' THEN 'Forbidden (403)'
-        WHEN error LIKE '%404%' OR error LIKE '%not found%' THEN 'Not Found (404)'
-        WHEN error LIKE '%timeout%' OR error LIKE '%ETIMEDOUT%' OR error LIKE '%ECONNREFUSED%' THEN 'Timeout/Connection'
-        WHEN error LIKE '%500%' OR error LIKE '%internal server%' THEN 'Server Error (500)'
-        WHEN error LIKE '%503%' OR error LIKE '%unavailable%' THEN 'Unavailable (503)'
-        ELSE 'Other'
-      END as category,
-      COUNT(*) as count
-    FROM requests
-    WHERE status = 'error' AND created_at >= ?
-    GROUP BY category
-    ORDER BY count DESC
-  `).all(since) as any[];
+  `).all(since) as Array<{ platform: string; model_id: string; error: string | null }>;
+  const detailedCounts = new Map<string, { platform: string; model_id: string; error_category: string; count: number }>();
+  const categoryCounts = new Map<string, number>();
+  for (const row of errors) {
+    const errorCategory = classifyError(row.error);
+    const detailedKey = `${row.platform}\u0000${row.model_id}\u0000${errorCategory}`;
+    const detailed = detailedCounts.get(detailedKey) ?? { platform: row.platform, model_id: row.model_id, error_category: errorCategory, count: 0 };
+    detailed.count++;
+    detailedCounts.set(detailedKey, detailed);
+    categoryCounts.set(errorCategory, (categoryCounts.get(errorCategory) ?? 0) + 1);
+  }
+  const rows = [...detailedCounts.values()].sort((a, b) => b.count - a.count || a.platform.localeCompare(b.platform));
+  const byCategory = [...categoryCounts.entries()]
+    .map(([category, count]) => ({ category, count }))
+    .sort((a, b) => b.count - a.count || a.category.localeCompare(b.category));
 
   // Errors by platform
   const byPlatform = db.prepare(`

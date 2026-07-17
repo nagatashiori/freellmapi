@@ -48,9 +48,12 @@ describe('GET /api/analytics/routing-traces', () => {
     expect(body.traces[0]).toMatchObject({
       requestId: 'trace-a',
       finalState: 'ok',
+      requestedModel: 'glm-5.2',
+      finalPlatform: 'locedge',
+      finalModelId: 'z-ai/glm-5.2',
       events: [
         { event: 'start', platform: 'mapleleaf', modelId: 'z-ai/glm-5.2' },
-        { event: 'fail', error: '429 rate limited' },
+        { event: 'fail', error: '429 rate limited', errorCategory: 'Rate limited or quota' },
         { event: 'next', platform: 'locedge' },
         { event: 'ok', latencyMs: 842 },
       ],

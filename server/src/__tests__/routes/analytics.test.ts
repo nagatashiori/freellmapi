@@ -359,6 +359,68 @@ describe('Analytics API', () => {
     });
   });
 
+  describe('channel-model quality baselines', () => {
+    it('groups real traffic by channel and actual model while excluding probes and failed latency', async () => {
+      for (let i = 1; i <= 10; i++) {
+        insertRaw({
+          platform: 'locedge',
+          modelId: 'z-ai/glm-5.2',
+          status: 'success',
+          latencyMs: i * 100,
+          ttfbMs: i * 10,
+          outputTokens: i * 100,
+          createdAt: `2026-05-29 11:${String(i).padStart(2, '0')}:00`,
+        });
+      }
+      insertRaw({
+        platform: 'locedge', modelId: 'z-ai/glm-5.2', status: 'error',
+        latencyMs: 9_999, error: '429 quota exceeded', createdAt: '2026-05-29 11:20:00',
+      });
+      insertRaw({
+        platform: 'locedge', modelId: 'z-ai/glm-5.2', requestType: 'probe',
+        status: 'success', latencyMs: 1, ttfbMs: 1, outputTokens: 1, createdAt: '2026-05-29 11:21:00',
+      });
+
+      const { status, body } = await request(app, '/api/analytics/channel-model-baselines?range=24h');
+
+      expect(status).toBe(200);
+      expect(body).toEqual([expect.objectContaining({
+        platform: 'locedge',
+        modelId: 'z-ai/glm-5.2',
+        attempts: 11,
+        successCount: 10,
+        successRate: 90.9,
+        errorCount: 1,
+        avgLatencyMs: 550,
+        p50LatencyMs: 500,
+        p95LatencyMs: 900,
+        avgTtfbMs: 55,
+      })]);
+    });
+  });
+
+  describe('error classification', () => {
+    it('replaces the opaque Other bucket with actionable categories', async () => {
+      insertRaw({ status: 'error', error: '400 tool calling is not supported', createdAt: '2026-05-29 11:00:00' });
+      insertRaw({ status: 'error', error: 'socket hang up ECONNRESET', createdAt: '2026-05-29 11:01:00' });
+      insertRaw({ status: 'error', error: 'gateway routing candidate exhausted', createdAt: '2026-05-29 11:02:00' });
+      insertRaw({ status: 'error', error: 'unrecognized upstream failure', createdAt: '2026-05-29 11:03:00' });
+      insertRaw({ status: 'error', error: null, createdAt: '2026-05-29 11:04:00' });
+
+      const { status, body } = await request(app, '/api/analytics/error-distribution?range=24h');
+
+      expect(status).toBe(200);
+      expect(body.byCategory).toEqual(expect.arrayContaining([
+        expect.objectContaining({ category: 'Request or capability mismatch', count: 1 }),
+        expect.objectContaining({ category: 'Connection or DNS', count: 1 }),
+        expect.objectContaining({ category: 'Gateway routing', count: 1 }),
+        expect.objectContaining({ category: 'Unknown upstream error', count: 1 }),
+        expect.objectContaining({ category: 'No error recorded', count: 1 }),
+      ]));
+      expect(body.byCategory.map((row: { category: string }) => row.category)).not.toContain('Other');
+    });
+  });
+
   describe('by-key endpoint', () => {
     it('groups usage per key, joins the label, and keeps deleted keys', async () => {
       getDb().prepare('DELETE FROM api_keys').run();

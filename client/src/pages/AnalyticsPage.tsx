@@ -80,6 +80,21 @@ interface ByKeyRow {
   totalOutputTokens: number
 }
 
+interface ChannelModelBaselineRow {
+  platform: string
+  modelId: string
+  attempts: number
+  successCount: number
+  successRate: number
+  errorCount: number
+  avgLatencyMs: number | null
+  p50LatencyMs: number | null
+  p95LatencyMs: number | null
+  avgTtfbMs: number | null
+  avgTokensPerSecond: number | null
+  lastCalledAt: string
+}
+
 interface ErrorDistribution {
   byCategory: Array<{ category: string; count: number }>
   byPlatform: Array<{ platform: string; count: number }>
@@ -123,6 +138,7 @@ interface RoutingTraceEvent {
   modelId: string
   latencyMs: number | null
   error: string | null
+  errorCategory: string | null
   createdAt: string
 }
 
@@ -132,6 +148,8 @@ interface RoutingTrace {
   requestedModel: string | null
   createdAt: string
   finalState: RoutingTraceEvent['event']
+  finalPlatform: string
+  finalModelId: string
   events: RoutingTraceEvent[]
 }
 
@@ -152,6 +170,29 @@ function formatTokens(n?: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
   return String(n)
+}
+
+function formatMs(n: number | null): string {
+  return n == null ? '—' : `${n} ms`
+}
+
+function errorCategoryLabel(category: string): string {
+  const labels: Record<string, string> = {
+    'Rate limited or quota': '限流 / 配额',
+    Authentication: '鉴权失败',
+    'Permission denied': '权限拒绝',
+    'Model not found': '模型不存在',
+    'Request or capability mismatch': '请求 / 能力不兼容',
+    Timeout: '超时',
+    'Connection or DNS': '连接 / DNS',
+    'Upstream server error': '上游服务错误',
+    'Upstream unavailable': '上游不可用',
+    'Stream interrupted': '流中断',
+    'Gateway routing': '网关路由',
+    'Unknown upstream error': '未知上游错误',
+    'No error recorded': '未记录错误',
+  }
+  return labels[category] ?? category
 }
 
 function Stat({ label, value, hint, className }: { label: string; value: string | number; hint?: string; className?: string }) {
@@ -225,6 +266,11 @@ export default function AnalyticsPage() {
   const { data: byKey = [] } = useQuery({
     queryKey: ['analytics', 'by-key', range],
     queryFn: () => apiFetch<ByKeyRow[]>(`/api/analytics/by-key?range=${range}`),
+  })
+
+  const { data: channelModelBaselines = [] } = useQuery({
+    queryKey: ['analytics', 'channel-model-baselines', range],
+    queryFn: () => apiFetch<ChannelModelBaselineRow[]>(`/api/analytics/channel-model-baselines?range=${range}`),
   })
 
   const { data: errors = [] } = useQuery({
@@ -450,7 +496,7 @@ export default function AnalyticsPage() {
               <p className="text-sm text-muted-foreground text-center py-8">{t('analytics.noErrors')}</p>
             ) : (
               <ResponsiveContainer width="100%" height={240}>
-                <BarChart data={errorDist.byCategory} layout="vertical" margin={{ top: 6, right: 12, left: 8, bottom: 0 }}>
+                <BarChart data={errorDist.byCategory.map(row => ({ ...row, category: errorCategoryLabel(row.category) }))} layout="vertical" margin={{ top: 6, right: 12, left: 8, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="2 4" stroke={gridStyle} horizontal={false} />
                   <XAxis type="number" tick={axisStyle} tickLine={false} axisLine={{ stroke: gridStyle }} allowDecimals={false} />
                   <YAxis type="category" dataKey="category" tick={axisStyle} tickLine={false} axisLine={false} width={128} />
@@ -508,7 +554,7 @@ export default function AnalyticsPage() {
 
           <div className="lg:col-span-2">
             <Panel title="最近调度链（已发上游证据）">
-              <p className="mb-3 text-xs text-muted-foreground">每条记录是一整个外部请求；“已发上游”说明网关已开始向该提供方派发，随后可看成功、失败和 fallback。</p>
+              <p className="mb-3 text-xs text-muted-foreground">每条记录是一整个外部请求；明确显示请求模型、最终实际渠道和实际模型。“已发上游”说明网关已开始向该渠道派发，随后可看成功、失败和 fallback。</p>
               {!routingTraces?.traces?.length ? (
                 <p className="text-sm text-muted-foreground text-center py-6">升级后的新调度会显示在这里。</p>
               ) : (
@@ -521,8 +567,14 @@ export default function AnalyticsPage() {
                           <span className={`mr-2 font-medium ${trace.finalState === 'ok' ? 'text-[#4ade80]' : trace.finalState === 'fail' ? 'text-destructive' : 'text-[#fbbf24]'}`}>{finalLabel}</span>
                           <span className="font-mono text-muted-foreground">{trace.requestId.slice(0, 12)}</span>
                           <span className="ml-2 text-muted-foreground">{trace.surface} · {trace.events.length} 步 · {formatSqliteUtcToLocalTime(trace.createdAt, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                          <span className="ml-2 text-muted-foreground">请求：{trace.requestedModel ?? 'auto'} → 最终：{trace.finalPlatform}/{trace.finalModelId}</span>
                         </summary>
                         <div className="mt-2 space-y-1 border-t pt-2 text-[11px]">
+                          <div className="flex flex-wrap gap-x-3 text-muted-foreground">
+                            <span>请求模型：<code>{trace.requestedModel ?? 'auto'}</code></span>
+                            <span>最终渠道：<code>{trace.finalPlatform}</code></span>
+                            <span>实际模型：<code>{trace.finalModelId}</code></span>
+                          </div>
                           {trace.events.map((event, index) => {
                             const label = event.event === 'start' || event.event === 'next'
                               ? '已发上游'
@@ -530,8 +582,10 @@ export default function AnalyticsPage() {
                             return (
                               <div key={`${event.attempt}-${event.event}-${index}`} className="flex flex-wrap gap-x-2 text-muted-foreground">
                                 <span className="font-medium text-foreground">#{event.attempt + 1} {label}</span>
-                                <code>{event.platform}/{event.modelId}</code>
+                                <span>渠道：<code>{event.platform}</code></span>
+                                <span>模型：<code>{event.modelId}</code></span>
                                 {event.latencyMs != null && <span>{event.latencyMs}ms</span>}
+                                {event.errorCategory && <span className="text-destructive">{errorCategoryLabel(event.errorCategory)}</span>}
                                 {event.error && <span className="text-destructive break-all">{event.error}</span>}
                               </div>
                             )
@@ -540,6 +594,46 @@ export default function AnalyticsPage() {
                       </details>
                     )
                   })}
+                </div>
+              )}
+            </Panel>
+          </div>
+
+          <div className="lg:col-span-2">
+            <Panel title="渠道 × 模型质量基线（真实调用）">
+              <p className="mb-3 text-xs text-muted-foreground">仅统计真实调用，不混入健康探测；延迟、TTFB 和吞吐只使用成功请求。它用于判断同一模型在哪个渠道更稳定、更快，当前不会自动改写人工调度顺序。</p>
+              {channelModelBaselines.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-8">{t('common.noData')}</p>
+              ) : (
+                <div className="max-h-[420px] overflow-y-auto -mx-4">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="pl-4">渠道</TableHead>
+                        <TableHead>实际模型</TableHead>
+                        <TableHead className="text-right">样本</TableHead>
+                        <TableHead className="text-right">成功率</TableHead>
+                        <TableHead className="text-right">平均 / P50 / P95</TableHead>
+                        <TableHead className="text-right">TTFB</TableHead>
+                        <TableHead className="text-right">吞吐</TableHead>
+                        <TableHead className="text-right pr-4">最新调用</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {channelModelBaselines.map(row => (
+                        <TableRow key={`${row.platform}:${row.modelId}`}>
+                          <TableCell className="pl-4 text-xs font-medium">{row.platform}</TableCell>
+                          <TableCell className="text-xs font-mono max-w-[260px] truncate" title={row.modelId}>{row.modelId}</TableCell>
+                          <TableCell className="text-right text-xs tabular-nums">{row.attempts}</TableCell>
+                          <TableCell className={`text-right text-xs tabular-nums ${row.successRate < 80 ? 'text-destructive' : ''}`}>{row.successRate}%</TableCell>
+                          <TableCell className="text-right text-xs tabular-nums">{formatMs(row.avgLatencyMs)} / {formatMs(row.p50LatencyMs)} / {formatMs(row.p95LatencyMs)}</TableCell>
+                          <TableCell className="text-right text-xs tabular-nums">{formatMs(row.avgTtfbMs)}</TableCell>
+                          <TableCell className="text-right text-xs tabular-nums">{row.avgTokensPerSecond == null ? '—' : `${row.avgTokensPerSecond} tok/s`}</TableCell>
+                          <TableCell className="text-right text-xs text-muted-foreground tabular-nums whitespace-nowrap pr-4">{formatSqliteUtcToLocalTime(row.lastCalledAt, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
                 </div>
               )}
             </Panel>
