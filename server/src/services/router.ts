@@ -611,21 +611,15 @@ export function resolveRoutingChain(modelString: string | undefined): ResolvedCh
     return { chain, strategyKey: `auto:${globalAxis}` };
   }
 
-  const chain = getChainByProfileName(db, suffix);
-  if (!chain) {
-    const err = new Error(`Profile '${suffix}' not found. Use 'auto' for the default profile, or call /v1/models for available options.`) as any;
-    err.status = 400;
-    throw err;
-  }
-
-  const enabledModels = chain.filter(e => e.enabled);
-  if (enabledModels.length === 0) {
-    const err = new Error(`Profile '${suffix}' has no enabled models. Add models to this profile in the dashboard.`) as any;
-    err.status = 400;
-    throw err;
-  }
-
-  return { chain, strategyKey: `auto:${suffix}` };
+  // auto:xxx 不是已知的全局排序别名 → 报错
+  const err = new Error(
+    `Unknown auto mode '${suffix}'. ` +
+    'Valid options: auto, auto:smart, auto:fast, auto:balanced, auto:reliable, auto:cheap. ' +
+    "Use 'auto' to route across all enabled models by priority, " +
+    'or call /v1/models for the full model list.',
+  ) as any;
+  err.status = 400;
+  throw err;
 }
 
 /**
