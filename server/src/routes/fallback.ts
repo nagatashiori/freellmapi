@@ -75,7 +75,8 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
   const defaultProfileId = getDefaultProfileId(db);
   const rows = db.prepare(`
-    SELECT pm.model_db_id, pm.priority, pm.enabled,
+    SELECT pm.model_db_id, pm.priority,
+           CASE WHEN pm.enabled = 1 AND m.enabled = 1 THEN 1 ELSE 0 END AS enabled,
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.speed_rank, m.size_label, m.rpm_limit, m.rpd_limit,
            m.tpm_limit, m.tpd_limit, m.context_window,
@@ -86,7 +87,7 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
     JOIN models m ON m.id = pm.model_db_id
     LEFT JOIN api_keys ak ON ak.id = m.key_id
     LEFT JOIN model_overrides mo ON mo.platform = m.platform AND mo.model_id = m.model_id
-    WHERE pm.profile_id = ? AND m.enabled = 1
+    WHERE pm.profile_id = ?
     ORDER BY pm.priority ASC
   `).all(defaultProfileId) as any[];
 

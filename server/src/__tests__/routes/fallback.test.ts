@@ -63,6 +63,42 @@ describe('Fallback API', () => {
     expect(first).toHaveProperty('contextWindow');
   });
 
+  it('GET /api/fallback keeps globally disabled models visible for management', async () => {
+    const db = getDb();
+    const target = db.prepare(`
+      SELECT m.id, m.enabled AS model_enabled,
+             pm.profile_id, pm.enabled AS profile_enabled
+      FROM profile_models pm
+      JOIN models m ON m.id = pm.model_db_id
+      WHERE m.enabled = 1
+      ORDER BY pm.priority
+      LIMIT 1
+    `).get() as {
+      id: number;
+      model_enabled: number;
+      profile_id: number;
+      profile_enabled: number;
+    };
+
+    db.prepare('UPDATE models SET enabled = 0 WHERE id = ?').run(target.id);
+    db.prepare('UPDATE profile_models SET enabled = 0 WHERE profile_id = ? AND model_db_id = ?')
+      .run(target.profile_id, target.id);
+
+    try {
+      const { status, body } = await request(app, 'GET', '/api/fallback');
+      expect(status).toBe(200);
+      expect(body.find((row: any) => row.modelDbId === target.id)).toMatchObject({
+        modelDbId: target.id,
+        enabled: false,
+        routingHealth: { state: 'disabled' },
+      });
+    } finally {
+      db.prepare('UPDATE models SET enabled = ? WHERE id = ?').run(target.model_enabled, target.id);
+      db.prepare('UPDATE profile_models SET enabled = ? WHERE profile_id = ? AND model_db_id = ?')
+        .run(target.profile_enabled, target.profile_id, target.id);
+    }
+  });
+
   it('GET /api/fallback/token-usage reports per-model chat usage for configured platforms', async () => {
     const db = getDb();
     const target = db.prepare(`
