@@ -17,7 +17,7 @@ import {
   DropdownMenuItem,
   DropdownMenuCheckboxItem,
 } from '@/components/ui/dropdown-menu'
-import { ChevronDown, ExternalLink, KeyRound, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Trash2 } from 'lucide-react'
+import { ChevronDown, ExternalLink, KeyRound, MoreHorizontal, Pencil, Plus, RefreshCw, Save, Search, Trash2 } from 'lucide-react'
 import type { ApiKey, ApiKeyModel } from '../../../../shared/types'
 import { formatSqliteUtcToLocalTime } from '@/lib/utils'
 import { useI18n } from '@/i18n'
@@ -30,9 +30,117 @@ import {
   statusDot,
   statusLabelKey,
 } from './shared'
-import type { HealthData } from './shared'
+import type { HealthData, ProviderHealthSchedule, ProviderHealthSchedulesResponse } from './shared'
 
 type StatusFilter = 'all' | 'healthy' | 'issues' | 'disabled'
+
+type IntervalUnit = 'minutes' | 'hours'
+
+function intervalDraft(intervalMs: number | null): { value: string; unit: IntervalUnit } {
+  if (intervalMs != null && intervalMs >= 60 * 60 * 1000 && intervalMs % (60 * 60 * 1000) === 0) {
+    return { value: String(intervalMs / (60 * 60 * 1000)), unit: 'hours' }
+  }
+  return { value: String((intervalMs ?? 60 * 60 * 1000) / 60_000), unit: 'minutes' }
+}
+
+function formatScheduleTime(value: string | null): string {
+  if (!value) return '从未'
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? '未知' : parsed.toLocaleString()
+}
+
+function ProviderAutomaticDetection({
+  platform,
+  schedule,
+}: {
+  platform: string
+  schedule: ProviderHealthSchedule | undefined
+}) {
+  const queryClient = useQueryClient()
+  const initial = intervalDraft(schedule?.intervalMs ?? null)
+  const [enabled, setEnabled] = useState(schedule?.enabled ?? false)
+  const [intervalValue, setIntervalValue] = useState(initial.value)
+  const [unit, setUnit] = useState<IntervalUnit>(initial.unit)
+
+  useEffect(() => {
+    const next = intervalDraft(schedule?.intervalMs ?? null)
+    setEnabled(schedule?.enabled ?? false)
+    setIntervalValue(next.value)
+    setUnit(next.unit)
+  }, [schedule?.enabled, schedule?.intervalMs])
+
+  const numericValue = Number(intervalValue)
+  const intervalMs = Number.isFinite(numericValue)
+    ? Math.round(numericValue * (unit === 'hours' ? 60 * 60 * 1000 : 60_000))
+    : 0
+  const intervalValid = Number.isInteger(intervalMs) && intervalMs >= 60_000 && intervalMs <= 7 * 24 * 60 * 60 * 1000
+  const dirty = schedule != null && (enabled !== schedule.enabled || intervalMs !== (schedule.intervalMs ?? 60 * 60 * 1000))
+
+  const saveSchedule = useMutation({
+    mutationFn: () => apiFetch(`/api/health/provider-schedules/${encodeURIComponent(platform)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled, intervalMs }),
+    }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['provider-schedules'] })
+      await queryClient.invalidateQueries({ queryKey: ['health'] })
+    },
+  })
+
+  return (
+    <div className="space-y-3 px-4 py-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="min-w-[180px] flex-1">
+          <div className="text-xs font-medium">自动健康检测</div>
+          <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+            开启后，探测结果会同步维护该供应商模型是否参与当前 Profile 的 AUTO；后续成功探测可能重新启用此前关闭的模型。
+          </p>
+        </div>
+        <Switch checked={enabled} onCheckedChange={setEnabled} disabled={!schedule || saveSchedule.isPending} />
+      </div>
+
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="space-y-1">
+          <span className="block text-[11px] text-muted-foreground">检测周期</span>
+          <Input
+            type="number"
+            min={1}
+            step={1}
+            value={intervalValue}
+            onChange={event => setIntervalValue(event.target.value)}
+            className="h-8 w-28 text-xs"
+          />
+        </label>
+        <select
+          value={unit}
+          onChange={event => setUnit(event.target.value as IntervalUnit)}
+          className="h-8 rounded-md border bg-background px-2 text-xs"
+        >
+          <option value="minutes">分钟</option>
+          <option value="hours">小时</option>
+        </select>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => saveSchedule.mutate()}
+          disabled={!schedule || saveSchedule.isPending || !intervalValid || !dirty}
+        >
+          {saveSchedule.isPending ? <RefreshCw className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
+          {saveSchedule.isPending ? '保存中…' : '保存'}
+        </Button>
+        {!intervalValid && <span className="text-[11px] text-destructive">周期须为 1 分钟至 7 天</span>}
+        {saveSchedule.isError && (
+          <span className="text-[11px] text-destructive">{(saveSchedule.error as Error)?.message || '保存失败'}</span>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-muted-foreground">
+        <span>上次自动检查：{formatScheduleTime(schedule?.lastRunAt ?? null)}</span>
+        <span>下次可检查：{formatScheduleTime(schedule?.nextRunAt ?? null)}</span>
+      </div>
+    </div>
+  )
+}
 
 // The Providers tab body: a filter toolbar over a list of collapsible provider
 // groups. Owns the keys/health/proxy queries and every per-key mutation so
@@ -61,6 +169,15 @@ export function ProviderList({ onAddKey }: { onAddKey: () => void }) {
     refetchInterval: 30000,
   })
 
+  const { data: providerSchedulesData } = useQuery<ProviderHealthSchedulesResponse>({
+    queryKey: ['provider-schedules'],
+    queryFn: () => apiFetch('/api/health/provider-schedules'),
+    refetchInterval: 30000,
+  })
+  const providerScheduleMap = new Map<string, ProviderHealthSchedule>(
+    (providerSchedulesData?.schedules ?? []).map(schedule => [schedule.platform, schedule] as const),
+  )
+
   const { data: proxyData } = useQuery<{ proxyUrl: string; enabled: boolean; bypassPlatforms: string[]; active: boolean }>({
     queryKey: ['proxy-url'],
     queryFn: () => apiFetch('/api/settings/proxy'),
@@ -73,6 +190,7 @@ export function ProviderList({ onAddKey }: { onAddKey: () => void }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['keys'] })
       queryClient.invalidateQueries({ queryKey: ['health'] })
+      queryClient.invalidateQueries({ queryKey: ['provider-schedules'] })
     },
   })
 
@@ -362,6 +480,10 @@ export function ProviderList({ onAddKey }: { onAddKey: () => void }) {
 
                 {expanded && (
                   <div className="rounded-2xl border divide-y bg-card overflow-hidden">
+                    <ProviderAutomaticDetection
+                      platform={group.value}
+                      schedule={providerScheduleMap.get(group.value)}
+                    />
                     {group.keys.map(k => {
                       const status = statusOf(k)
                       const lastChecked = healthKeyMap.get(k.id)?.lastCheckedAt

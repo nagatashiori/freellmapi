@@ -1,14 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Activity, RefreshCw, Download, Search, CheckSquare, Square, Save, Trash2 } from 'lucide-react'
+import { Activity, RefreshCw, Download, Search, CheckSquare, Square, Trash2 } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
 import { PageHeader } from '@/components/page-header'
 import { Button } from '@/components/ui/button'
-
-interface ProbeSettings {
-  intervalMs: number
-  lastRun: string | null
-}
 
 interface CatalogPlatform {
   platform: string
@@ -46,34 +41,11 @@ type CatalogMode = 'add' | 'remove'
 export default function StatusPage() {
   const qc = useQueryClient()
 
-  const { data: settings, refetch: refetchSettings } = useQuery<ProbeSettings>({
-    queryKey: ['probe-settings'],
-    queryFn: () => apiFetch('/api/fallback/probe-settings'),
-    refetchInterval: 10_000,
-  })
-
   const { data: platformsData, refetch: refetchPlatforms } = useQuery<{ platforms: CatalogPlatform[] }>({
     queryKey: ['model-catalog-platforms'],
     queryFn: () => apiFetch('/api/keys/model-catalog/platforms'),
   })
   const platforms = platformsData?.platforms ?? []
-
-  const [draftInterval, setDraftInterval] = useState<number | null>(null)
-  const [saveMsg, setSaveMsg] = useState('')
-  useEffect(() => {
-    if (settings && draftInterval === null) setDraftInterval(settings.intervalMs)
-  }, [settings, draftInterval])
-
-  const saveInterval = useMutation({
-    mutationFn: (intervalMs: number) =>
-      apiFetch('/api/fallback/probe-settings', { method: 'PUT', body: JSON.stringify({ intervalMs }) }),
-    onSuccess: () => {
-      refetchSettings()
-      setSaveMsg('已保存')
-      setTimeout(() => setSaveMsg(''), 2000)
-    },
-    onError: (e: any) => setSaveMsg(e.message || '保存失败'),
-  })
 
   const runProbeAll = useMutation({
     mutationFn: () => apiFetch('/api/fallback/probe-all', { method: 'POST' }),
@@ -219,7 +191,6 @@ export default function StatusPage() {
 
   const selectedCount = selected.size
   const currentPlat = platforms.find(p => p.platform === platform)
-  const intervalDirty = draftInterval !== null && settings != null && draftInterval !== settings.intervalMs
 
   function confirmRemove() {
     if (selectedCount === 0 || !platform) return
@@ -230,7 +201,7 @@ export default function StatusPage() {
 
   return (
     <div className="space-y-6 max-w-3xl">
-      <PageHeader title="健康检查与模型目录" description="探测间隔、供应商模型更新，以及运行时模型组去重" />
+      <PageHeader title="健康检查与模型目录" description="供应商健康检测、模型更新，以及运行时模型组去重" />
 
       <section className="rounded-xl border bg-card p-5 space-y-2">
         <h3 className="text-sm font-medium">模型组去重</h3>
@@ -240,50 +211,20 @@ export default function StatusPage() {
         </p>
       </section>
 
-      <section className="rounded-xl border bg-card p-5 space-y-5">
+      <section className="rounded-xl border bg-card p-5 space-y-4">
         <div>
-          <h3 className="text-sm font-medium mb-1">检查间隔</h3>
-          <p className="text-xs text-muted-foreground mb-3">自动探测所有已启用模型的频率（改完后点「保存设置」）</p>
-          <select
-            className="rounded-lg border bg-card px-3 py-2 text-sm w-full max-w-xs"
-            value={draftInterval ?? settings?.intervalMs ?? 3600000}
-            onChange={e => {
-              setDraftInterval(Number(e.target.value))
-              setSaveMsg('')
-            }}
-          >
-            <option value={600000}>每 10 分钟</option>
-            <option value={1800000}>每 30 分钟</option>
-            <option value={3600000}>每 1 小时</option>
-            <option value={7200000}>每 2 小时</option>
-            <option value={21600000}>每 6 小时</option>
-          </select>
+          <h3 className="text-sm font-medium mb-1">供应商自动健康检测</h3>
+          <p className="text-xs leading-5 text-muted-foreground">
+            自动检测现已按供应商分别配置。请前往「密钥」页面，在对应供应商分组中开启开关并设置分钟或小时周期。
+            所有供应商默认关闭；最近 60 秒存在真实客户请求时，后台检测会延后。
+          </p>
         </div>
-
-        <div>
-          <h3 className="text-sm font-medium mb-1">上次检查</h3>
-          <p className="text-xs text-muted-foreground">{settings?.lastRun || '从未运行'}</p>
-        </div>
-
         <div className="flex flex-wrap items-center gap-2">
-          <Button
-            size="sm"
-            onClick={() => draftInterval != null && saveInterval.mutate(draftInterval)}
-            disabled={saveInterval.isPending || draftInterval == null || !intervalDirty}
-          >
-            {saveInterval.isPending ? <RefreshCw className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
-            {saveInterval.isPending ? '保存中…' : '保存设置'}
-          </Button>
           <Button size="sm" variant="outline" onClick={() => runProbeAll.mutate()} disabled={runProbeAll.isPending}>
             {runProbeAll.isPending ? <RefreshCw className="size-3.5 animate-spin" /> : <Activity className="size-3.5" />}
-            {runProbeAll.isPending ? '探测中…' : '立即探测'}
+            {runProbeAll.isPending ? '探测中…' : '立即探测全部模型'}
           </Button>
-          {saveMsg && (
-            <span className={`text-xs ${saveMsg === '已保存' ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>{saveMsg}</span>
-          )}
-          {intervalDirty && !saveMsg && (
-            <span className="text-xs text-muted-foreground">有未保存的更改</span>
-          )}
+          <span className="text-xs text-muted-foreground">手动探测是显式操作，不受自动周期和忙碌窗口限制。</span>
         </div>
       </section>
 

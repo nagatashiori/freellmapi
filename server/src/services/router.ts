@@ -15,12 +15,15 @@ import type { Platform } from '@freellmapi/shared/types.js';
 import type { Db } from '../db/types.js';
 import {
   getActiveRoutingChain,
-  getDefaultProfileId,
-  getDefaultRoutingChain,
   getRoutingChain,
   getRoutingProfileIdByName,
 } from './routing-groups.js';
-import { getModelProbeHealth, rankModelGroupCandidates } from './model-health.js';
+import {
+  getModelProbeHealth,
+  orderLogicalModelGroupCandidates,
+  rankModelGroupCandidates,
+  type ModelProbeHealth,
+} from './model-health.js';
 
 class RouteError extends Error {
   status: number;
@@ -522,6 +525,22 @@ function orderChain(chain: ChainRow[], strategy: RoutingStrategy, sampled = true
 }
 
 /**
+ * Expand AUTO as ordered logical units. The incoming order decides where each
+ * logical group or standalone route sits; successful probe latency is allowed
+ * to reorder members only inside that unit.
+ */
+export function orderAutoChainByLogicalGroups(
+  orderedChain: readonly ChainRow[],
+  groups = getModelGroups(),
+  healthByModelId: ReadonlyMap<number, ModelProbeHealth>
+    = getModelProbeHealth(getDb(), orderedChain.map(row => row.model_db_id)),
+  now = Date.now(),
+): ChainRow[] {
+  if (!isUnifyEnabled()) return [...orderedChain];
+  return orderLogicalModelGroupCandidates(orderedChain, groups, healthByModelId, now);
+}
+
+/**
  * Route a request to the best available model.
  *
  * Ordering depends on the configured strategy (see orderChain). Everything
@@ -805,10 +824,9 @@ export function routePinnedModel(modelDbId: number, estimatedTokens = 1000, skip
 /**
  * Resolve a logical model group's member db ids to an ordered ChainRow[] for
  * strict group-pin routing (the "unify" feature). Each enabled member is
- * hydrated as a ChainRow carrying its Default routing-profile priority, then
- * ordered by the active strategy via orderChain — so 'priority' honors the
- * manual within-group order and scored strategies use live scores (priority as
- * the tiebreaker). Members disabled in the Default routing profile are dropped.
+ * hydrated from the active routing profile. Runtime probe health and successful
+ * latency may reorder equivalent members, while that profile's manual priority
+ * remains the stable tie-breaker. Members disabled in the active profile drop.
  *
  * Pass the result to routeRequest() as `prefetchedChain` and DO NOT pass a
  * `preferredModelDbId` that isn't already one of these rows — otherwise the
@@ -817,11 +835,8 @@ export function routePinnedModel(modelDbId: number, estimatedTokens = 1000, skip
  */
 export function resolveModelGroupCandidates(memberDbIds: number[]): ChainRow[] {
   const db = getDb();
-  const strategy = getRoutingStrategy();
-  if (strategy !== 'priority') refreshStatsCache(db);
-
-  const defaultChain = getDefaultRoutingChain(db) as ChainRow[];
-  const byId = new Map(defaultChain.map(row => [row.model_db_id, row]));
+  const activeChain = getActiveRoutingChain(db) as ChainRow[];
+  const byId = new Map(activeChain.map(row => [row.model_db_id, row]));
   const rows: ChainRow[] = [];
   for (const id of memberDbIds) {
     const row = byId.get(id);
@@ -831,8 +846,8 @@ export function resolveModelGroupCandidates(memberDbIds: number[]): ChainRow[] {
   // lead by measured latency, cooling members stay visible immediately after
   // them, and the manual profile priority remains untouched as a tie-breaker.
   // This is deliberately narrower than the global auto chain.
-  const baseOrder = orderChain(rows, strategy);
-  return rankModelGroupCandidates(baseOrder, getModelProbeHealth(db, baseOrder.map(row => row.model_db_id)));
+  const manualOrder = rows.sort((a, b) => a.priority - b.priority || a.model_db_id - b.model_db_id);
+  return rankModelGroupCandidates(manualOrder, getModelProbeHealth(db, manualOrder.map(row => row.model_db_id)));
 }
 
 // A panel candidate surfaced to the fusion layer: enough to pick a diverse set
@@ -965,7 +980,14 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
 
   const chain = prefetchedChain ?? getActiveChain(db).filter(e => e.enabled);
 
-  const sortedChain = orderChain(chain, strategy);
+  // Strict logical-group/global-sort requests arrive pre-ranked. For ordinary
+  // AUTO, the selected strategy still orders the outer chain; priority mode
+  // remains the manual profile order. Probe health/latency may reorder only
+  // equivalent provider members inside the same logical model group.
+  const orderedChain = prefetchedChain ? [...prefetchedChain] : orderChain(chain, strategy);
+  const sortedChain = prefetchedChain
+    ? orderedChain
+    : orderAutoChainByLogicalGroups(orderedChain);
 
   // Sticky session / Explicit pinning: move preferred model to front of chain
   if (preferredModelDbId) {

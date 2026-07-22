@@ -42,4 +42,19 @@ describe('model probe health ordering', () => {
 
     expect(state).toBe('stale');
   });
+
+  it('does not rank a route with no usable key as healthy', () => {
+    const state = getModelRoutingState({
+      lastStatus: 'ok',
+      lastProbedAt: new Date(now - 60_000).toISOString(),
+      avgLatencyMs: 10,
+      sampleCount: 1,
+      cooldownUntilMs: null,
+      usableKeyCount: 0,
+      coolingKeyCount: 0,
+    }, true, now);
+
+    expect(state).toBe('unhealthy');
+  });
+
 });

@@ -3,15 +3,14 @@ import { resolveProvider } from '../providers/index.js';
 import { decrypt } from '../lib/crypto.js';
 import type { Platform, KeyStatus } from '@freellmapi/shared/types.js';
 import { inferQuotaPoolKey } from './provider-quota.js';
-import type { Scheduler } from '../lib/scheduler.js';
 
-const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const CONSECUTIVE_FAILURES_TO_DISABLE = 3;
 
-// Track consecutive failures per key
+// Confirmed credential failures retain the existing three-check rule. Transport
+// failures never increment this counter and a successful validation clears it.
 const failureCount = new Map<number, number>();
 
-export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
+async function checkKeyHealthOnce(keyId: number): Promise<KeyStatus> {
   const db = getDb();
   const row = db.prepare('SELECT * FROM api_keys WHERE id = ?').get(keyId) as any;
   if (!row) return 'error';
@@ -30,7 +29,6 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
     });
 
     const status: KeyStatus = isValid ? 'healthy' : 'invalid';
-
     db.prepare("UPDATE api_keys SET status = ?, last_checked_at = datetime('now') WHERE id = ?")
       .run(status, keyId);
 
@@ -39,8 +37,9 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
     } else {
       const count = (failureCount.get(keyId) ?? 0) + 1;
       failureCount.set(keyId, count);
-
       if (count >= CONSECUTIVE_FAILURES_TO_DISABLE) {
+        // Health checks may disable confirmed-invalid credentials, but never
+        // silently re-enable an API key the operator switched off.
         db.prepare('UPDATE api_keys SET enabled = 0 WHERE id = ?').run(keyId);
         console.log(`[Health] Auto-disabled key ${keyId} after ${count} consecutive failures`);
       }
@@ -48,14 +47,6 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
 
     return status;
   } catch (err: any) {
-    // Transport errors (DNS/timeout/TLS) — provider unreachable, not necessarily
-    // a bad key. Mark status='error' but do NOT increment failure counter — auto-
-    // disable is reserved for confirmed 401/403 (returned by validateKey as false).
-    // Include platform + base_url so a flapping CloudFront edge or DNS failure is
-    // attributable to the responsible provider in one log read. The leading
-    // "[Health] Key N (" prefix is preserved so the 12-hourly crash watchdog
-    // (cron bff5ae167d28) that scrapes /tmp/freellmapi.log for these lines
-    // continues to match unchanged.
     console.error(
       `[Health] Key ${keyId} (${row.platform}, base=${row.base_url ?? 'default'}) ` +
       `transport error: ${err.message}`,
@@ -66,46 +57,73 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
   }
 }
 
-// Overlap guard: the scheduled 5-minute pass and wake-recovery re-probes can
-// coincide (or SIGCONT spam can queue several) — concurrent full passes
-// multiply provider validate traffic and let two passes each increment the
-// same genuinely-bad key's failureCount, reaching the auto-disable threshold
-// in fewer wall-clock checks than "3 consecutive checks" intends. A second
-// caller joins the in-flight pass instead of starting another.
+const keyChecksInFlight = new Map<number, Promise<KeyStatus>>();
+
+/** Join an in-flight validation for the same key instead of double-counting it. */
+export function checkKeyHealth(keyId: number): Promise<KeyStatus> {
+  const existing = keyChecksInFlight.get(keyId);
+  if (existing) return existing;
+
+  const run = checkKeyHealthOnce(keyId).finally(() => keyChecksInFlight.delete(keyId));
+  keyChecksInFlight.set(keyId, run);
+  return run;
+}
+
+export interface ProviderKeyHealthResult {
+  keyId: number;
+  status: KeyStatus;
+}
+
+const providerChecksInFlight = new Map<string, Promise<ProviderKeyHealthResult[]>>();
+
+/** Automatic provider pass: only enabled keys for the selected provider. */
+export function checkProviderKeys(
+  platform: string,
+  concurrency = 2,
+  checker: (keyId: number) => Promise<KeyStatus> = checkKeyHealth,
+): Promise<ProviderKeyHealthResult[]> {
+  const existing = providerChecksInFlight.get(platform);
+  if (existing) return existing;
+
+  const run = (async () => {
+    const db = getDb();
+    const rows = db.prepare(
+      'SELECT id FROM api_keys WHERE platform = ? AND enabled = 1 ORDER BY id',
+    ).all(platform) as Array<{ id: number }>;
+    const results = new Array<ProviderKeyHealthResult>(rows.length);
+    const workers = Math.min(Math.max(Math.floor(concurrency) || 1, 1), 5, rows.length || 1);
+    let cursor = 0;
+
+    async function worker(): Promise<void> {
+      while (true) {
+        const index = cursor++;
+        if (index >= rows.length) return;
+        const keyId = rows[index].id;
+        results[index] = { keyId, status: await checker(keyId) };
+      }
+    }
+
+    await Promise.all(Array.from({ length: workers }, () => worker()));
+    return results;
+  })().finally(() => providerChecksInFlight.delete(platform));
+
+  providerChecksInFlight.set(platform, run);
+  return run;
+}
+
+// Manual operator action. It intentionally ignores provider schedules.
 let checkAllInFlight: Promise<void> | null = null;
 
 export function checkAllKeys(): Promise<void> {
   if (checkAllInFlight) return checkAllInFlight;
   checkAllInFlight = (async () => {
     const db = getDb();
-    const keys = db.prepare('SELECT id, platform FROM api_keys WHERE enabled = 1').all() as { id: number; platform: string }[];
-
+    const keys = db.prepare('SELECT id FROM api_keys WHERE enabled = 1 ORDER BY id').all() as Array<{ id: number }>;
     console.log(`[Health] Checking ${keys.length} keys...`);
-
-    for (const key of keys) {
-      await checkKeyHealth(key.id);
-    }
-
-    console.log(`[Health] Check complete.`);
+    for (const key of keys) await checkKeyHealth(key.id);
+    console.log('[Health] Check complete.');
   })().finally(() => {
     checkAllInFlight = null;
   });
   return checkAllInFlight;
-}
-
-let cancelHealthCheck: (() => void) | null = null;
-
-export function startHealthChecker(scheduler: Scheduler): void {
-  if (cancelHealthCheck) return;
-  console.log(`[Health] Starting health checker (every ${CHECK_INTERVAL_MS / 1000}s)`);
-  cancelHealthCheck = scheduler.every(CHECK_INTERVAL_MS, () =>
-    checkAllKeys().catch(err => console.error('[Health] Check failed:', err)),
-  );
-}
-
-export function stopHealthChecker(): void {
-  if (cancelHealthCheck) {
-    cancelHealthCheck();
-    cancelHealthCheck = null;
-  }
 }

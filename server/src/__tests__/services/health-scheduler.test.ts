@@ -1,69 +1,52 @@
-import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
-import { initDb } from '../../db/index.js';
-import { startHealthChecker, stopHealthChecker } from '../../services/health.js';
-import type { Scheduler } from '../../lib/scheduler.js';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getDb, initDb } from '../../db/index.js';
+import { checkProviderKeys } from '../../services/health.js';
 
-function makeScheduler() {
-  const every: { ms: number; fn: () => void | Promise<void> }[] = [];
-  const cancels: ReturnType<typeof vi.fn>[] = [];
-  const scheduler: Scheduler = {
-    every(ms, fn) {
-      const cancel = vi.fn();
-      every.push({ ms, fn });
-      cancels.push(cancel);
-      return cancel;
-    },
-    after(_ms, _fn) {
-      return vi.fn();
-    },
-  };
-  return { scheduler, every, cancels };
+function addKey(platform: string, enabled: number): number {
+  const result = getDb().prepare(`
+    INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
+    VALUES (?, 'test', 'cipher', 'iv', 'tag', 'unknown', ?)
+  `).run(platform, enabled);
+  return Number(result.lastInsertRowid);
 }
 
-describe('startHealthChecker / stopHealthChecker', () => {
+describe('provider key health pass', () => {
   beforeAll(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     initDb(':memory:');
   });
 
-  afterEach(() => {
-    stopHealthChecker();
+  beforeEach(() => {
+    getDb().prepare("DELETE FROM api_keys WHERE platform LIKE 'health-test-%'").run();
   });
 
-  it('registers one every-5-minute job', () => {
-    const { scheduler, every } = makeScheduler();
-    startHealthChecker(scheduler);
-    expect(every).toHaveLength(1);
-    expect(every[0].ms).toBe(5 * 60 * 1000);
+  it('checks only enabled keys belonging to the selected provider', async () => {
+    const enabledA = addKey('health-test-a', 1);
+    addKey('health-test-a', 0);
+    addKey('health-test-b', 1);
+    const checker = vi.fn(async () => 'healthy' as const);
+
+    const result = await checkProviderKeys('health-test-a', 2, checker);
+
+    expect(checker).toHaveBeenCalledTimes(1);
+    expect(checker).toHaveBeenCalledWith(enabledA);
+    expect(result).toEqual([{ keyId: enabledA, status: 'healthy' }]);
   });
 
-  it('is idempotent — double-start registers only one job', () => {
-    const { scheduler, every } = makeScheduler();
-    startHealthChecker(scheduler);
-    startHealthChecker(scheduler);
-    expect(every).toHaveLength(1);
-  });
+  it('deduplicates overlapping automatic checks for one provider', async () => {
+    addKey('health-test-dedupe', 1);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const checker = vi.fn(async () => {
+      await gate;
+      return 'healthy' as const;
+    });
 
-  it('stop invokes the cancel handle', () => {
-    const { scheduler, cancels } = makeScheduler();
-    startHealthChecker(scheduler);
-    stopHealthChecker();
-    expect(cancels[0]).toHaveBeenCalledOnce();
-  });
-
-  it('can re-register after stop', () => {
-    const { scheduler: s1 } = makeScheduler();
-    startHealthChecker(s1);
-    stopHealthChecker();
-
-    const { scheduler: s2, every } = makeScheduler();
-    startHealthChecker(s2);
-    expect(every).toHaveLength(1);
-  });
-
-  it('the registered job runs checkAllKeys without throwing', async () => {
-    const { scheduler, every } = makeScheduler();
-    startHealthChecker(scheduler);
-    await expect(every[0].fn()).resolves.toBeUndefined();
+    const first = checkProviderKeys('health-test-dedupe', 1, checker);
+    const second = checkProviderKeys('health-test-dedupe', 1, checker);
+    expect(second).toBe(first);
+    release();
+    await expect(first).resolves.toHaveLength(1);
+    expect(checker).toHaveBeenCalledOnce();
   });
 });

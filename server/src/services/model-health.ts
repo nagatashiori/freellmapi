@@ -1,4 +1,5 @@
 import type { Db } from '../db/types.js';
+import type { ModelGroup } from './model-groups.js';
 
 export const PROBE_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 
@@ -48,6 +49,7 @@ export function getModelRoutingState(
 ): ModelRoutingState {
   if (!operatorEnabled) return 'disabled';
   if (!health) return 'unknown';
+  if (health.usableKeyCount <= 0) return 'unhealthy';
 
   if (
     health.usableKeyCount > 0
@@ -114,6 +116,45 @@ export function rankModelGroupCandidates<T extends ModelRoutingCandidate>(
       return a.index - b.index;
     })
     .map(item => item.row);
+}
+
+/**
+ * Expand an already ordered AUTO chain as logical model units. The outer unit
+ * order is preserved exactly; only equivalent provider members inside one
+ * logical group are reordered by runtime health and successful latency.
+ */
+export function orderLogicalModelGroupCandidates<T extends ModelRoutingCandidate>(
+  orderedRows: readonly T[],
+  groups: readonly ModelGroup[],
+  healthByModelId: ReadonlyMap<number, ModelProbeHealth>,
+  now = Date.now(),
+): T[] {
+  if (orderedRows.length < 2) return [...orderedRows];
+
+  const groupKeyByModelId = new Map<number, string>();
+  for (const group of groups) {
+    for (const member of group.members) groupKeyByModelId.set(member.model_db_id, group.groupKey);
+  }
+
+  const units = new Map<string, T[]>();
+  for (const row of orderedRows) {
+    const groupKey = groupKeyByModelId.get(row.model_db_id);
+    const unitKey = groupKey == null ? `model:${row.model_db_id}` : `group:${groupKey}`;
+    const rows = units.get(unitKey);
+    if (rows) rows.push(row);
+    else units.set(unitKey, [row]);
+  }
+
+  const result: T[] = [];
+  for (const rows of units.values()) {
+    if (rows.length === 1) {
+      result.push(rows[0]);
+      continue;
+    }
+    const manualOrder = [...rows].sort((a, b) => a.priority - b.priority || a.model_db_id - b.model_db_id);
+    result.push(...rankModelGroupCandidates(manualOrder, healthByModelId, now));
+  }
+  return result;
 }
 
 /**

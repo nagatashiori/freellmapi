@@ -1,111 +1,141 @@
-import { getDb, getSetting } from '../db/index.js';
+import { getDb } from '../db/index.js';
 import type { Scheduler } from '../lib/scheduler.js';
-import { getModelGroups } from './model-groups.js';
-import { getModelProbeHealth } from './model-health.js';
+import { checkProviderKeys } from './health.js';
 import { markProbeRun, runModelProbes } from './model-probe.js';
-import { getDefaultProfileId } from './routing-groups.js';
+import {
+  getDueProviderHealthSchedules,
+  hasRecentCustomerTraffic,
+  markProviderHealthScheduleFinished,
+  postponeProviderHealthSchedules,
+  type ProviderHealthSchedule,
+} from './provider-health-schedule.js';
 
-export const DEFAULT_MODEL_PROBE_INTERVAL_MS = 30 * 60 * 1000;
-export const MODEL_PROBE_SCHEDULER_TICK_MS = 60 * 1000;
-const ACTIVE_GROUP_WINDOW_HOURS = 24;
+export const PROVIDER_HEALTH_SCHEDULER_TICK_MS = 60 * 1000;
+// Kept as an export alias for callers/tests that referenced the old name.
+export const MODEL_PROBE_SCHEDULER_TICK_MS = PROVIDER_HEALTH_SCHEDULER_TICK_MS;
 
-function intervalMs(): number {
-  const configured = Number.parseInt(getSetting('health_check_interval_ms') ?? '', 10);
-  return Number.isFinite(configured) && configured >= 60_000
-    ? configured
-    : DEFAULT_MODEL_PROBE_INTERVAL_MS;
-}
-
-function toEpoch(value: string | null): number | null {
-  if (!value) return null;
-  const normalized = /(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value.replace(' ', 'T')}Z`;
-  const parsed = Date.parse(normalized);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-/**
- * Only probe groups that real traffic used recently. A group may contain many
- * provider rows, but traffic to any member activates its whole group so the
- * next request has a measured fallback chain. This prevents a global catalog
- * sweep from consuming quota every 30 minutes.
- */
-export function getScheduledProbeTargets(now = Date.now()): number[] {
+export function getProviderModelProbeTargets(platform: string): number[] {
   const db = getDb();
-  const defaultProfileId = getDefaultProfileId(db);
-  const enabledRows = db.prepare(`
-    SELECT m.id, m.platform, m.model_id
+  const rows = db.prepare(`
+    SELECT m.id
     FROM models m
-    JOIN profile_models pm
-      ON pm.model_db_id = m.id AND pm.profile_id = ?
-    WHERE m.enabled = 1 AND pm.enabled = 1
-  `).all(defaultProfileId) as Array<{ id: number; platform: string; model_id: string }>;
-  const enabledIds = new Set(enabledRows.map(row => row.id));
-  if (enabledIds.size === 0) return [];
+    WHERE m.platform = ?
+      AND EXISTS (
+        SELECT 1
+        FROM api_keys ak
+        WHERE ak.platform = m.platform
+          AND ak.enabled = 1
+          AND ak.status IN ('healthy', 'unknown')
+          AND (m.key_id IS NULL OR ak.id = m.key_id)
+      )
+    ORDER BY m.id
+  `).all(platform) as Array<{ id: number }>;
+  // Disabled models are intentionally included so a later successful probe can
+  // restore their AUTO participation in the active profile.
+  return rows.map(row => row.id);
+}
 
-  const recentlyUsed = db.prepare(`
-    SELECT DISTINCT m.id AS model_db_id
-    FROM models m
-    JOIN requests r
-      ON r.platform = m.platform
-     AND LOWER(r.model_id) = LOWER(m.model_id)
-    WHERE r.request_type != 'probe'
-      AND r.created_at > datetime('now', ?)
-  `).all(`-${ACTIVE_GROUP_WINDOW_HOURS} hours`) as Array<{ model_db_id: number }>;
-  const activeIds = new Set(recentlyUsed.map(row => row.model_db_id));
-  if (activeIds.size === 0) return [];
+export interface ProviderHealthSchedulerTickResult {
+  kind: 'idle' | 'busy' | 'checked';
+  platform?: string;
+  keyCount?: number;
+  modelCount?: number;
+}
 
-  // Preserve the actually used row even if a legacy catalog row has no group
-  // metadata; grouped siblings are added below when present.
-  const groupTargets = new Set<number>([...activeIds].filter(id => enabledIds.has(id)));
-  for (const group of getModelGroups()) {
-    const active = group.members.some(member => activeIds.has(member.model_db_id));
-    if (!active) continue;
-    for (const member of group.members) {
-      if (enabledIds.has(member.model_db_id)) groupTargets.add(member.model_db_id);
-    }
+interface TickDependencies {
+  now?: number;
+  random?: () => number;
+  dueSchedules?: ProviderHealthSchedule[];
+  isBusy?: (now: number) => boolean;
+  checkKeys?: typeof checkProviderKeys;
+  probeModels?: typeof runModelProbes;
+  modelTargets?: (platform: string) => number[];
+  finishedAt?: () => number;
+}
+
+/** One inexpensive scheduler iteration. At most one provider is selected. */
+export async function runProviderHealthSchedulerTick(
+  dependencies: TickDependencies = {},
+): Promise<ProviderHealthSchedulerTickResult> {
+  const now = dependencies.now ?? Date.now();
+  const random = dependencies.random ?? Math.random;
+  const due = dependencies.dueSchedules ?? getDueProviderHealthSchedules(now);
+  if (due.length === 0) return { kind: 'idle' };
+
+  const busy = dependencies.isBusy ?? hasRecentCustomerTraffic;
+  if (busy(now)) {
+    postponeProviderHealthSchedules(due.map(schedule => schedule.platform), now);
+    return { kind: 'busy' };
   }
 
-  const targetIds = [...groupTargets];
-  const health = getModelProbeHealth(db, targetIds, now);
-  const every = intervalMs();
-  return targetIds.filter(modelDbId => {
-    const last = toEpoch(health.get(modelDbId)?.lastProbedAt ?? null);
-    return last == null || now - last >= every;
-  });
+  const sample = random();
+  const normalized = Number.isFinite(sample) ? Math.min(0.999999999999, Math.max(0, sample)) : 0;
+  const selected = due[Math.floor(normalized * due.length)];
+  const checkKeys = dependencies.checkKeys ?? checkProviderKeys;
+  const probeModels = dependencies.probeModels ?? runModelProbes;
+  const modelTargets = dependencies.modelTargets ?? getProviderModelProbeTargets;
+  let keyCount = 0;
+  let modelCount = 0;
+
+  try {
+    const keyResults = await checkKeys(selected.platform, 2);
+    keyCount = keyResults.length;
+
+    // Only a key that validated successfully (or is still explicitly unknown)
+    // may back a model probe. Invalid/transport-error keys are excluded by the
+    // target query, so key failures cannot be miscounted as model failures.
+    if (keyCount > 0) {
+      const targets = modelTargets(selected.platform);
+      modelCount = targets.length;
+      if (targets.length > 0) await probeModels(targets, 2);
+    }
+    markProbeRun();
+    return { kind: 'checked', platform: selected.platform, keyCount, modelCount };
+  } finally {
+    const finishedAt = dependencies.finishedAt?.() ?? Date.now();
+    markProviderHealthScheduleFinished(selected.platform, finishedAt, random);
+  }
 }
 
-let cancelScheduledProbes: (() => void) | null = null;
+let cancelProviderHealthScheduler: (() => void) | null = null;
 let scheduledRunInFlight: Promise<void> | null = null;
 
-export function runScheduledModelProbes(): Promise<void> {
+export function runScheduledProviderHealthChecks(): Promise<void> {
   if (scheduledRunInFlight) return scheduledRunInFlight;
-  scheduledRunInFlight = (async () => {
-    const targets = getScheduledProbeTargets();
-    if (targets.length === 0) return;
-    console.log(`[ModelProbe] probing ${targets.length} due provider route(s) from active logical groups`);
-    const results = await runModelProbes(targets, 2);
-    markProbeRun();
-    const summary = results.reduce((acc, result) => {
-      acc[result.status] = (acc[result.status] ?? 0) + 1;
-      return acc;
-    }, {} as Record<string, number>);
-    console.log(`[ModelProbe] scheduled probe complete: ${JSON.stringify(summary)}`);
-  })().catch(err => {
-    console.error('[ModelProbe] scheduled probe failed:', err?.message ?? err);
-  }).finally(() => {
-    scheduledRunInFlight = null;
-  });
+  scheduledRunInFlight = runProviderHealthSchedulerTick()
+    .then(result => {
+      if (result.kind === 'checked') {
+        console.log(
+          `[ProviderHealth] ${result.platform}: checked ${result.keyCount ?? 0} key(s), ` +
+          `${result.modelCount ?? 0} model route(s)`,
+        );
+      }
+    })
+    .catch(err => {
+      console.error(`[ProviderHealth] scheduled provider check failed: ${err?.message ?? err}`);
+    })
+    .finally(() => {
+      scheduledRunInFlight = null;
+    });
   return scheduledRunInFlight;
 }
 
-export function startModelProbeScheduler(scheduler: Scheduler): void {
-  if (cancelScheduledProbes) return;
-  console.log(`[ModelProbe] starting active-group scheduler (tick ${MODEL_PROBE_SCHEDULER_TICK_MS / 1000}s, default interval ${DEFAULT_MODEL_PROBE_INTERVAL_MS / 60_000}m)`);
-  cancelScheduledProbes = scheduler.every(MODEL_PROBE_SCHEDULER_TICK_MS, () => runScheduledModelProbes());
+export function startProviderHealthScheduler(scheduler: Scheduler): void {
+  if (cancelProviderHealthScheduler) return;
+  console.log(`[ProviderHealth] starting provider scheduler (tick ${PROVIDER_HEALTH_SCHEDULER_TICK_MS / 1000}s)`);
+  cancelProviderHealthScheduler = scheduler.every(
+    PROVIDER_HEALTH_SCHEDULER_TICK_MS,
+    () => runScheduledProviderHealthChecks(),
+  );
 }
 
-export function stopModelProbeScheduler(): void {
-  if (!cancelScheduledProbes) return;
-  cancelScheduledProbes();
-  cancelScheduledProbes = null;
+export function stopProviderHealthScheduler(): void {
+  if (!cancelProviderHealthScheduler) return;
+  cancelProviderHealthScheduler();
+  cancelProviderHealthScheduler = null;
 }
+
+// Compatibility aliases while downstream imports migrate to the provider name.
+export const startModelProbeScheduler = startProviderHealthScheduler;
+export const stopModelProbeScheduler = stopProviderHealthScheduler;
+export const runScheduledModelProbes = runScheduledProviderHealthChecks;

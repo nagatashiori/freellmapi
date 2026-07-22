@@ -12,11 +12,11 @@ import { BANDIT_PRESETS, type RoutingStrategy } from '../services/scoring.js';
 import { parseBudget } from '../lib/budget.js';
 import { getModelGroups } from '../services/model-groups.js';
 import { getPenaltyInspector } from '../services/penalty-inspector.js';
-import { decrypt } from '../lib/crypto.js';
-import { resolveProvider, getProvider } from '../providers/index.js';
 import { getModelProbeHealth, getModelRoutingState, rankModelGroupCandidates } from '../services/model-health.js';
+import { markProbeRun, probeModelUpstream, runModelProbes } from '../services/model-probe.js';
 import {
   getActiveRoutingChain,
+  getActiveRoutingProfileId,
   getDefaultProfileId,
   getDefaultRoutingChain,
   replaceRoutingChain,
@@ -395,119 +395,21 @@ fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
   });
 });
 
-// ── Health probe helpers (direct upstream, bypass local routing) ───────────
-// Probes one provider model by hitting its upstream /chat/completions with a
-// 3-token "Say OK" request, a 15s wall-clock budget, and records the result
-// into the requests table (request_type='probe'). Auto-enables the channel on
-// success and disables on hard failure (error/timeout); rate-limited leaves
-// the enabled flag alone.
-async function probeModelUpstream(modelDbId: number) {
-  const db = getDb();
-  const defaultProfileId = getDefaultProfileId(db);
-  const model = db.prepare(`
-    SELECT m.id, m.platform, m.model_id, m.display_name, m.key_id, m.enabled AS model_enabled,
-           COALESCE(pm.enabled, 0) AS chain_enabled
-    FROM models m
-    LEFT JOIN profile_models pm
-      ON pm.model_db_id = m.id AND pm.profile_id = ?
-    WHERE m.id = ?
-  `).get(defaultProfileId, modelDbId) as {
-    id: number; platform: string; model_id: string; display_name: string;
-    key_id: number | null; model_enabled: number; chain_enabled: number;
-  } | undefined;
-  if (!model) return { ok: false, httpStatus: 404, error: 'Model not found', latency: 0, model: null };
-
-  // Pick a key for this platform (prefer model.key_id, else any enabled key)
-  let keyRow = null as {
-    id: number; platform: string; encrypted_key: string; iv: string;
-    auth_tag: string; base_url: string | null; enabled: number; status: string;
-  } | null;
-  if (model.key_id) {
-    keyRow = db.prepare("SELECT id, platform, encrypted_key, iv, auth_tag, base_url, enabled, status FROM api_keys WHERE id = ?").get(model.key_id) as typeof keyRow;
-  }
-  if (!keyRow) {
-    keyRow = db.prepare("SELECT id, platform, encrypted_key, iv, auth_tag, base_url, enabled, status FROM api_keys WHERE platform = ? AND enabled = 1 ORDER BY id DESC LIMIT 1").get(model.platform) as typeof keyRow;
-  }
-  if (!keyRow) {
-    return { ok: false, httpStatus: 0, error: 'No API key for platform ' + model.platform, latency: 0, model, status: 'error' };
-  }
-
-  let apiKey: string;
-  try {
-    apiKey = decrypt(keyRow.encrypted_key, keyRow.iv, keyRow.auth_tag);
-  } catch (e: any) {
-    return { ok: false, httpStatus: 0, error: 'Key decrypt failed: ' + e.message, latency: 0, model, status: 'error' };
-  }
-
-  const provider = resolveProvider(model.platform, keyRow.base_url) || getProvider(model.platform);
-  if (!provider) {
-    return { ok: false, httpStatus: 0, error: 'No provider for platform ' + model.platform, latency: 0, model, status: 'error' };
-  }
-
-  const PROBE_TIMEOUT_MS = 15000;
-  const start = Date.now();
-  let status = 'error';
-  let error = '';
-  let httpStatus = 0;
-  try {
-    const response = await provider.chatCompletion(
-      apiKey,
-      [{ role: 'user', content: 'Say OK' }],
-      model.model_id,
-      { max_tokens: 3, temperature: 0, timeoutMs: PROBE_TIMEOUT_MS },
-    );
-    if (response.choices?.[0]) {
-      status = 'ok';
-      httpStatus = 200;
-    } else {
-      error = 'No choices in response';
-    }
-  } catch (probeError: any) {
-    httpStatus = Number(probeError?.status) || 0;
-    error = String(probeError?.message || probeError || 'Probe failed');
-    if (httpStatus === 429) status = 'rate_limited';
-    else if (/abort|timeout/i.test(error)) status = 'timeout';
-  }
-
-  const latency = Math.min(Date.now() - start, PROBE_TIMEOUT_MS + 50);
-
-  // Persist request log
-  try {
-    db.prepare(`
-      INSERT INTO requests (platform, model_id, requested_model, status, latency_ms, error, created_at, request_type)
-      VALUES (?, ?, ?, ?, ?, ?, datetime('now'), 'probe')
-    `).run(model.platform, model.model_id, model.model_id, status === 'ok' ? 'success' : (status === 'rate_limited' ? 'error' : 'error'), latency, error || null);
-  } catch (e) { /* best effort */ }
-
-  // Probes report runtime health only. They must not rewrite the operator's
-  // routing switch: a one-off failure cannot silently disable a chosen route,
-  // and a successful probe cannot silently enable a deliberately disabled one.
-  const finalEnabled = model.chain_enabled === 1 && model.model_enabled === 1;
-
-  return {
-    ok: status === 'ok',
-    modelDbId,
-    platform: model.platform,
-    modelId: model.model_id,
-    displayName: model.display_name,
-    status,
-    latency,
-    error: (error || '').substring(0, 300),
-    enabled: finalEnabled,
-  };
-}
+// Manual and scheduled probes share services/model-probe.ts so every path
+// records the same durable status and applies the same transactional AUTO
+// transition. Keep route code here limited to selection and serialization.
 
 // ── Health: durable probe + cooling state for dashboard consumers ──────────
 fallbackRouter.get('/health', (_req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-store, max-age=0');
   const db = getDb();
-  const defaultProfileId = getDefaultProfileId(db);
+  const activeProfileId = getActiveRoutingProfileId(db);
   const rows = db.prepare(`
     SELECT pm.model_db_id, pm.enabled
     FROM profile_models pm
     JOIN models m ON m.id = pm.model_db_id
     WHERE pm.profile_id = ?
-  `).all(defaultProfileId) as { model_db_id: number; enabled: number }[];
+  `).all(activeProfileId) as { model_db_id: number; enabled: number }[];
   const healthByDbId = getModelProbeHealth(db, rows.map(row => row.model_db_id));
   const result = rows.map(r => ({
     modelDbId: r.model_db_id,
@@ -525,7 +427,7 @@ fallbackRouter.post('/probe/:id', async (req: Request, res: Response) => {
   if (isNaN(modelDbId)) { res.status(400).json({ error: 'Invalid id' }); return; }
   try {
     const result = await probeModelUpstream(modelDbId);
-    if (!result.model && result.httpStatus === 404) { res.status(404).json({ error: 'Model not found' }); return; }
+    if (result.httpStatus === 404) { res.status(404).json({ error: 'Model not found' }); return; }
     res.json(result);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -546,59 +448,43 @@ fallbackRouter.post('/probe-all', async (req: Request, res: Response) => {
   } else {
     const limit = Math.min(Math.max(parseInt(body.limit, 10) || 200, 1), 600);
     const onlyEnabled = !!body.onlyEnabled;
-    const defaultProfileId = getDefaultProfileId(db);
+    const activeProfileId = getActiveRoutingProfileId(db);
     models = db.prepare(`
       SELECT m.id, m.platform, m.model_id
       FROM models m
-      JOIN profile_models pm
+      LEFT JOIN profile_models pm
         ON pm.model_db_id = m.id AND pm.profile_id = ?
       WHERE EXISTS (
-        SELECT 1 FROM api_keys ak WHERE ak.platform = m.platform AND ak.enabled = 1
+        SELECT 1
+        FROM api_keys ak
+        WHERE ak.platform = m.platform
+          AND ak.enabled = 1
+          AND (m.key_id IS NULL OR ak.id = m.key_id)
       )
-      ${onlyEnabled ? 'AND pm.enabled = 1 AND m.enabled = 1' : ''}
-      ORDER BY pm.enabled DESC, m.intelligence_rank ASC
+      ${onlyEnabled ? 'AND COALESCE(pm.enabled, 0) = 1 AND m.enabled = 1' : ''}
+      ORDER BY COALESCE(pm.enabled, 0) DESC, COALESCE(pm.priority, 2147483647) ASC, m.id ASC
       LIMIT ?
-    `).all(defaultProfileId, limit) as { id: number; platform: string; model_id: string }[];
+    `).all(activeProfileId, limit) as { id: number; platform: string; model_id: string }[];
   }
 
-  // Concurrent but bounded. Serial 200x15s feels stuck forever on dashboard.
-  // Keep low concurrency so we do not stampede one provider while probing.
-  const results = new Array<any>(models.length);
-  const CONCURRENCY = Math.min(Math.max(parseInt(body.concurrency, 10) || 2, 1), 5);
-  let cursor = 0;
-  async function worker() {
-    while (true) {
-      const i = cursor++;
-      if (i >= models.length) return;
-      const m = models[i];
-      try {
-        const r = await probeModelUpstream(m.id) as any;
-        results[i] = {
-          modelDbId: r.modelDbId || m.id,
-          platform: r.platform || m.platform,
-          modelId: r.modelId || m.model_id,
-          status: r.status || 'error',
-          latency: r.latency || 0,
-          error: (r.error || '').substring(0, 150),
-          enabled: !!r.enabled,
-        };
-      } catch (err: any) {
-        results[i] = { modelDbId: m.id, platform: m.platform, modelId: m.model_id, status: 'error', latency: 0, error: err.message, enabled: false };
-      }
-      await new Promise(r => setTimeout(r, 80));
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, models.length || 1) }, () => worker()));
-  // stamp last run
-  try {
-    const now = new Date().toISOString();
-    const existing = db.prepare("SELECT value FROM settings WHERE key='health_check_last_run'").get() as { value: string } | undefined;
-    if (existing !== undefined && existing !== null) {
-      db.prepare("UPDATE settings SET value = ? WHERE key = 'health_check_last_run'").run(now);
-    } else {
-      db.prepare("INSERT INTO settings (key, value) VALUES ('health_check_last_run', ?)").run(now);
-    }
-  } catch (e) { /* best effort */ }
+  // Concurrent but bounded. The service owns status normalization and AUTO
+  // transitions, so manual "Probe all" cannot diverge from scheduled checks.
+  const concurrency = Math.min(Math.max(parseInt(body.concurrency, 10) || 2, 1), 5);
+  const rawResults = await runModelProbes(models.map(model => model.id), concurrency);
+  const byId = new Map(models.map(model => [model.id, model]));
+  const results = rawResults.map(result => {
+    const fallback = result.modelDbId == null ? undefined : byId.get(result.modelDbId);
+    return {
+      modelDbId: result.modelDbId ?? fallback?.id,
+      platform: result.platform ?? fallback?.platform,
+      modelId: result.modelId ?? fallback?.model_id,
+      status: result.status,
+      latency: result.latency,
+      error: result.error.substring(0, 150),
+      enabled: Boolean(result.enabled),
+    };
+  });
+  markProbeRun();
   res.json({ total: results.length, results });
 });
 

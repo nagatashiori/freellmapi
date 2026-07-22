@@ -111,3 +111,16 @@ export interface HealthData {
   keys: { id: number; platform: string; status: string; lastCheckedAt: string | null }[]
   quotaStates: ProviderQuotaState[]
 }
+
+export interface ProviderHealthSchedule {
+  platform: string
+  enabled: boolean
+  intervalMs: number | null
+  lastRunAt: string | null
+  nextRunAt: string | null
+}
+
+export interface ProviderHealthSchedulesResponse {
+  version: 1
+  schedules: ProviderHealthSchedule[]
+}

@@ -4,8 +4,44 @@ import { getDb } from '../db/index.js';
 import { checkKeyHealth, checkAllKeys } from '../services/health.js';
 import { hasProvider } from '../providers/index.js';
 import { getQuotaStateForKeys } from '../services/provider-quota.js';
+import {
+  listProviderHealthSchedules,
+  saveProviderHealthSchedule,
+  ProviderHealthScheduleValidationError,
+  PROVIDER_HEALTH_SCHEDULE_VERSION,
+} from '../services/provider-health-schedule.js';
 
 export const healthRouter = Router();
+
+// Provider-level automatic health detection. Responses are derived only from
+// platform names and schedule metadata; credentials and endpoint details are
+// never selected or serialized here.
+healthRouter.get('/provider-schedules', (_req: Request, res: Response) => {
+  res.json({ version: PROVIDER_HEALTH_SCHEDULE_VERSION, schedules: listProviderHealthSchedules() });
+});
+
+healthRouter.put('/provider-schedules/:platform', (req: Request, res: Response) => {
+  try {
+    const platform = String(req.params.platform || '').trim();
+    const body = req.body as { enabled?: unknown; intervalMs?: unknown } | undefined;
+    if (!platform) throw new ProviderHealthScheduleValidationError('platform is required');
+    if (!body || typeof body !== 'object' || typeof body.enabled !== 'boolean') {
+      throw new ProviderHealthScheduleValidationError('enabled must be a boolean');
+    }
+
+    const schedule = saveProviderHealthSchedule(platform, {
+      enabled: body.enabled,
+      intervalMs: body.intervalMs,
+    });
+    res.json({ schedule });
+  } catch (err: any) {
+    if (err instanceof ProviderHealthScheduleValidationError) {
+      res.status(400).json({ error: { message: err.message } });
+      return;
+    }
+    throw err;
+  }
+});
 
 // Get health status for all platforms
 healthRouter.get('/', (_req: Request, res: Response) => {
