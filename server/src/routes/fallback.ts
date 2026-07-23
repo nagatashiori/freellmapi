@@ -14,6 +14,7 @@ import { getModelGroups } from '../services/model-groups.js';
 import { getPenaltyInspector } from '../services/penalty-inspector.js';
 import { getModelProbeHealth, getModelRoutingState, rankModelGroupCandidates } from '../services/model-health.js';
 import { markProbeRun, probeModelUpstream, runModelProbes } from '../services/model-probe.js';
+import { checkProviderKeys } from '../services/health.js';
 import {
   getActiveRoutingChain,
   getActiveRoutingProfileId,
@@ -100,6 +101,12 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
     GROUP BY platform
   `).all() as { platform: string; count: number }[];
   const keyCountMap = new Map(keyCounts.map(k => [k.platform, k.count]));
+  const totalKeyCounts = db.prepare(`
+    SELECT platform, COUNT(*) as count
+    FROM api_keys
+    GROUP BY platform
+  `).all() as { platform: string; count: number }[];
+  const totalKeyCountMap = new Map(totalKeyCounts.map(k => [k.platform, k.count]));
 
   // Get current dynamic penalties
   const penalties = getAllPenalties();
@@ -213,6 +220,7 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
       keyLabel: r.key_label ?? null,
       hasOverrides: Boolean(r.has_overrides),
       keyCount: keyCountMap.get(r.platform) ?? 0,
+      totalKeyCount: totalKeyCountMap.get(r.platform) ?? 0,
       // 24h probe latency stats from the server (success probes only for the
       // average; `last` shows the most recent probe regardless of outcome).
       latencyStats: {
@@ -466,6 +474,13 @@ fallbackRouter.post('/probe-all', async (req: Request, res: Response) => {
       ORDER BY COALESCE(pm.enabled, 0) DESC, COALESCE(pm.priority, 2147483647) ASC, m.id ASC
       LIMIT ?
     `).all(activeProfileId, limit) as { id: number; platform: string; model_id: string }[];
+  }
+
+  // Manual "Probe all" should use the same control flow as scheduled provider
+  // checks: refresh the involved provider keys first, then run Say OK probes.
+  const platforms = [...new Set(models.map(model => model.platform))];
+  for (const platform of platforms) {
+    await checkProviderKeys(platform, 2);
   }
 
   // Concurrent but bounded. The service owns status normalization and AUTO

@@ -30,6 +30,10 @@ export interface FallbackEntry {
   keyId?: number | null
   keyLabel?: string | null
   hasOverrides?: boolean
+  // Configured keys for this provider, regardless of current health/enabled
+  // state. Management views use this to keep unhealthy providers visible.
+  totalKeyCount?: number
+  // Currently route-usable keys: enabled and healthy/unknown.
   keyCount: number
   // 24h probe latency aggregate from the server. avgMs and sampleCount are
   // success-only; `last*` describe the most recent probe regardless of status.
@@ -100,6 +104,10 @@ export interface TokenUsageData {
 export function providerLabel(row: { platform: string; source?: 'catalog' | 'custom'; keyLabel?: string | null }): string {
   if (row.source === 'custom' && row.keyLabel && row.keyLabel.trim()) return row.keyLabel
   return row.platform
+}
+
+export function hasConfiguredProviderKeys(row: { keyCount: number; totalKeyCount?: number }): boolean {
+  return (row.totalKeyCount ?? row.keyCount) > 0
 }
 
 export function formatTokens(n: number): string {

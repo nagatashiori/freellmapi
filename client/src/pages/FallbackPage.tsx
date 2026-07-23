@@ -23,6 +23,7 @@ import { useProbe } from '@/lib/use-probe'
 import {
   buildGroups,
   groupMaxContext,
+  hasConfiguredProviderKeys,
   type FallbackEntry,
   type ModelGroupRow,
   type RoutingData,
@@ -224,8 +225,8 @@ export default function FallbackPage() {
   const effectiveEntries: FallbackEntry[] = isDefaultTab ? (localEntries ?? entries) : (profileEntries as any)
   // Profile API returns snake_case and no keyCount; normalize so buildGroups works.
   if (isDefaultTab) {
-    configured = effectiveEntries.filter((e: any) => e.keyCount > 0)
-    unconfiguredPlatforms = [...new Set(effectiveEntries.filter((e: any) => e.keyCount === 0).map((e: any) => e.platform))]
+    configured = effectiveEntries.filter((e: any) => hasConfiguredProviderKeys(e))
+    unconfiguredPlatforms = [...new Set(effectiveEntries.filter((e: any) => !hasConfiguredProviderKeys(e)).map((e: any) => e.platform))]
     rows = configured.map(e => ({ ...(scoreById.get(e.modelDbId) ?? {}), ...e }))
   } else {
     // For routing groups, skip keyCount filter (profile only contains its members)
@@ -247,6 +248,7 @@ export default function FallbackPage() {
       contextWindow: e.context_window ?? e.contextWindow ?? null,
       monthlyTokenBudget: e.monthly_token_budget ?? e.monthlyTokenBudget ?? '',
       keyCount: 1, // profile members always have a key (added via key platform)
+      totalKeyCount: e.total_key_count ?? e.totalKeyCount ?? 1,
       supportsVision: e.supports_vision ?? e.supportsVision ?? false,
       supportsTools: e.supports_tools ?? e.supportsTools ?? false,
     }))

@@ -31,6 +31,7 @@ import {
 } from '@dnd-kit/sortable'
 import {
   groupQuotaBadge,
+  hasConfiguredProviderKeys,
   providerLabel,
   type FallbackEntry,
   type RoutingData,
@@ -143,7 +144,7 @@ export default function ModelDetailPage() {
   // server-side in the same query that builds /api/fallback. Sample-weighted:
   // providers with more successful probes count more.
   const groupMembers = entries
-    .filter(e => e.keyCount > 0 && (e.canonicalId ?? e.modelId) === canonicalId)
+    .filter(e => hasConfiguredProviderKeys(e) && (e.canonicalId ?? e.modelId) === canonicalId)
   const groupAvgInfo = (() => {
     let sum = 0
     let total = 0
@@ -200,10 +201,11 @@ export default function ModelDetailPage() {
   const isManual = (routing?.strategy ?? 'balanced') === 'priority'
   const scoreById = new Map((routing?.scores ?? []).map(s => [s.modelDbId, s]))
 
-  // Providers serving this model: configured rows whose group matches the id
+  // Providers serving this model: rows whose provider has been configured,
+  // even when all keys are currently unhealthy and keyCount is 0.
   // (canonicalId, or the bare model id for an ungrouped model).
   const members: Row[] = entries
-    .filter(e => e.keyCount > 0 && (e.canonicalId ?? e.modelId) === canonicalId)
+    .filter(e => hasConfiguredProviderKeys(e) && (e.canonicalId ?? e.modelId) === canonicalId)
     .map(e => ({ ...(scoreById.get(e.modelDbId) ?? {}), ...e }))
     .sort((a, b) => (isManual ? a.priority - b.priority : (b.score ?? 0) - (a.score ?? 0)))
 
@@ -251,8 +253,8 @@ export default function ModelDetailPage() {
 
   const applyProbe = useCallback((res: ProbeResult) => {
     setProbeResults(prev => new Map(prev).set(res.modelDbId, res))
-    // Probe outcomes refresh runtime health only. The on/off switch is an
-    // explicit operator decision and must never flip as a probe side effect.
+    // Probe outcomes refresh runtime health and may restore AUTO participation
+    // after a successful upstream Say OK probe.
     setTimeout(() => {
       queryClient.invalidateQueries({ queryKey: ['health'] })
       queryClient.invalidateQueries({ queryKey: ['fallback'] })

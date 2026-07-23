@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
+import { createServer } from 'node:http';
 import { createApp } from '../../app.js';
 import { getDb, initDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { recordRateLimitHit } from '../../services/router.js';
 import { setCooldown } from '../../services/ratelimit.js';
+import { getDefaultProfileId } from '../../services/routing-groups.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 
 let dashToken = '';
@@ -96,6 +98,118 @@ describe('Fallback API', () => {
       db.prepare('UPDATE models SET enabled = ? WHERE id = ?').run(target.model_enabled, target.id);
       db.prepare('UPDATE profile_models SET enabled = ? WHERE profile_id = ? AND model_db_id = ?')
         .run(target.profile_enabled, target.profile_id, target.id);
+    }
+  });
+
+  it('GET /api/fallback distinguishes configured keys from currently usable keys', async () => {
+    const db = getDb();
+    const platform = 'fallback-unhealthy-visible';
+    const secret = encrypt('visible-key');
+    const keyId = Number(db.prepare(`
+      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
+      VALUES (?, 'visible', ?, ?, ?, 'error', 1)
+    `).run(platform, secret.encrypted, secret.iv, secret.authTag).lastInsertRowid);
+    const modelDbId = Number(db.prepare(`
+      INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, enabled)
+      VALUES (?, 'fallback-visible-model', 'Fallback Visible Model', 99, 99, 'Small', 1)
+    `).run(platform).lastInsertRowid);
+    const profileId = getDefaultProfileId(db);
+    db.prepare(`
+      INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
+      VALUES (?, ?, 9998, 1)
+    `).run(profileId, modelDbId);
+
+    try {
+      const { status, body } = await request(app, 'GET', '/api/fallback');
+      expect(status).toBe(200);
+      expect(body.find((row: any) => row.modelDbId === modelDbId)).toMatchObject({
+        modelDbId,
+        platform,
+        keyCount: 0,
+        totalKeyCount: 1,
+      });
+    } finally {
+      db.prepare('DELETE FROM profile_models WHERE model_db_id = ?').run(modelDbId);
+      db.prepare('DELETE FROM models WHERE id = ?').run(modelDbId);
+      db.prepare('DELETE FROM api_keys WHERE id = ?').run(keyId);
+    }
+  });
+
+  it('POST /api/fallback/probe-all rechecks provider keys before probing models', async () => {
+    const db = getDb();
+    const platform = 'manual-probe-key-refresh';
+    const modelId = 'probe-restored-model';
+    let modelListHits = 0;
+    let chatHits = 0;
+    const fakeProvider = createServer((req, res) => {
+      if (req.url === '/v1/models' && req.method === 'GET') {
+        modelListHits++;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ data: [{ id: modelId }] }));
+        return;
+      }
+      if (req.url === '/v1/chat/completions' && req.method === 'POST') {
+        chatHits++;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          id: 'chatcmpl-probe',
+          object: 'chat.completion',
+          created: 0,
+          model: modelId,
+          choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+        }));
+        return;
+      }
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'not found' } }));
+    });
+    await new Promise<void>(resolve => fakeProvider.listen(0, '127.0.0.1', resolve));
+    const address = fakeProvider.address() as { port: number };
+    const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+    const secret = encrypt('probe-refresh-key');
+    const profileId = getDefaultProfileId(db);
+    const keyId = Number(db.prepare(`
+      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
+      VALUES (?, 'refresh', ?, ?, ?, 'error', 1, ?)
+    `).run(platform, secret.encrypted, secret.iv, secret.authTag, baseUrl).lastInsertRowid);
+    const modelDbId = Number(db.prepare(`
+      INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, enabled)
+      VALUES (?, ?, 'Probe Restored Model', 99, 99, 'Small', 0)
+    `).run(platform, modelId).lastInsertRowid);
+    db.prepare(`
+      INSERT INTO profile_models (profile_id, model_db_id, priority, enabled)
+      VALUES (?, ?, 9999, 0)
+    `).run(profileId, modelDbId);
+
+    try {
+      const { status, body } = await request(app, 'POST', '/api/fallback/probe-all', {
+        ids: [modelDbId],
+        concurrency: 1,
+      });
+
+      expect(status).toBe(200);
+      expect(body.results).toHaveLength(1);
+      expect(body.results[0]).toMatchObject({
+        modelDbId,
+        platform,
+        modelId,
+        status: 'ok',
+        enabled: true,
+      });
+      expect(modelListHits).toBe(1);
+      expect(chatHits).toBe(1);
+      const key = db.prepare('SELECT status, enabled FROM api_keys WHERE id = ?').get(keyId) as { status: string; enabled: number };
+      const model = db.prepare('SELECT enabled FROM models WHERE id = ?').get(modelDbId) as { enabled: number };
+      const profile = db.prepare('SELECT enabled FROM profile_models WHERE profile_id = ? AND model_db_id = ?')
+        .get(profileId, modelDbId) as { enabled: number };
+      expect(key).toEqual({ status: 'healthy', enabled: 1 });
+      expect(model.enabled).toBe(1);
+      expect(profile.enabled).toBe(1);
+    } finally {
+      db.prepare('DELETE FROM profile_models WHERE model_db_id = ?').run(modelDbId);
+      db.prepare('DELETE FROM models WHERE id = ?').run(modelDbId);
+      db.prepare('DELETE FROM api_keys WHERE id = ?').run(keyId);
+      await new Promise<void>(resolve => fakeProvider.close(() => resolve()));
     }
   });
 
