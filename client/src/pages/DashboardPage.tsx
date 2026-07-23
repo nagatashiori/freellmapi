@@ -5,6 +5,12 @@ import { apiFetch } from '@/lib/api'
 import { useProbe } from '@/lib/use-probe'
 import { EmptyState } from '@/components/empty-state'
 import { Button } from '@/components/ui/button'
+import {
+  dashboardHealthTone,
+  isDashboardHealthy,
+  isDashboardIssue,
+  isDashboardLimited,
+} from '@/lib/dashboard-health'
 
 
 interface ProbeHistoryItem {
@@ -163,7 +169,7 @@ export default function DashboardPage() {
   const healthy = entries.filter(e => {
     const pr = probeResults.get(e.modelDbId)
     const s = pr?.status || e.healthStatus
-    return s === 'ok' || s === 'success'
+    return isDashboardHealthy(s)
   }).length
 
   function toggleGroup(platform: string) {
@@ -183,10 +189,7 @@ export default function DashboardPage() {
     return (
       <div className="flex items-center gap-[1px] shrink-0">
         {bars.map((h, i) => {
-          const ok = h.status === 'success' || h.status === 'ok'
-          const err = h.status === 'error' || h.status === 'timeout'
-          const limited = h.status === 'rate_limited'
-          const color = ok ? '#4ade80' : err ? '#f87171' : limited ? '#fbbf24' : '#374151'
+          const color = dashboardHealthTone(h.status).color
           return (
             <div
               key={i}
@@ -204,11 +207,8 @@ export default function DashboardPage() {
     const pr = probeResults.get(entry.modelDbId)
     const isExpanded = expandedModel === entry.modelDbId
     const status = pr?.status || entry.healthStatus
-    const ok = status === 'ok' || status === 'success'
-    const err = status === 'error' || status === 'timeout'
-    const limited = status === 'rate_limited'
     const probing = pr?.status === 'probing'
-    const color = ok ? '#4ade80' : err ? '#f87171' : limited ? '#fbbf24' : '#6b7280'
+    const color = dashboardHealthTone(status).color
     const isEnabled = pr && pr.enabled !== undefined ? pr.enabled : entry.enabled
     // 24h average latency (server-computed from probe history). The mini
     // timeline still uses the local probe-history cache; the number beside
@@ -335,12 +335,17 @@ export default function DashboardPage() {
             const okCount = g.models.filter(m => {
               const pr = probeResults.get(m.modelDbId)
               const s = pr?.status || m.healthStatus
-              return s === 'ok' || s === 'success'
+              return isDashboardHealthy(s)
             }).length
             const errCount = g.models.filter(m => {
               const pr = probeResults.get(m.modelDbId)
               const s = pr?.status || m.healthStatus
-              return s === 'error' || s === 'timeout'
+              return isDashboardIssue(s)
+            }).length
+            const limitedCount = g.models.filter(m => {
+              const pr = probeResults.get(m.modelDbId)
+              const s = pr?.status || m.healthStatus
+              return isDashboardLimited(s)
             }).length
 
             return (
@@ -357,6 +362,7 @@ export default function DashboardPage() {
                     <span className="text-sm font-medium truncate">{g.platform}</span>
                     <span className="text-[11px] text-muted-foreground shrink-0">
                       {g.models.length} · 开 {onCount} · 健康 {okCount}
+                      {limitedCount > 0 ? ` · 限流 ${limitedCount}` : ''}
                       {errCount > 0 ? ` · 错 ${errCount}` : ''}
                     </span>
                   </button>
