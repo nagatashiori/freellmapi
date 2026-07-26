@@ -40,6 +40,7 @@ describe('provider health schedules', () => {
       intervalMs: null,
       lastRunAt: null,
       nextRunAt: null,
+      deferredSince: null,
     });
   });
 

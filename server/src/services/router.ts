@@ -561,6 +561,63 @@ const HEALTH_DEMOTION_BAND: Partial<Record<ModelRoutingState, number>> = {
   unhealthy: 2,
 };
 
+// ── Real-traffic failure signal ──────────────────────────────────────────────
+// A probe saying "ok" is not proof that real requests succeed: mapleleaf models
+// probed ok while live traffic took Cloudflare 522s. And the in-memory penalty
+// (recordRateLimitHit) is process state — capped at 10, decaying 1 per 2 minutes,
+// wiped by every restart — so a dead model leads the chain again after a restart
+// or ~20 idle minutes. The `requests` table already persists every real attempt,
+// so reading the signal from there both contradicts an over-optimistic probe and
+// survives restarts.
+//
+// Conservative on purpose: a model needs MIN_ATTEMPTS recent real attempts before
+// its success rate may demote it, so one unlucky failure cannot exile a good
+// model. A demoted model stops receiving traffic, its window empties, and it
+// returns to its manual slot — a self-clearing probation rather than exile.
+export const REAL_FAILURE_WINDOW_MS = 60 * 60 * 1000;
+export const REAL_FAILURE_MIN_ATTEMPTS = 4;
+export const REAL_FAILURE_MAX_SUCCESS_RATE = 0.25;
+
+/**
+ * Model db ids whose recent REAL (non-probe) traffic is failing badly enough to
+ * warrant demotion. Probe rows are excluded — they are a separate signal handled
+ * by getModelRoutingState.
+ */
+export function getRecentlyFailingModels(
+  db: Db,
+  modelDbIds: readonly number[],
+  windowMs = REAL_FAILURE_WINDOW_MS,
+): Set<number> {
+  const ids = [...new Set(modelDbIds.filter(Number.isInteger))];
+  if (ids.length === 0) return new Set();
+  const placeholders = ids.map(() => '?').join(',');
+  const minutes = Math.max(1, Math.round(windowMs / 60_000));
+  const rows = db.prepare(`
+    SELECT m.id AS model_db_id,
+      (SELECT COUNT(*) FROM requests r
+        WHERE r.request_type IS NOT 'probe'
+          AND r.platform = m.platform AND LOWER(r.model_id) = LOWER(m.model_id)
+          AND r.created_at > datetime('now', '-${minutes} minutes')) AS attempts,
+      (SELECT COUNT(*) FROM requests r
+        WHERE r.request_type IS NOT 'probe'
+          AND r.status IN ('ok', 'success')
+          AND r.platform = m.platform AND LOWER(r.model_id) = LOWER(m.model_id)
+          AND r.created_at > datetime('now', '-${minutes} minutes')) AS successes
+    FROM models m
+    WHERE m.id IN (${placeholders})
+  `).all(...ids) as Array<{ model_db_id: number; attempts: number; successes: number }>;
+
+  const failing = new Set<number>();
+  for (const row of rows) {
+    const attempts = Number(row.attempts) || 0;
+    if (attempts < REAL_FAILURE_MIN_ATTEMPTS) continue;
+    if ((Number(row.successes) || 0) / attempts <= REAL_FAILURE_MAX_SUCCESS_RATE) {
+      failing.add(row.model_db_id);
+    }
+  }
+  return failing;
+}
+
 /**
  * Sink routes the probes have proven broken to the back of an already-ordered
  * chain. Until now probe health reached routing only INSIDE a unify group, so a
@@ -579,6 +636,7 @@ const HEALTH_DEMOTION_BAND: Partial<Record<ModelRoutingState, number>> = {
 export function demoteUnhealthyRoutes<T extends { model_db_id: number }>(
   ordered: readonly T[],
   healthByModelId: ReadonlyMap<number, ModelProbeHealth>,
+  recentlyFailing: ReadonlySet<number> = new Set(),
   now = Date.now(),
 ): T[] {
   if (ordered.length < 2) return [...ordered];
@@ -588,7 +646,12 @@ export function demoteUnhealthyRoutes<T extends { model_db_id: number }>(
       // Every row reaching here is enabled in the active profile, so the
       // operator switch is `true`; only runtime state can demote.
       const state = health ? getModelRoutingState(health, true, now) : 'unknown';
-      return { e, index, band: HEALTH_DEMOTION_BAND[state] ?? 0 };
+      const probeBand = HEALTH_DEMOTION_BAND[state] ?? 0;
+      // Failing real traffic is as strong a signal as a failed probe — stronger,
+      // in fact, since it is the thing users actually experience. Take the worse
+      // of the two so an over-optimistic probe cannot rescue a dead route.
+      const trafficBand = recentlyFailing.has(e.model_db_id) ? 2 : 0;
+      return { e, index, band: Math.max(probeBand, trafficBand) };
     })
     .sort((a, b) => a.band - b.band || a.index - b.index)
     .map(x => x.e);
@@ -1062,6 +1125,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     : demoteUnhealthyRoutes(
       orderAutoChainByLogicalGroups(orderedChain),
       getModelProbeHealth(db, orderedChain.map(row => row.model_db_id)),
+      getRecentlyFailingModels(db, orderedChain.map(row => row.model_db_id)),
     );
 
   // Sticky session / Explicit pinning: move preferred model to front of chain

@@ -1,4 +1,4 @@
-import { getDb } from '../db/index.js';
+import { getDb, getSetting } from '../db/index.js';
 import { decrypt } from '../lib/crypto.js';
 import { getProvider, resolveProvider } from '../providers/index.js';
 import { getDefaultProfileId, setRoutingModelEnabled } from './routing-groups.js';
@@ -6,6 +6,30 @@ import { setCooldown } from './ratelimit.js';
 
 export const PROBE_TIMEOUT_MS = 15_000;
 export const PROBE_RATE_LIMIT_COOLDOWN_MS = 90_000;
+
+// How many consecutive failed probes switch a model off. The hardcoded 3 meant
+// ~18h at a 6h probe interval before a model known to be down actually left the
+// chain; runtime demotion (demoteUnhealthyRoutes) already stops routing to it
+// immediately, but the switch is what the dashboard shows, so the threshold is
+// tunable. Settings value wins, then env, then this default.
+export const DEFAULT_PROBE_DISABLE_AFTER_FAILURES = 3;
+export const PROBE_DISABLE_AFTER_FAILURES_SETTING = 'probe_disable_after_failures';
+
+export function getProbeDisableAfterFailures(): number {
+  let stored: string | undefined;
+  try {
+    stored = getSetting(PROBE_DISABLE_AFTER_FAILURES_SETTING);
+  } catch {
+    stored = undefined;
+  }
+  for (const raw of [stored, process.env.PROBE_DISABLE_AFTER_FAILURES]) {
+    if (raw === undefined || raw.trim() === '') continue;
+    const n = Number(raw);
+    // At least 1: a value of 0 would switch a model off before any probe ran.
+    if (Number.isInteger(n) && n >= 1) return n;
+  }
+  return DEFAULT_PROBE_DISABLE_AFTER_FAILURES;
+}
 
 export interface ProbeResult {
   ok: boolean;
@@ -83,6 +107,7 @@ function persistProbeOutcome(model: ProbeModelRow, outcome: ProbeOutcome): boole
         // membership is appended rather than rewriting any existing priority.
         setRoutingModelEnabled(db, activeProfileId, model.id, 1);
       } else if (outcome.status === 'error' || outcome.status === 'timeout') {
+        const threshold = getProbeDisableAfterFailures();
         const recent = db.prepare(`
           SELECT status
           FROM requests
@@ -90,10 +115,10 @@ function persistProbeOutcome(model: ProbeModelRow, outcome: ProbeOutcome): boole
             AND platform = ?
             AND LOWER(model_id) = LOWER(?)
           ORDER BY created_at DESC, id DESC
-          LIMIT 3
-        `).all(model.platform, model.model_id) as Array<{ status: string }>;
+          LIMIT ?
+        `).all(model.platform, model.model_id, threshold) as Array<{ status: string }>;
 
-        if (recent.length === 3 && recent.every(row => row.status === 'error' || row.status === 'timeout')) {
+        if (recent.length === threshold && recent.every(row => row.status === 'error' || row.status === 'timeout')) {
           db.prepare('UPDATE models SET enabled = 0 WHERE id = ?').run(model.id);
           db.prepare(`
             UPDATE profile_models

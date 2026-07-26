@@ -47,7 +47,7 @@ describe('demoteUnhealthyRoutes', () => {
       [3, health({ lastStatus: 'timeout' })],
       [4, health({})],
     ]);
-    expect(demoteUnhealthyRoutes(chain(1, 2, 3, 4), map, NOW).map(e => e.model_db_id))
+    expect(demoteUnhealthyRoutes(chain(1, 2, 3, 4), map, new Set(), NOW).map(e => e.model_db_id))
       .toEqual([2, 4, 1, 3]);
   });
 
@@ -56,7 +56,7 @@ describe('demoteUnhealthyRoutes', () => {
       [1, health({ usableKeyCount: 0 })],
       [2, health({})],
     ]);
-    expect(demoteUnhealthyRoutes(chain(1, 2), map, NOW).map(e => e.model_db_id))
+    expect(demoteUnhealthyRoutes(chain(1, 2), map, new Set(), NOW).map(e => e.model_db_id))
       .toEqual([2, 1]);
   });
 
@@ -68,11 +68,11 @@ describe('demoteUnhealthyRoutes', () => {
       [2, health({ lastStatus: 'error' })], // unhealthy
       [3, health({})],                      // ready
     ]);
-    expect(demoteUnhealthyRoutes(chain(1, 2, 3), map, NOW).map(e => e.model_db_id))
+    expect(demoteUnhealthyRoutes(chain(1, 2, 3), map, new Set(), NOW).map(e => e.model_db_id))
       .toEqual([1, 3, 2]);
 
     const noHealth = new Map<number, ModelProbeHealth>();
-    expect(demoteUnhealthyRoutes(chain(7, 8, 9), noHealth, NOW).map(e => e.model_db_id))
+    expect(demoteUnhealthyRoutes(chain(7, 8, 9), noHealth, new Set(), NOW).map(e => e.model_db_id))
       .toEqual([7, 8, 9]);
   });
 
@@ -82,7 +82,7 @@ describe('demoteUnhealthyRoutes', () => {
       [2, health({ coolingKeyCount: 1, cooldownUntilMs: NOW + 60_000 })],
       [3, health({})],
     ]);
-    expect(demoteUnhealthyRoutes(chain(1, 2, 3), map, NOW).map(e => e.model_db_id))
+    expect(demoteUnhealthyRoutes(chain(1, 2, 3), map, new Set(), NOW).map(e => e.model_db_id))
       .toEqual([3, 2, 1]);
   });
 
@@ -90,7 +90,7 @@ describe('demoteUnhealthyRoutes', () => {
     const map = new Map<number, ModelProbeHealth>([
       [5, health({})], [6, health({})], [7, health({})],
     ]);
-    expect(demoteUnhealthyRoutes(chain(5, 6, 7), map, NOW).map(e => e.model_db_id))
+    expect(demoteUnhealthyRoutes(chain(5, 6, 7), map, new Set(), NOW).map(e => e.model_db_id))
       .toEqual([5, 6, 7]);
   });
 
@@ -101,7 +101,7 @@ describe('demoteUnhealthyRoutes', () => {
       [9, health({ avgLatencyMs: 9000 })],
       [8, health({ avgLatencyMs: 50 })],
     ]);
-    expect(demoteUnhealthyRoutes(chain(9, 8), map, NOW).map(e => e.model_db_id))
+    expect(demoteUnhealthyRoutes(chain(9, 8), map, new Set(), NOW).map(e => e.model_db_id))
       .toEqual([9, 8]);
   });
 });

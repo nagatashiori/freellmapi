@@ -47,6 +47,7 @@ describe('provider health schedule routes', () => {
     expect(response.status).toBe(200);
     expect(body.schedules).toContainEqual({
       platform: 'route-schedule-safe', enabled: false, intervalMs: null, lastRunAt: null, nextRunAt: null,
+      deferredSince: null,
     });
     expect(text).not.toContain('private-ciphertext');
     expect(text).not.toContain('private-endpoint');

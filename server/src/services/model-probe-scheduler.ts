@@ -5,6 +5,7 @@ import { markProbeRun, runModelProbes } from './model-probe.js';
 import {
   getDueProviderHealthSchedules,
   hasRecentCustomerTraffic,
+  isProviderHealthScheduleOverdue,
   markProviderHealthScheduleFinished,
   postponeProviderHealthSchedules,
   type ProviderHealthSchedule,
@@ -62,15 +63,31 @@ export async function runProviderHealthSchedulerTick(
   const due = dependencies.dueSchedules ?? getDueProviderHealthSchedules(now);
   if (due.length === 0) return { kind: 'idle' };
 
+  // Yield to customer traffic — but only for schedules that are not yet starved.
+  // The postpone is 60s and the busy window looks back 60s, so on a gateway that
+  // serves more than one request a minute this branch would defer every provider
+  // forever and the whole chain would go stale again. Anything past its grace
+  // period runs regardless (isProviderHealthScheduleOverdue).
   const busy = dependencies.isBusy ?? hasRecentCustomerTraffic;
+  let candidates = due;
   if (busy(now)) {
-    postponeProviderHealthSchedules(due.map(schedule => schedule.platform), now);
-    return { kind: 'busy' };
+    const overdue = due.filter(schedule => isProviderHealthScheduleOverdue(schedule, now));
+    if (overdue.length === 0) {
+      postponeProviderHealthSchedules(due.map(schedule => schedule.platform), now);
+      return { kind: 'busy' };
+    }
+    // Only the starved subset is eligible; the rest keep waiting for a quiet tick.
+    postponeProviderHealthSchedules(
+      due.filter(schedule => !isProviderHealthScheduleOverdue(schedule, now))
+        .map(schedule => schedule.platform),
+      now,
+    );
+    candidates = overdue;
   }
 
   const sample = random();
   const normalized = Number.isFinite(sample) ? Math.min(0.999999999999, Math.max(0, sample)) : 0;
-  const selected = due[Math.floor(normalized * due.length)];
+  const selected = candidates[Math.floor(normalized * candidates.length)];
   const checkKeys = dependencies.checkKeys ?? checkProviderKeys;
   const probeModels = dependencies.probeModels ?? runModelProbes;
   const modelTargets = dependencies.modelTargets ?? getProviderModelProbeTargets;

@@ -7,12 +7,24 @@ export const MAX_PROVIDER_HEALTH_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 export const PROVIDER_HEALTH_BUSY_WINDOW_MS = 60_000;
 export const PROVIDER_HEALTH_BUSY_POSTPONE_MS = 60_000;
 
+// How far past its real due time a schedule may be deferred by customer traffic
+// before it runs anyway. Yielding to traffic is a 60s postpone, and the busy
+// check looks back 60s, so a gateway serving more than one request per minute
+// would postpone every provider forever — which is exactly how the whole chain
+// went stale. Past this grace period a probe pass wins over the courtesy delay:
+// one "Say OK" per model is cheaper than routing blind.
+export const PROVIDER_HEALTH_MAX_DEFER_MS = 30 * 60 * 1000;
+
 export interface ProviderHealthSchedule {
   platform: string;
   enabled: boolean;
   intervalMs: number | null;
   lastRunAt: string | null;
   nextRunAt: string | null;
+  // When the busy-window courtesy first pushed this schedule back. Set on the
+  // first postpone, cleared on a completed run — so it measures one continuous
+  // stretch of being crowded out, which is what the starvation guard needs.
+  deferredSince: string | null;
 }
 
 interface StoredProviderHealthSchedule {
@@ -20,6 +32,7 @@ interface StoredProviderHealthSchedule {
   intervalMs: number | null;
   lastRunAt: string | null;
   nextRunAt: string | null;
+  deferredSince: string | null;
 }
 
 interface ProviderHealthScheduleStore {
@@ -60,6 +73,7 @@ function normalizeStoredSchedule(value: unknown): StoredProviderHealthSchedule |
     intervalMs,
     lastRunAt: isTimestamp(row.lastRunAt) ? row.lastRunAt : null,
     nextRunAt: isTimestamp(row.nextRunAt) ? row.nextRunAt : null,
+    deferredSince: isTimestamp(row.deferredSince) ? row.deferredSince : null,
   };
 }
 
@@ -104,6 +118,7 @@ function disabledSchedule(platform: string): ProviderHealthSchedule {
     intervalMs: null,
     lastRunAt: null,
     nextRunAt: null,
+    deferredSince: null,
   };
 }
 
@@ -183,10 +198,33 @@ export function saveProviderHealthSchedule(
     nextRunAt: input.enabled && intervalMs != null
       ? calculateProviderHealthNextRunAt(intervalMs, now, random)
       : null,
+    // An explicit operator save is a fresh start, not a continued deferral.
+    deferredSince: null,
   };
   store.providers[platform] = next;
   writeStore(store);
   return toView(platform, next);
+}
+
+/**
+ * Whether customer traffic has crowded this schedule out for so long that the
+ * busy-window courtesy must give way.
+ *
+ * Measured from `deferredSince` — the first postpone of the current stretch —
+ * rather than from `nextRunAt`, which postponeProviderHealthSchedules rewrites on
+ * every busy tick and would therefore make a starved schedule look permanently
+ * "not yet due". A completed run clears the stamp, so this only ever reports one
+ * continuous stretch of being pushed back.
+ */
+export function isProviderHealthScheduleOverdue(
+  schedule: ProviderHealthSchedule,
+  now = Date.now(),
+): boolean {
+  if (!schedule.enabled || schedule.intervalMs == null) return false;
+  if (schedule.deferredSince == null) return false;
+  const since = Date.parse(schedule.deferredSince);
+  if (!Number.isFinite(since)) return false;
+  return now - since > PROVIDER_HEALTH_MAX_DEFER_MS;
 }
 
 export function getDueProviderHealthSchedules(now = Date.now()): ProviderHealthSchedule[] {
@@ -215,6 +253,8 @@ export function markProviderHealthScheduleFinished(
     nextRunAt: current.enabled && current.intervalMs != null
       ? calculateProviderHealthNextRunAt(current.intervalMs, finishedAt, random)
       : null,
+    // The run happened, so the starvation clock restarts from zero.
+    deferredSince: null,
   };
   store.providers[platform] = next;
   writeStore(store);
@@ -232,6 +272,10 @@ export function postponeProviderHealthSchedules(
     const current = store.providers[platform];
     if (!current?.enabled) continue;
     current.nextRunAt = new Date(now + delayMs).toISOString();
+    // Stamp only the FIRST postpone of a stretch: this is the clock the
+    // starvation guard reads, so re-stamping it every busy tick would reset it
+    // forever and reintroduce the starvation it exists to prevent.
+    if (current.deferredSince == null) current.deferredSince = new Date(now).toISOString();
     changed = true;
   }
   if (changed) writeStore(store);
