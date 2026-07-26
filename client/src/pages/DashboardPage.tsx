@@ -10,8 +10,22 @@ import {
   isDashboardHealthy,
   isDashboardIssue,
   isDashboardLimited,
+  type DashboardHealthKey,
 } from '@/lib/dashboard-health'
 
+const HEALTH_LABEL: Record<DashboardHealthKey, string> = {
+  ok: '健康',
+  error: '错误',
+  limited: '限流',
+  probing: '探测中',
+  disabled: '已关闭',
+  unknown: '待探测',
+}
+
+// Probes run every 6h, so a 24h window leaves ~4 samples — too sparse to read
+// as a bar. 7 days at one slot per probe is what makes the strip legible.
+const UPTIME_WINDOW_HOURS = 168
+const UPTIME_SLOTS = 28
 
 interface ProbeHistoryItem {
   modelDbId: number
@@ -39,7 +53,7 @@ export default function DashboardPage() {
 
   const { data: probeHistory } = useQuery<{ platforms: Record<string, ProbeHistoryItem[]> }>({
     queryKey: ['probe-history'],
-    queryFn: () => apiFetch('/api/fallback/probe-history?hours=24&perPlatform=600'),
+    queryFn: () => apiFetch(`/api/fallback/probe-history?hours=${UPTIME_WINDOW_HOURS}&perPlatform=1200`),
     refetchInterval: 60_000,
   })
 
@@ -166,11 +180,13 @@ export default function DashboardPage() {
 
   const totalOn = entries.filter(e => e.enabled).length
   const totalOff = entries.filter(e => !e.enabled).length
-  const healthy = entries.filter(e => {
-    const pr = probeResults.get(e.modelDbId)
-    const s = pr?.status || e.healthStatus
-    return isDashboardHealthy(s)
-  }).length
+  const liveStatus = (e: any) => probeResults.get(e.modelDbId)?.status || e.healthStatus
+  const healthy = entries.filter(e => isDashboardHealthy(liveStatus(e))).length
+  const issueCount = entries.filter(e => isDashboardIssue(liveStatus(e))).length
+  const limitedCount = entries.filter(e => isDashboardLimited(liveStatus(e))).length
+  const overallTone = dashboardHealthTone(
+    issueCount > 0 ? 'error' : limitedCount > 0 ? 'rate_limited' : 'ok',
+  )
 
   function toggleGroup(platform: string) {
     setCollapsed(prev => {
@@ -182,25 +198,33 @@ export default function DashboardPage() {
     })
   }
 
-  // ── Mini timeline per model ─────────────────────────────────────────
-  function MiniTimeline({ history }: { history: ProbeHistoryItem[] | undefined }) {
-    if (!history || history.length === 0) return null
-    const bars = [...history].reverse().slice(-30) // newest right, max 30
+  // ── Uptime strip per model ──────────────────────────────────────────
+  // One slot per probe, newest on the right, padded on the left so every
+  // model's strip spans the same width no matter how much history it has.
+  function UptimeBar({ history }: { history: ProbeHistoryItem[] | undefined }) {
+    const recent = history ? [...history].reverse().slice(-UPTIME_SLOTS) : []
+    const padding = UPTIME_SLOTS - recent.length
     return (
-      <div className="flex items-center gap-[1px] shrink-0">
-        {bars.map((h, i) => {
-          const color = dashboardHealthTone(h.status).color
-          return (
-            <div
-              key={i}
-              className="shrink-0 rounded-[1px]"
-              style={{ width: 6, height: 12, backgroundColor: color }}
-              title={`${h.modelId} · ${h.status} · ${h.latency}ms · ${h.time || ''}`}
-            />
-          )
-        })}
+      <div className="mt-2 flex h-7 items-stretch gap-[3px]">
+        {Array.from({ length: padding }, (_, i) => (
+          <div key={`pad-${i}`} className="min-w-0 flex-1 rounded-[2px] bg-muted/50" title="无探测数据" />
+        ))}
+        {recent.map((h, i) => (
+          <div
+            key={i}
+            className="min-w-0 flex-1 rounded-[2px]"
+            style={{ backgroundColor: dashboardHealthTone(h.status).color }}
+            title={`${h.status} · ${h.latency}ms · ${h.time || ''}`}
+          />
+        ))}
       </div>
     )
+  }
+
+  function uptimePercent(history: ProbeHistoryItem[] | undefined): number | null {
+    if (!history || history.length === 0) return null
+    const ok = history.filter(h => isDashboardHealthy(h.status)).length
+    return Math.round((ok / history.length) * 1000) / 10
   }
 
   function renderRow(entry: any) {
@@ -217,83 +241,89 @@ export default function DashboardPage() {
     const avgMs = ls?.avgMs ?? 0
     const avgN = ls?.sampleCount ?? 0
 
+    const history = modelHistoryMap.get(entry.modelDbId)
+    const uptime = uptimePercent(history)
+    const tone = dashboardHealthTone(probing ? 'probing' : status)
+
     return (
-      <div key={entry.modelDbId} className="border-b border-border/20 last:border-0" style={{ opacity: isEnabled ? 1 : 0.4 }}>
+      <div
+        key={entry.modelDbId}
+        className="border-b border-border/20 px-3 py-3 last:border-0"
+        style={{ opacity: isEnabled ? 1 : 0.45 }}
+      >
         <div
-          className="flex items-center py-1.5 px-2 rounded hover:bg-muted/30 cursor-pointer gap-2"
+          className="flex flex-wrap items-baseline gap-x-2 gap-y-1 cursor-pointer"
           onClick={() => setExpandedModel(isExpanded ? null : entry.modelDbId)}
         >
           {probing ? (
-            <RefreshCw className="size-3 animate-spin shrink-0" style={{ color }} />
+            <RefreshCw className="size-3 shrink-0 self-center animate-spin" style={{ color }} />
           ) : (
-            <span className="size-3 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+            <span className="size-2.5 shrink-0 self-center rounded-full" style={{ backgroundColor: color }} />
           )}
           {/* Display names are unified across providers, so several rows under
               different providers read identically ("GLM-5", "GLM-5"). The real
               provider-side model id — the one with the slash — is what tells
-              them apart, so it is shown beside the name instead of only in the
-              tooltip. It must stay legible in full: a narrow column wraps the
-              id onto its own line rather than truncating it away. */}
-          <span className="text-xs font-medium flex-1 min-w-0 flex flex-wrap items-baseline gap-x-1">
-            <span className="shrink-0">{entry.displayName || entry.modelId}</span>
-            {entry.displayName && entry.modelId && entry.displayName !== entry.modelId && (
-              <span
-                className="font-mono text-[10px] font-normal text-muted-foreground break-all"
-                title={entry.modelId}
-              >
-                （{entry.modelId}）
-              </span>
-            )}
+              them apart. It gets the full row width here so it is never cut
+              off; only the status/controls sit to its right. */}
+          <span className="text-sm font-medium">{entry.displayName || entry.modelId}</span>
+          {entry.displayName && entry.modelId && entry.displayName !== entry.modelId && (
+            <span className="font-mono text-[11px] font-normal text-muted-foreground break-all">
+              {entry.modelId}
+            </span>
+          )}
+          <span className="ml-auto flex shrink-0 items-center gap-2">
+            <span className="text-[11px]" style={{ color: tone.color }}>
+              {HEALTH_LABEL[tone.key]}
+            </span>
+            <span
+              className="text-[11px] text-muted-foreground tabular-nums"
+              title={avgN > 0 ? `24h 平均延迟（${avgN} 次成功探测）` : '24h 内无成功探测'}
+            >
+              {avgN > 0 ? `24h ${avgMs}ms` : '—'}
+            </span>
+            <button
+              onClick={e => { e.stopPropagation(); doToggle(entry.modelDbId, isEnabled) }}
+              disabled={probing || probingAll}
+              className={`text-[10px] px-2 py-0.5 rounded border ${
+                isEnabled
+                  ? 'bg-[#4ade80]/10 border-[#4ade80]/30 text-[#4ade80]'
+                  : 'bg-[#f87171]/10 border-[#f87171]/30 text-[#f87171]'
+              }`}
+            >
+              {isEnabled ? '开' : '关'}
+            </button>
+            <button
+              onClick={e => { e.stopPropagation(); doProbe(entry.modelDbId) }}
+              disabled={probing || probingAll}
+              className="text-[10px] px-2 py-0.5 rounded border bg-card hover:bg-muted disabled:opacity-30"
+            >
+              {probing ? '…' : '测试'}
+            </button>
+            <button
+              onClick={e => { e.stopPropagation(); doDeleteGroup(entry.platform, [entry]) }}
+              disabled={probing || probingAll}
+              className={`text-[10px] px-1.5 py-0.5 rounded ${
+                deletingId === entry.platform
+                  ? 'bg-[#f87171]/20 border border-[#f87171]/50 text-[#f87171]'
+                  : 'border border-transparent text-muted-foreground hover:text-[#f87171] hover:border-[#f87171]/30'
+              }`}
+            >
+              {deletingId === entry.platform ? '确认?' : <Trash2 className="size-3" />}
+            </button>
           </span>
-          {/* Mini timeline */}
-          <MiniTimeline history={modelHistoryMap.get(entry.modelDbId)} />
-          {/* 24h average latency (success only) */}
-          <span
-            className="text-[10px] text-muted-foreground w-16 tabular-nums text-right"
-            title={avgN > 0 ? `24h 平均延迟（${avgN} 次成功探测）` : '24h 内无成功探测'}
-          >
-            {avgN > 0 ? `24h ${avgMs}ms` : '—'}
+        </div>
+        <UptimeBar history={history} />
+        <div className="mt-1.5 flex items-center text-[10px] text-muted-foreground">
+          <span>7 天前</span>
+          <span className="mx-auto text-foreground/70">
+            {uptime === null ? '暂无探测样本' : `成功率 ${uptime}%`}
           </span>
-          <span className="text-[10px] text-muted-foreground w-16 tabular-nums text-right">
-            {pr && pr.status !== 'probing' ? (pr.latency > 0 ? pr.latency + 'ms' : '-') : '-'}
-          </span>
-          {/* Toggle switch */}
-          <button
-            onClick={e => { e.stopPropagation(); doToggle(entry.modelDbId, isEnabled) }}
-            disabled={probing || probingAll}
-            className={`text-[10px] px-2 py-0.5 rounded border shrink-0 ${
-              isEnabled
-                ? 'bg-[#4ade80]/10 border-[#4ade80]/30 text-[#4ade80]'
-                : 'bg-[#f87171]/10 border-[#f87171]/30 text-[#f87171]'
-            }`}
-          >
-            {isEnabled ? '开' : '关'}
-          </button>
-          <button
-            onClick={e => { e.stopPropagation(); doProbe(entry.modelDbId) }}
-            disabled={probing || probingAll}
-            className="text-[10px] px-2 py-0.5 rounded border bg-card hover:bg-muted disabled:opacity-30 ml-1 shrink-0"
-          >
-            {probing ? '…' : '测试'}
-          </button>
-          <button
-            onClick={e => { e.stopPropagation(); doDeleteGroup(entry.platform, [entry]) }}
-            disabled={probing || probingAll}
-            className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ml-1 ${
-              deletingId === entry.platform
-                ? 'bg-[#f87171]/20 border border-[#f87171]/50 text-[#f87171]'
-                : 'border border-transparent text-muted-foreground hover:text-[#f87171] hover:border-[#f87171]/30'
-            }`}
-          >
-            {deletingId === entry.platform ? '确认?' : <Trash2 className="size-3" />}
-          </button>
+          <span>现在</span>
         </div>
         {isExpanded && pr && pr.error && (
-          <div className="pb-2 px-2">
-            <pre className="text-[10px] text-muted-foreground bg-muted/50 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
-              {pr.error}
-            </pre>
-          </div>
+          <pre className="mt-2 text-[10px] text-muted-foreground bg-muted/50 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
+            {pr.error}
+          </pre>
         )}
       </div>
     )
@@ -323,13 +353,36 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/* Overall banner, the way a public status page opens with one verdict
+          before the per-component detail. */}
+      {entries.length > 0 && (
+        <div
+          className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border px-4 py-3.5"
+          style={{
+            borderColor: `${overallTone.color}47`,
+            backgroundColor: `${overallTone.color}17`,
+          }}
+        >
+          <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: overallTone.color }} />
+          <b className="text-sm font-semibold">
+            {issueCount === 0
+              ? `全部 ${entries.length} 个模型运行正常`
+              : `${entries.length} 个模型中 ${healthy} 个健康运行`}
+          </b>
+          <span className="ml-auto text-[11px] text-muted-foreground">
+            {issueCount > 0 ? `${issueCount} 异常 · ` : ''}
+            {limitedCount > 0 ? `${limitedCount} 限流 · ` : ''}
+            {totalOff} 已关闭 · {groups.length} 个供应商
+          </span>
+        </div>
+      )}
+
       <div className="flex gap-4 text-[10px] text-muted-foreground flex-wrap items-center">
-        <span className="flex items-center gap-1"><span className="size-2 rounded-full bg-[#4ade80]" /> 健康</span>
-        <span className="flex items-center gap-1"><span className="size-2 rounded-full bg-[#f87171]" /> 错误</span>
-        <span className="flex items-center gap-1"><span className="size-2 rounded-full bg-[#fbbf24]" /> 限流</span>
-        <span className="flex items-center gap-1"><span className="size-3 rounded-sm bg-[#4ade80]" /> 绿条=成功</span>
-        <span className="flex items-center gap-1"><span className="size-3 rounded-sm bg-[#f87171]" /> 红条=失败</span>
-        <span className="text-[10px] text-muted-foreground">← 最早 · 最新 →  每模型 24h 探测历史</span>
+        <span className="flex items-center gap-1"><span className="size-3 rounded-sm bg-[#4ade80]" /> 成功</span>
+        <span className="flex items-center gap-1"><span className="size-3 rounded-sm bg-[#fbbf24]" /> 限流</span>
+        <span className="flex items-center gap-1"><span className="size-3 rounded-sm bg-[#f87171]" /> 失败</span>
+        <span className="flex items-center gap-1"><span className="size-3 rounded-sm bg-muted" /> 无数据</span>
+        <span>← 最早 · 最新 → 每格一次探测，共 7 天</span>
       </div>
 
       <p className="text-[11px] text-muted-foreground">
