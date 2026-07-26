@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback, useEffect } from 'react'
+import { useMemo, useState, useCallback } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, RefreshCw, Play, ChevronDown, ChevronRight, Trash2 } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
@@ -26,6 +26,8 @@ const HEALTH_LABEL: Record<DashboardHealthKey, string> = {
 // as a bar. 7 days at one slot per probe is what makes the strip legible.
 const UPTIME_WINDOW_HOURS = 168
 const UPTIME_SLOTS = 28
+
+const EXPANDED_KEY = 'dashboard-expanded-platforms'
 
 interface ProbeHistoryItem {
   modelDbId: number
@@ -66,18 +68,18 @@ export default function DashboardPage() {
   const { probeResults, probingAll, probeProgress, doProbe, doProbeAll, doProbeGroup } = useProbe()
   const [expandedModel, setExpandedModel] = useState<number | null>(null)
   const [showDisabled, setShowDisabled] = useState(true)
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+  // Groups are collapsed by default, so what gets remembered is the set the
+  // user opened — not the set that is closed. Storing the closed ones made
+  // "default collapsed" true only on a first-ever visit: once the key existed,
+  // any provider added later was absent from it and therefore rendered open.
+  const [expandedPlatforms, setExpandedPlatforms] = useState<Set<string>>(() => {
     if (typeof window === 'undefined') return new Set()
-    const saved = localStorage.getItem('dashboard-collapsed-platforms')
-    if (saved) {
-      try {
-        return new Set(JSON.parse(saved))
-      } catch {
-        return new Set()
-      }
+    try {
+      const saved = localStorage.getItem(EXPANDED_KEY)
+      return saved ? new Set<string>(JSON.parse(saved)) : new Set<string>()
+    } catch {
+      return new Set()
     }
-    // Default: All collapsed
-    return new Set()
   })
   const [deletingId, setDeletingId] = useState<string | number | null>(null)
 
@@ -151,15 +153,6 @@ export default function DashboardPage() {
       .sort((a, b) => b.models.length - a.models.length || a.platform.localeCompare(b.platform))
   }, [filtered])
 
-  // Default: All platforms collapsed initially if no memory
-  useEffect(() => {
-    if (typeof window !== 'undefined' && !localStorage.getItem('dashboard-collapsed-platforms')) {
-      const allPlatforms = groups.map(g => g.platform)
-      setCollapsed(new Set(allPlatforms))
-      localStorage.setItem('dashboard-collapsed-platforms', JSON.stringify(allPlatforms))
-    }
-  }, [groups])
-
   const probeList = useMemo(() => {
     const list: { modelDbId: number; platform: string; modelId: string }[] = []
     for (const g of groups) {
@@ -189,11 +182,11 @@ export default function DashboardPage() {
   )
 
   function toggleGroup(platform: string) {
-    setCollapsed(prev => {
+    setExpandedPlatforms(prev => {
       const next = new Set(prev)
       if (next.has(platform)) next.delete(platform)
       else next.add(platform)
-      localStorage.setItem('dashboard-collapsed-platforms', JSON.stringify([...next]))
+      localStorage.setItem(EXPANDED_KEY, JSON.stringify([...next]))
       return next
     })
   }
@@ -396,7 +389,7 @@ export default function DashboardPage() {
       ) : (
         <div className="space-y-3">
           {groups.map(g => {
-            const isCollapsed = collapsed.has(g.platform)
+            const isCollapsed = !expandedPlatforms.has(g.platform)
             const onCount = g.models.filter(m => {
               const pr = probeResults.get(m.modelDbId)
               return pr?.enabled !== undefined ? pr.enabled : m.enabled
