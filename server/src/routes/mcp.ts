@@ -143,7 +143,11 @@ function usageSummary(args: Record<string, unknown>): unknown {
   const topModels = db.prepare(`
     SELECT platform, model_id, COUNT(*) AS requests,
            SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS successes
-    FROM requests WHERE created_at >= ?
+    FROM requests
+    WHERE created_at >= ?
+      -- Probe rows would inflate the request count and, since they record
+      -- success as 'ok', never register as successes.
+      AND (request_type IS NULL OR request_type != 'probe')
     GROUP BY platform, model_id ORDER BY requests DESC LIMIT 5
   `).all(since) as Array<{ platform: string; model_id: string; requests: number; successes: number }>;
   return {

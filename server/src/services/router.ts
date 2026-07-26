@@ -369,6 +369,11 @@ export function refreshStatsCache(db: Db, force = false): void {
       SUM(CASE WHEN status = 'success' AND ttfb_ms IS NOT NULL THEN 1 ELSE 0 END) AS succ_ttfb_cnt
     FROM requests
     WHERE created_at >= ?
+      -- Probes must not reach these stats. They record success as 'ok', so they
+      -- would land in the total but never in the successes — a model probed
+      -- often would read as one that fails constantly. NULL request_type is
+      -- legacy live traffic and has to stay: an inequality alone drops it.
+      AND (request_type IS NULL OR request_type != 'probe')
     GROUP BY platform, model_id, age_days
   `).all(since) as Array<{
     platform: string; model_id: string; age_days: number; total: number; successes: number;

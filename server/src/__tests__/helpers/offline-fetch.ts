@@ -34,7 +34,16 @@ function isLocal(url: string): boolean {
 
 const offlineFetch = ((input: RequestInfo | URL, init?: RequestInit) => {
   const url = targetUrl(input);
-  if (isLocal(url)) return realFetch(input as any, init);
+  if (isLocal(url)) {
+    // A loopback call that fails says nothing useful on its own — "fetch failed"
+    // with the URL hidden. Naming it turns a mystery into a readable cause
+    // (a port of 0 means the caller read address() before the bind landed).
+    return realFetch(input as any, init).catch((error: unknown) => {
+      const cause = (error as { cause?: { message?: string } })?.cause?.message;
+      console.warn(`[test-offline] loopback fetch failed -> ${url}${cause ? ` (${cause})` : ''}`);
+      throw error;
+    });
+  }
   // Surfaced so an accidental new outbound dependency is visible in the run log
   // instead of silently reading as a provider outage.
   console.warn(`[test-offline] blocked outbound fetch -> ${url}`);
