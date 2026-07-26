@@ -20,9 +20,11 @@ import {
 } from './routing-groups.js';
 import {
   getModelProbeHealth,
+  getModelRoutingState,
   orderLogicalModelGroupCandidates,
   rankModelGroupCandidates,
   type ModelProbeHealth,
+  type ModelRoutingState,
 } from './model-health.js';
 
 class RouteError extends Error {
@@ -550,6 +552,48 @@ function orderChain(chain: ChainRow[], strategy: RoutingStrategy, sampled = true
     .map(x => x.e);
 }
 
+// How far a runtime health state pushes a route down the outer chain. Only
+// states that are POSITIVE evidence of failure move: `stale` and `unknown` mean
+// "not measured recently" / "never measured", which is not the same as broken,
+// so they keep the operator's slot.
+const HEALTH_DEMOTION_BAND: Partial<Record<ModelRoutingState, number>> = {
+  cooling: 1,
+  unhealthy: 2,
+};
+
+/**
+ * Sink routes the probes have proven broken to the back of an already-ordered
+ * chain. Until now probe health reached routing only INSIDE a unify group, so a
+ * model known to be down still led the global chain: with the provider health
+ * schedules on, 61 of 235 production chain entries were `unhealthy` and every
+ * one was still dispatched to, because the automatic switch-off needs three
+ * consecutive failed probes (~18h at a 6h interval).
+ *
+ * Deliberately narrow, to stay inside the "manual priority is the truth source"
+ * rule: it only DEMOTES known-bad routes, never promotes by latency, and never
+ * writes `profile_models`. Order within a band is the incoming order, so the
+ * operator's chain still decides everything else. `unhealthy` covers a provider
+ * with no usable key at all (getModelRoutingState returns it for
+ * usableKeyCount <= 0).
+ */
+export function demoteUnhealthyRoutes<T extends { model_db_id: number }>(
+  ordered: readonly T[],
+  healthByModelId: ReadonlyMap<number, ModelProbeHealth>,
+  now = Date.now(),
+): T[] {
+  if (ordered.length < 2) return [...ordered];
+  return ordered
+    .map((e, index) => {
+      const health = healthByModelId.get(e.model_db_id);
+      // Every row reaching here is enabled in the active profile, so the
+      // operator switch is `true`; only runtime state can demote.
+      const state = health ? getModelRoutingState(health, true, now) : 'unknown';
+      return { e, index, band: HEALTH_DEMOTION_BAND[state] ?? 0 };
+    })
+    .sort((a, b) => a.band - b.band || a.index - b.index)
+    .map(x => x.e);
+}
+
 /**
  * Expand AUTO as ordered logical units. The incoming order decides where each
  * logical group or standalone route sits; successful probe latency is allowed
@@ -1011,9 +1055,14 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
   // remains the manual profile order. Probe health/latency may reorder only
   // equivalent provider members inside the same logical model group.
   const orderedChain = prefetchedChain ? [...prefetchedChain] : orderChain(chain, strategy);
+  // A strict group/global-sort pin arrives pre-ranked (resolveModelGroupCandidates
+  // already applied health), so only ordinary AUTO gets the outer-chain passes.
   const sortedChain = prefetchedChain
     ? orderedChain
-    : orderAutoChainByLogicalGroups(orderedChain);
+    : demoteUnhealthyRoutes(
+      orderAutoChainByLogicalGroups(orderedChain),
+      getModelProbeHealth(db, orderedChain.map(row => row.model_db_id)),
+    );
 
   // Sticky session / Explicit pinning: move preferred model to front of chain
   if (preferredModelDbId) {
