@@ -228,7 +228,22 @@ export default function DashboardPage() {
           ) : (
             <span className="size-3 shrink-0 rounded-full" style={{ backgroundColor: color }} />
           )}
-          <span className="text-xs font-medium flex-1 truncate">{entry.displayName || entry.modelId}</span>
+          {/* Display names are unified across providers, so several rows under
+              different providers read identically ("GLM-5", "GLM-5"). The real
+              provider-side model id — the one with the slash — is what tells
+              them apart, so it is shown beside the name instead of only in the
+              tooltip. */}
+          <span className="text-xs font-medium flex-1 min-w-0 flex items-baseline gap-1">
+            <span className="shrink-0">{entry.displayName || entry.modelId}</span>
+            {entry.displayName && entry.modelId && entry.displayName !== entry.modelId && (
+              <span
+                className="font-mono text-[10px] font-normal text-muted-foreground truncate"
+                title={entry.modelId}
+              >
+                （{entry.modelId}）
+              </span>
+            )}
+          </span>
           {/* Mini timeline */}
           <MiniTimeline history={modelHistoryMap.get(entry.modelDbId)} />
           {/* 24h average latency (success only) */}

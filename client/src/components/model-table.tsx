@@ -104,6 +104,13 @@ export function RowContent({
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-medium text-sm">{row.displayName}</span>
           <span className="text-xs text-muted-foreground">{providerLabel(row)}</span>
+          {/* Unified display names repeat across providers; the provider-side
+              model id (the one with the slash) is what distinguishes the rows. */}
+          {row.modelId && row.modelId !== row.displayName && (
+            <span className="font-mono text-[10px] text-muted-foreground/70" title={row.modelId}>
+              （{row.modelId}）
+            </span>
+          )}
           {row.supportsVision && (
             <span
               title={t('models.visionTitle')}
