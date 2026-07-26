@@ -107,7 +107,7 @@ export function RowContent({
           {/* Unified display names repeat across providers; the provider-side
               model id (the one with the slash) is what distinguishes the rows. */}
           {row.modelId && row.modelId !== row.displayName && (
-            <span className="font-mono text-[10px] text-muted-foreground/70" title={row.modelId}>
+            <span className="font-mono text-[10px] text-muted-foreground/70 break-all" title={row.modelId}>
               （{row.modelId}）
             </span>
           )}

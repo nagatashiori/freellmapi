@@ -232,12 +232,13 @@ export default function DashboardPage() {
               different providers read identically ("GLM-5", "GLM-5"). The real
               provider-side model id — the one with the slash — is what tells
               them apart, so it is shown beside the name instead of only in the
-              tooltip. */}
-          <span className="text-xs font-medium flex-1 min-w-0 flex items-baseline gap-1">
+              tooltip. It must stay legible in full: a narrow column wraps the
+              id onto its own line rather than truncating it away. */}
+          <span className="text-xs font-medium flex-1 min-w-0 flex flex-wrap items-baseline gap-x-1">
             <span className="shrink-0">{entry.displayName || entry.modelId}</span>
             {entry.displayName && entry.modelId && entry.displayName !== entry.modelId && (
               <span
-                className="font-mono text-[10px] font-normal text-muted-foreground truncate"
+                className="font-mono text-[10px] font-normal text-muted-foreground break-all"
                 title={entry.modelId}
               >
                 （{entry.modelId}）
