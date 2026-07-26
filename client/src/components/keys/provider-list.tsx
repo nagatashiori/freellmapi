@@ -282,7 +282,10 @@ export function ProviderList({ onAddKey }: { onAddKey: () => void }) {
   }, [editingKeyId])
 
   const healthKeyMap = new Map<number, { status: string; lastCheckedAt: string | null }>()
-  for (const k of healthData?.keys ?? []) healthKeyMap.set(k.id, k)
+  // `healthData?.keys ?? []` looks safe but isn't: if the response ever arrives
+  // as an array, `.keys` resolves to Array.prototype.keys — a function, so `??`
+  // never fires and for...of throws "function is not iterable". Check the shape.
+  for (const k of Array.isArray(healthData?.keys) ? healthData.keys : []) healthKeyMap.set(k.id, k)
   const statusOf = (k: ApiKey) => healthKeyMap.get(k.id)?.status ?? k.status
 
   // Built-in + classic custom + any named user platforms (modelscope, aihub, locedge…)

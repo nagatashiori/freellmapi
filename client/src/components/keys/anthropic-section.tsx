@@ -39,8 +39,16 @@ export function AnthropicSection() {
     queryFn: () => apiFetch('/api/fallback'),
   })
 
+  // Same trap as provider-list's `healthData?.keys`: an array response would
+  // make `.map` resolve to Array.prototype.map, which is truthy and would sail
+  // through a bare `if (mapData?.map)`. AnthropicMap is a plain object.
+  const remoteMap =
+    mapData?.map && typeof mapData.map === 'object' && !Array.isArray(mapData.map)
+      ? mapData.map
+      : null
+
   const [draft, setDraft] = useState<AnthropicMap | null>(null)
-  useEffect(() => { if (mapData?.map) setDraft(mapData.map) }, [mapData])
+  useEffect(() => { if (remoteMap) setDraft(remoteMap) }, [remoteMap])
 
   const save = useMutation({
     mutationFn: (map: AnthropicMap) => apiFetch('/api/settings/anthropic-map', { method: 'PUT', body: JSON.stringify(map) }),
@@ -59,7 +67,7 @@ export function AnthropicSection() {
     value: `auto:${p}`,
     label: `auto:${p}`,
   }))
-  const dirty = !!(draft && mapData?.map && JSON.stringify(draft) !== JSON.stringify(mapData.map))
+  const dirty = !!(draft && remoteMap && JSON.stringify(draft) !== JSON.stringify(remoteMap))
 
   return (
     <section className="rounded-3xl border bg-card p-5">
