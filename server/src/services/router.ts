@@ -490,8 +490,40 @@ function scoreChainEntry(
 }
 
 /**
+ * Priority-mode ordering: the manual profile order, with models that just
+ * exhausted every one of their keys banded BEHIND the ones that didn't.
+ *
+ * The old form was `priority + getPenalty(...)`, ascending. Because MAX_PENALTY
+ * caps the penalty at 10, the worst possible demotion was ten slots — which is
+ * meaningless in a long chain. Observed in production (208 enabled models): a
+ * model at manual priority 5 with 0/12 successful real requests over seven days
+ * could sink no further than slot 15, so it still led essentially every request
+ * and burned a ~20-30s failover hop before the chain reached a working model.
+ *
+ * Banding fixes that without touching the operator's source of truth: manual
+ * `priority` still decides the order INSIDE each band, more-penalized models
+ * come after less-penalized ones, nothing is written to `profile_models`, and
+ * the penalty still decays (getPenalty) so a recovered model returns to its
+ * manual slot on its own. `penaltyOf` is injectable for tests.
+ */
+export function orderChainByPriority<T extends { model_db_id: number; priority: number }>(
+  chain: readonly T[],
+  penaltyOf: (modelDbId: number) => number = getPenalty,
+): T[] {
+  return chain
+    .map((e, index) => ({ e, index, penalty: penaltyOf(e.model_db_id) }))
+    .sort((a, b) =>
+      (a.penalty === 0 ? 0 : 1) - (b.penalty === 0 ? 0 : 1)
+      || a.penalty - b.penalty
+      || a.e.priority - b.e.priority
+      || a.index - b.index)
+    .map(x => x.e);
+}
+
+/**
  * Order the enabled fallback chain for routing.
- *  - 'priority' strategy → legacy manual order + 429 penalty (unchanged).
+ *  - 'priority' strategy → manual order, failed models banded last
+ *                          (orderChainByPriority).
  *  - bandit strategy      → convex score, manual priority as the deterministic
  *                           tiebreaker for (near-)equal scores.
  *
@@ -504,13 +536,7 @@ function scoreChainEntry(
  */
 function orderChain(chain: ChainRow[], strategy: RoutingStrategy, sampled = true): ChainRow[] {
   const weights = weightsFor(strategy);
-  if (!weights) {
-    // Legacy priority mode: base priority + 429 penalty, ascending.
-    return chain
-      .map(e => ({ e, eff: e.priority + getPenalty(e.model_db_id) }))
-      .sort((a, b) => a.eff - b.eff || a.e.priority - b.e.priority)
-      .map(x => x.e);
-  }
+  if (!weights) return orderChainByPriority(chain);
 
   const composites = chain.map(e => intelligenceComposite(e.size_label, e.intelligence_rank));
   const intelMin = composites.length ? Math.min(...composites) : 0;
