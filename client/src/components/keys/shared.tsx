@@ -52,7 +52,10 @@ export const PLATFORMS: { value: Platform; label: string; url: string; keyless?:
   { value: 'aion', label: 'Aion Labs (free key)', url: 'https://www.aionlabs.ai' },
   { value: 'requesty', label: 'Requesty (free key)', url: 'https://www.requesty.ai' },
   { value: 'nara', label: 'NaraRouter (free key)', url: 'https://router.bynara.id' },
-  { value: 'aihorde', label: 'AI Horde (no key needed, slow)', url: 'https://aihorde.net/register', keyless: true },
+  // AI Horde was removed from the picker on request (2026-07-27): its anonymous
+  // tier sits at the lowest worker-queue priority, and the row it left behind
+  // carried no models. The provider itself is still registered server-side, so
+  // an existing key would still route — it just isn't offered here any more.
 ]
 
 // 'custom' is configured through its own form (base URL + model), not the
