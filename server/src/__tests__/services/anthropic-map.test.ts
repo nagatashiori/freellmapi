@@ -87,4 +87,15 @@ describe('resolveAnthropicModel auto:<profile> map values', () => {
     setClaudeModelMap({ default: 'auto', opus: 'auto', sonnet: 'auto', haiku: 'auto' });
     expect(resolveAnthropicModel('claude-opus-4-5')).toEqual({ pinned: false });
   });
+
+  it('resolves logical model group aliases as pinned catalog models instead of unknownModel', () => {
+    // Adding model group alias resolution check
+    const res = resolveAnthropicModel('GEMINI_2.5_FLASH');
+    expect(res.unknownModel).toBeUndefined();
+    expect(res.pinned).toBe(true);
+    expect(res.catalogModelId).toBe('GEMINI_2.5_FLASH');
+  });
 });
+
+
+

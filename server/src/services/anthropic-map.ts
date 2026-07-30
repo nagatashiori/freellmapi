@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { getDb, getSetting, setSetting } from '../db/index.js';
+import { isUnifyEnabled, getModelGroups, resolveRequestedIdToMembers } from './model-groups.js';
 
 // Claude Code model mapping. Claude Code keeps its built-in model names
 // (e.g. `claude-sonnet-4-5` as the main model, `claude-3-5-haiku` as the
@@ -143,6 +144,13 @@ export function resolveAnthropicModel(model?: string): ResolvedAnthropicModel {
   const catalogModelId = CATALOG_MODEL_ALIASES[concreteModel.toLowerCase()] ?? concreteModel;
   const id = lookupEnabled(catalogModelId);
   if (id != null) return { preferredModelDbId: id, pinned: true, catalogModelId };
+
+  if (isUnifyEnabled()) {
+    const groupMembers = resolveRequestedIdToMembers(catalogModelId, getModelGroups());
+    if (groupMembers && groupMembers.length > 0) {
+      return { pinned: true, catalogModelId };
+    }
+  }
 
   // Keep the existing graceful fallback for catalog models that are currently
   // disabled, but never silently substitute an unrelated default-route model

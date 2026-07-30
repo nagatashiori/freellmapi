@@ -471,9 +471,12 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
   }
 
   // A concrete Anthropic model id pins a *logical group*, not a provider row.
-  // Do not let its exact catalog row leap back ahead of the active profile's
-  // ordered group members (including a disabled provider with the same id).
-  const routePreferredModel = groupChain ? undefined : preferredModel;
+  // Preserve preferredModel if it belongs to the target groupChain (e.g. sticky session),
+  // otherwise do not let an exact catalog row leap back ahead of ordered group members.
+  const routePreferredModel = (groupChain && preferredModel != null && groupChain.some(r => r.model_db_id === preferredModel))
+    ? preferredModel
+    : (groupChain ? undefined : preferredModel);
+
 
   // Thin adapter over the shared fallback loop (lib/fallback-loop.ts): the
   // cooldown/skip/penalty/exhaustion machinery is shared, only the Anthropic
