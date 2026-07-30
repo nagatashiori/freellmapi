@@ -9,8 +9,9 @@ import type {
   ChatToolChoice,
   Platform,
 } from '@freellmapi/shared/types.js';
-import { routeRequest, hasEnabledToolsModel, routingReserveTokens, type RouteResult } from '../services/router.js';
-import { getUnifiedApiKey } from '../db/index.js';
+import { routeRequest, hasEnabledToolsModel, routingReserveTokens, resolveModelGroupCandidates, type RouteResult, type ChainRow } from '../services/router.js';
+import { getDb, getUnifiedApiKey } from '../db/index.js';
+import { isUnifyEnabled, getModelGroups, resolveRequestedIdToMembers } from '../services/model-groups.js';
 import { contentToString } from '../lib/content.js';
 import { repairToolArguments, toolSchemaMap } from '../lib/tool-args.js';
 import { rescueInlineToolCalls, startsWithDialectMarker, couldBecomeDialectMarker, containsDialectMarker } from '../lib/tool-call-rescue.js';
@@ -22,6 +23,7 @@ import {
   setStickyModel,
   traceRouteEvent,
   logRequest,
+  isAutoModel,
 } from './proxy.js';
 import { runFallbackLoop, newFallbackState, recordUpstreamSuccess, setFallbackHeaders, getFallbackAttemptTimeoutMs, type AttemptRecord } from '../lib/fallback-loop.js';
 import { applyTokenBudget, tokenBudgetMessage } from '../lib/guardrails.js';
@@ -386,8 +388,54 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
   // Optional client-managed session affinity (mirrors /chat/completions).
   const rawSessionId = req.headers['x-session-id'];
   const sessionIdHeader = Array.isArray(rawSessionId) ? rawSessionId[0] : rawSessionId;
-  const preferredModel = getStickyModel(messages, sessionIdHeader);
-  const requestedModelLabel = reqData.model ?? 'auto';
+  const requestedModel = reqData.model;
+  const requestedModelLabel = requestedModel ?? 'auto';
+
+  let preferredModel: number | undefined;
+  let groupChain: ChainRow[] | undefined;
+
+  if (isAutoModel(requestedModel)) {
+    preferredModel = getStickyModel(messages, sessionIdHeader);
+  } else if (requestedModel) {
+    const db = getDb();
+    const members = isUnifyEnabled() ? resolveRequestedIdToMembers(requestedModel, getModelGroups()) : null;
+    if (members && members.length > 0) {
+      groupChain = resolveModelGroupCandidates(members);
+      if (groupChain.length === 0) {
+        const placeholders = members.map(() => '?').join(',');
+        const anyEnabled = db.prepare(`SELECT 1 FROM models WHERE id IN (${placeholders}) AND enabled = 1 LIMIT 1`).get(...members);
+        const reason = anyEnabled ? 'has no providers with an enabled key' : 'is disabled';
+        res.status(400).json({
+          error: {
+            message: `Model '${requestedModel}' ${reason}. Use 'auto' (or omit the 'model' field) to auto-route, or call /v1/models for the available list.`,
+            type: 'invalid_request_error',
+            code: 'model_not_found',
+          },
+        });
+        return;
+      }
+      const sticky = getStickyModel(messages, sessionIdHeader, requestedModel);
+      preferredModel = (sticky != null && groupChain.some(r => r.model_db_id === sticky)) ? sticky : undefined;
+    } else {
+      const enabled = db.prepare('SELECT id FROM models WHERE model_id = ? AND enabled = 1').get(requestedModel) as { id: number } | undefined;
+      if (enabled) {
+        preferredModel = enabled.id;
+      } else {
+        const disabled = db.prepare('SELECT id FROM models WHERE model_id = ?').get(requestedModel) as { id: number } | undefined;
+        const reason = disabled ? 'is disabled' : 'is not in the catalog';
+        res.status(400).json({
+          error: {
+            message: `Model '${requestedModel}' ${reason}. Use 'auto' (or omit the 'model' field) to auto-route, or call /v1/models for the available list.`,
+            type: 'invalid_request_error',
+            code: 'model_not_found',
+          },
+        });
+        return;
+      }
+    }
+  } else {
+    preferredModel = getStickyModel(messages, sessionIdHeader);
+  }
 
   // Tool-bearing requests (the normal case for Codex/agent clients on this
   // endpoint) must stay on models that emit structured tool_calls. Make the
@@ -429,7 +477,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
     state,
     attemptLog,
     clientGone: () => clientGone,
-    route: () => routeRequest(estimatedTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, false, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, undefined, completionOpts.response_format !== undefined),
+    route: () => routeRequest(estimatedTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, false, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain, completionOpts.response_format !== undefined),
     dispatch: async (route, attempt) => {
       traceRouteEvent('Responses', {
         event: attempt === 0 ? 'start' : 'next',

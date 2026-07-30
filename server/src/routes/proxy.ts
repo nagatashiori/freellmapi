@@ -34,7 +34,7 @@ export const proxyRouter = Router();
 // `model` entirely.
 const AUTO_MODEL_ID = 'auto';
 
-function isAutoModel(modelId: string | undefined): boolean {
+export function isAutoModel(modelId: string | undefined): boolean {
   if (!modelId) return true;
   const lower = modelId.toLowerCase();
   return lower === AUTO_MODEL_ID || lower.startsWith(`${AUTO_MODEL_ID}:`);

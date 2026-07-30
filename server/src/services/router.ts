@@ -1141,10 +1141,10 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
         const [preferred] = sortedChain.splice(idx, 1);
         sortedChain.unshift(preferred);
       }
-    } else {
+    } else if (!prefetchedChain) {
       // The requested model is not in the current routing chain (e.g. it's a
       // custom model or not added to the active profile). We must fulfill the
-      // explicit request by injecting it at the front.
+      // explicit request by injecting it at the front (only for AUTO, not for strict group chains).
       const pinnedRow = db.prepare(`
         SELECT m.id as model_db_id, 0 as priority, 1 as enabled,
                m.platform, m.model_id, m.display_name, m.intelligence_rank,
