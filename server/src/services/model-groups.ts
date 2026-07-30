@@ -200,15 +200,52 @@ export function groupRows(rows: GroupableRow[], ov: UnifyOverrides): ModelGroup[
  */
 export function resolveRequestedIdToMembers(requested: string, groups: ModelGroup[]): number[] | null {
   if (!requested) return null;
+  const reqTrim = requested.trim();
+  if (!reqTrim) return null;
 
-  const byCanonical = groups.find(g => g.canonicalId === requested);
+  // 1. Exact match by canonicalId
+  const byCanonical = groups.find(g => g.canonicalId === reqTrim);
   if (byCanonical) return byCanonical.members.map(m => m.model_db_id);
 
+  // 2. Exact match by member model_id or platform:model_id
   for (const g of groups) {
-    if (g.members.some(m => m.model_id === requested || memberId(m) === requested)) {
+    if (g.members.some(m => m.model_id === reqTrim || memberId(m) === reqTrim)) {
       return g.members.map(m => m.model_db_id);
     }
   }
+
+  // 3. Case-insensitive match on canonicalId, model_id, or platform:model_id
+  const reqLower = reqTrim.toLowerCase();
+  const byCanonicalLower = groups.find(g => g.canonicalId.toLowerCase() === reqLower);
+  if (byCanonicalLower) return byCanonicalLower.members.map(m => m.model_db_id);
+
+  for (const g of groups) {
+    if (g.members.some(m => m.model_id.toLowerCase() === reqLower || memberId(m).toLowerCase() === reqLower)) {
+      return g.members.map(m => m.model_db_id);
+    }
+  }
+
+  // 4. Normalized group key or slugified label match
+  const reqNormalized = normalizeGroupKey(reqTrim);
+  const byGroupKey = groups.find(g => g.groupKey === reqNormalized || slugifyGroupLabel(g.groupLabel) === reqLower);
+  if (byGroupKey) return byGroupKey.members.map(m => m.model_db_id);
+
+  // 5. Provider-prefix stripped match (e.g. "groq/llama-3.3-70b-versatile" or "openrouter/qwen-coder")
+  const strippedReq = reqLower.replace(/^[^/:]+[/:]/, '');
+  if (strippedReq && strippedReq !== reqLower) {
+    const byStrippedCanonical = groups.find(g => g.canonicalId.toLowerCase() === strippedReq);
+    if (byStrippedCanonical) return byStrippedCanonical.members.map(m => m.model_db_id);
+
+    for (const g of groups) {
+      if (g.members.some(m => m.model_id.toLowerCase() === strippedReq || memberId(m).toLowerCase() === strippedReq)) {
+        return g.members.map(m => m.model_db_id);
+      }
+    }
+    const reqStrippedNorm = normalizeGroupKey(strippedReq);
+    const byStrippedGroupKey = groups.find(g => g.groupKey === reqStrippedNorm);
+    if (byStrippedGroupKey) return byStrippedGroupKey.members.map(m => m.model_db_id);
+  }
+
   return null;
 }
 

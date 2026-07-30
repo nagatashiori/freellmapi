@@ -148,6 +148,16 @@ describe('resolveRequestedIdToMembers', () => {
   it('resolves an explicit "platform:model_id" member', () => {
     expect(resolveRequestedIdToMembers('groq:openai/gpt-oss-120b', groups)!.sort()).toEqual([1, 2, 3, 4, 5]);
   });
+  it('resolves case-insensitive, normalized, and provider-prefixed model alias requests', () => {
+    // Case-insensitive canonicalId
+    expect(resolveRequestedIdToMembers('GPT-OSS-120B', groups)!.sort()).toEqual([1, 2, 3, 4, 5]);
+    // Case-insensitive model_id
+    expect(resolveRequestedIdToMembers('LLAMA-3.3-70B-VERSATILE', groups)!.sort()).toEqual([6, 7, 8]);
+    // Provider prefixed request stripped matching
+    expect(resolveRequestedIdToMembers('groq/llama-3.3-70b-versatile', groups)!.sort()).toEqual([6, 7, 8]);
+    // Normalized separator matching
+    expect(resolveRequestedIdToMembers('gpt oss 120b', groups)!.sort()).toEqual([1, 2, 3, 4, 5]);
+  });
   it('returns null for an unknown id', () => {
     expect(resolveRequestedIdToMembers('does-not-exist', groups)).toBeNull();
   });
