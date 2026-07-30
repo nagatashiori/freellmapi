@@ -27,3 +27,20 @@ export function formatSqliteUtcToLocalTime(
   if (isNaN(date.getTime())) return '—';
   return date.toLocaleTimeString([], options);
 }
+
+/** Format a SQLite UTC datetime string as relative time ago ("5分钟前"). */
+export function formatTimeAgo(value: string | null | undefined): string {
+  if (!value) return '从未探测';
+  const date = new Date(sqliteUtcToIso(value));
+  if (isNaN(date.getTime())) return '从未探测';
+  const diffSec = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (diffSec < 0) return '刚刚';
+  if (diffSec < 60) return `${diffSec}秒前`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}分钟前`;
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return `${diffHour}小时前`;
+  const diffDay = Math.floor(diffHour / 24);
+  return `${diffDay}天前`;
+}
+
