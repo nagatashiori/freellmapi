@@ -451,7 +451,7 @@ export default function ModelDetailPage() {
                         </p>
                       )}
                       {m.routingHealth?.state === 'disabled' && (
-                        <p className="mt-1 text-[10px] text-muted-foreground">人工关闭：后台自动任务不会对关闭状态的模型进行探测（24h 延迟显示为 —），手点“测试”仍可单次探测。</p>
+                        <p className="mt-1 text-[10px] text-muted-foreground">人工关闭：依 /keys 设置的提供商定时检测正常探测，但路由不会派发到这里。</p>
                       )}
                     </div>
                   )
