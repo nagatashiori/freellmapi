@@ -470,6 +470,11 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
     }
   }
 
+  // A concrete Anthropic model id pins a *logical group*, not a provider row.
+  // Do not let its exact catalog row leap back ahead of the active profile's
+  // ordered group members (including a disabled provider with the same id).
+  const routePreferredModel = groupChain ? undefined : preferredModel;
+
   // Thin adapter over the shared fallback loop (lib/fallback-loop.ts): the
   // cooldown/skip/penalty/exhaustion machinery is shared, only the Anthropic
   // request/stream translation lives here. This converged three drifts on this
@@ -487,7 +492,7 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
     state,
     attemptLog,
     clientGone: () => clientGone,
-    route: () => routeRequest(estimatedTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain ?? profileChain),
+    route: () => routeRequest(estimatedTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, routePreferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain ?? profileChain),
     dispatch: async (route, attempt) => {
       traceRouteEvent('Anthropic', {
         event: attempt === 0 ? 'start' : 'next',

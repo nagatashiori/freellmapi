@@ -141,6 +141,8 @@ describe('Anthropic-compatible /v1/messages', () => {
     const db = getDb();
     db.prepare("DELETE FROM profile_models WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'groq' AND model_id = 'step-3.7-flash')").run();
     db.prepare("DELETE FROM models WHERE platform = 'groq' AND model_id = 'step-3.7-flash'").run();
+    db.prepare("DELETE FROM profile_models WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'groq' AND model_id IN ('Kimi-k2.6', 'Kimi-K2.6'))").run();
+    db.prepare("DELETE FROM models WHERE platform = 'groq' AND model_id IN ('Kimi-k2.6', 'Kimi-K2.6')").run();
     db.prepare('DELETE FROM api_keys').run();
     db.prepare('DELETE FROM requests').run();
     db.prepare('DELETE FROM rate_limit_cooldowns').run();
@@ -197,6 +199,33 @@ describe('Anthropic-compatible /v1/messages', () => {
     expect(status).toBe(200);
     expect(body.content).toEqual([{ type: 'text', text: 'served by Step 3.7 Flash' }]);
     expect(captured.body.model).toBe('step-3.7-flash');
+  });
+
+  it('keeps a concrete model request inside the active logical-model group order', async () => {
+    const db = getDb();
+    const active = db.prepare(`
+      INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
+                          rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window, enabled, supports_vision)
+      VALUES ('groq', 'Kimi-k2.6', 'Kimi K2.6', 5, 5, 'Large', 100, NULL, NULL, NULL, '~10M', 131072, 1, 0)
+    `).run();
+    const inactiveSibling = db.prepare(`
+      INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
+                          rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window, enabled, supports_vision)
+      VALUES ('groq', 'Kimi-K2.6', 'Kimi K2.6', 5, 5, 'Large', 100, NULL, NULL, NULL, '~10M', 131072, 1, 0)
+    `).run();
+    db.prepare('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (1, ?, 0, 1)')
+      .run(Number(active.lastInsertRowid));
+    expect(Number(inactiveSibling.lastInsertRowid)).toBeGreaterThan(0);
+
+    const captured = mockJson(textCompletion('served by the active group member'));
+    const { status, headers } = await request(app, '/v1/messages', {
+      model: 'Kimi-K2.6', max_tokens: 64,
+      messages: [{ role: 'user', content: 'hi' }],
+    }, anthropicHeaders());
+
+    expect(status).toBe(200);
+    expect(headers.get('x-routed-via')).toBe('groq/Kimi-k2.6');
+    expect(captured.body.model).toBe('Kimi-k2.6');
   });
 
   it('forwards the system prompt and tools, returns a tool_use block (stop_reason tool_use)', async () => {
