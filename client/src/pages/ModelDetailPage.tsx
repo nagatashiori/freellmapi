@@ -406,9 +406,9 @@ export default function ModelDetailPage() {
                         <code className="text-[11px] font-mono text-muted-foreground truncate flex-1 min-w-[8rem]">{m.modelId}</code>
                         <span
                           className="text-[10px] text-muted-foreground w-20 text-right tabular-nums truncate"
-                          title={lastProbeTime ? `最后探测时间：${localTimeStr} (${lastProbeTime} UTC)` : '该提供方尚未在 24 小时内产生探测记录'}
+                          title={lastProbeTime ? `最后探测时间：${localTimeStr} (${lastProbeTime} UTC)` : '该提供方暂无探测记录'}
                         >
-                          {timeAgoStr}
+                          {timeAgoStr || '从未'}
                         </span>
                         <span className="text-[10px] text-muted-foreground w-14 text-right tabular-nums" title="本次探测的延迟">
                           {pr && pr.status !== 'probing' ? (pr.latency > 0 ? `${pr.latency}ms` : '-') : '-'}
@@ -417,11 +417,15 @@ export default function ModelDetailPage() {
                           className="text-[10px] text-muted-foreground w-16 text-right tabular-nums"
                           title={m.latencyStats && m.latencyStats.sampleCount > 0
                             ? `24h 成功探测 ${m.latencyStats.sampleCount} 次的平均延迟`
-                            : '24h 内无成功探测'}
+                            : m.latencyStats?.lastLatency
+                              ? `24h 内无成功探测，显示上次探测延迟`
+                              : '暂无延迟数据'}
                         >
                           {m.latencyStats && m.latencyStats.sampleCount > 0
                             ? `24h ${m.latencyStats.avgMs}ms`
-                            : '24h —'}
+                            : m.latencyStats?.lastLatency
+                              ? `上次 ${m.latencyStats.lastLatency}ms`
+                              : '—'}
                         </span>
                         <span className="text-[10px] w-8 text-right text-muted-foreground">{isEnabled ? '开' : '关'}</span>
                         <span className="text-[10px] w-12 text-right font-medium" style={{ color: meta.color }}>{meta.label}</span>

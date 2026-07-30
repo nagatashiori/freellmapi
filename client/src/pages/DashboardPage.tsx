@@ -276,17 +276,25 @@ export default function DashboardPage() {
               return (
                 <span
                   className="text-[11px] text-muted-foreground tabular-nums truncate max-w-[5rem]"
-                  title={lastTime ? `最后探测：${localTimeStr} (${lastTime} UTC)` : '未产生探测记录'}
+                  title={lastTime ? `最后探测：${localTimeStr} (${lastTime} UTC)` : '暂无探测记录'}
                 >
-                  {timeAgoStr}
+                  {timeAgoStr || '从未'}
                 </span>
               )
             })()}
             <span
               className="text-[11px] text-muted-foreground tabular-nums"
-              title={avgN > 0 ? `24h 平均延迟（${avgN} 次成功探测）` : '24h 内无成功探测'}
+              title={avgN > 0
+                ? `24h 平均延迟（${avgN} 次成功探测）`
+                : ls?.lastLatency
+                  ? `24h 内无成功探测，显示上次延迟`
+                  : '暂无延迟数据'}
             >
-              {avgN > 0 ? `24h ${avgMs}ms` : '24h —'}
+              {avgN > 0
+                ? `24h ${avgMs}ms`
+                : ls?.lastLatency
+                  ? `上次 ${ls.lastLatency}ms`
+                  : '—'}
             </span>
             <button
               onClick={e => { e.stopPropagation(); doToggle(entry.modelDbId, isEnabled) }}

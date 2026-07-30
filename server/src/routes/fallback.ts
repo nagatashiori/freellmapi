@@ -129,8 +129,8 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
     GROUP BY m.id
   `).all() as { model_db_id: number; avg_ms: number; sample_count: number; last_id: number }[];
 
-  // Latest probe per model (any status) — used to show "last seen: error 30s
-  // ago" alongside the 24h average. Single subquery per model, no N+1.
+  // Latest probe per model (any status, no time limit) — used to show last
+  // probe time and latency for both enabled and disabled models.
   const lastRows = db.prepare(`
     SELECT r.platform, r.model_id, r.status, r.latency_ms, r.created_at
     FROM requests r
@@ -138,7 +138,6 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
       SELECT r2.platform, r2.model_id, MAX(r2.id) AS max_id
       FROM requests r2
       WHERE r2.request_type = 'probe'
-        AND r2.created_at > datetime('now', '-24 hours')
       GROUP BY r2.platform, r2.model_id
     ) latest ON latest.platform = r.platform
             AND latest.model_id = r.model_id
