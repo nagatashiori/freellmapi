@@ -454,7 +454,9 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
   // behave identically for a pinned unify group.
   let groupChain: ChainRow[] | undefined;
   if (resolved.pinned && body.model) {
-    const members = isUnifyEnabled() ? resolveRequestedIdToMembers(body.model, getModelGroups()) : null;
+    const members = isUnifyEnabled()
+      ? resolveRequestedIdToMembers(resolved.catalogModelId ?? body.model, getModelGroups())
+      : null;
     if (members && members.length > 0) {
       groupChain = resolveModelGroupCandidates(members);
       if (groupChain.length === 0) {

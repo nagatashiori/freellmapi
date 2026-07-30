@@ -21,6 +21,13 @@ export type AnthropicModelMap = Record<ClaudeFamily, string>;
 
 const DEFAULT_MAP: AnthropicModelMap = { default: 'auto', opus: 'auto', sonnet: 'auto', haiku: 'auto' };
 
+// Some Anthropic clients advertise a provider-prefixed StepFun id while the
+// catalog stores the provider-neutral id. Keep this compatibility alias narrow
+// and route it through the ordinary logical-model group, never Default auto.
+const CATALOG_MODEL_ALIASES: Readonly<Record<string, string>> = {
+  'stepfun-step-3.7-flash': 'step-3.7-flash',
+};
+
 export const anthropicModelMapSchema = z.object({
   default: z.string().min(1).optional(),
   opus: z.string().min(1).optional(),
@@ -85,6 +92,9 @@ export interface ResolvedAnthropicModel {
   // A concrete, non-Claude model id that is not present in the catalog. The
   // route must reject this instead of treating a typo as an auto request.
   unknownModel?: string;
+  // The catalog id used to resolve a known client alias to its model group.
+  // The route still records the original requested id in analytics.
+  catalogModelId?: string;
 }
 
 // Resolve the model a `/v1/messages` request should route to, honoring the
@@ -130,12 +140,13 @@ export function resolveAnthropicModel(model?: string): ResolvedAnthropicModel {
   // Not a Claude alias: treat as a concrete catalog model id and pin it if it
   // exists and is enabled; otherwise auto-route (lenient, like the OpenAI route).
   const concreteModel = (model ?? '').trim();
-  const id = lookupEnabled(concreteModel);
-  if (id != null) return { preferredModelDbId: id, pinned: true };
+  const catalogModelId = CATALOG_MODEL_ALIASES[concreteModel.toLowerCase()] ?? concreteModel;
+  const id = lookupEnabled(catalogModelId);
+  if (id != null) return { preferredModelDbId: id, pinned: true, catalogModelId };
 
   // Keep the existing graceful fallback for catalog models that are currently
   // disabled, but never silently substitute an unrelated default-route model
   // for an id the gateway does not know at all.
-  const exists = db.prepare('SELECT 1 FROM models WHERE model_id = ?').get(concreteModel);
+  const exists = db.prepare('SELECT 1 FROM models WHERE model_id = ?').get(catalogModelId);
   return exists ? { pinned: false } : { pinned: false, unknownModel: concreteModel };
 }

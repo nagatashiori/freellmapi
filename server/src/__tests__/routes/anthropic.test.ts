@@ -139,6 +139,8 @@ describe('Anthropic-compatible /v1/messages', () => {
 
   beforeEach(() => {
     const db = getDb();
+    db.prepare("DELETE FROM profile_models WHERE model_db_id IN (SELECT id FROM models WHERE platform = 'groq' AND model_id = 'step-3.7-flash')").run();
+    db.prepare("DELETE FROM models WHERE platform = 'groq' AND model_id = 'step-3.7-flash'").run();
     db.prepare('DELETE FROM api_keys').run();
     db.prepare('DELETE FROM requests').run();
     db.prepare('DELETE FROM rate_limit_cooldowns').run();
@@ -176,17 +178,25 @@ describe('Anthropic-compatible /v1/messages', () => {
     expect(headers.get('x-routed-via')).toMatch(/^groq\//);
   });
 
-  it('rejects an unknown concrete model instead of silently using the default route', async () => {
-    const captured = mockJson(textCompletion('must not be sent upstream'));
+  it('routes the StepFun client alias to the matching catalog model group', async () => {
+    const db = getDb();
+    const model = db.prepare(`
+      INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
+                          rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window, enabled, supports_vision)
+      VALUES ('groq', 'step-3.7-flash', 'Step 3.7 Flash', 5, 5, 'Large', 100, NULL, NULL, NULL, '~10M', 131072, 1, 0)
+    `).run();
+    db.prepare('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (1, ?, 0, 1)')
+      .run(Number(model.lastInsertRowid));
+
+    const captured = mockJson(textCompletion('served by Step 3.7 Flash'));
     const { status, body } = await request(app, '/v1/messages', {
       model: 'stepfun-step-3.7-flash', max_tokens: 64,
       messages: [{ role: 'user', content: 'hi' }],
     }, anthropicHeaders());
 
-    expect(status).toBe(400);
-    expect(body.error.type).toBe('invalid_request_error');
-    expect(body.error.message).toContain("Model 'stepfun-step-3.7-flash' is not in the catalog");
-    expect(captured.body).toBeNull();
+    expect(status).toBe(200);
+    expect(body.content).toEqual([{ type: 'text', text: 'served by Step 3.7 Flash' }]);
+    expect(captured.body.model).toBe('step-3.7-flash');
   });
 
   it('forwards the system prompt and tools, returns a tool_use block (stop_reason tool_use)', async () => {
