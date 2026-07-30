@@ -176,6 +176,19 @@ describe('Anthropic-compatible /v1/messages', () => {
     expect(headers.get('x-routed-via')).toMatch(/^groq\//);
   });
 
+  it('rejects an unknown concrete model instead of silently using the default route', async () => {
+    const captured = mockJson(textCompletion('must not be sent upstream'));
+    const { status, body } = await request(app, '/v1/messages', {
+      model: 'stepfun-step-3.7-flash', max_tokens: 64,
+      messages: [{ role: 'user', content: 'hi' }],
+    }, anthropicHeaders());
+
+    expect(status).toBe(400);
+    expect(body.error.type).toBe('invalid_request_error');
+    expect(body.error.message).toContain("Model 'stepfun-step-3.7-flash' is not in the catalog");
+    expect(captured.body).toBeNull();
+  });
+
   it('forwards the system prompt and tools, returns a tool_use block (stop_reason tool_use)', async () => {
     const captured = mockJson(toolCompletion('get_weather', '{"city":"Karachi"}'));
     const { status, body } = await request(app, '/v1/messages', {

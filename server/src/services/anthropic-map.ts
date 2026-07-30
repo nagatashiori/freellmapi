@@ -82,6 +82,9 @@ export interface ResolvedAnthropicModel {
   // resolve the correct chain via resolveRoutingChain() instead of using the
   // active profile.
   profileName?: string;
+  // A concrete, non-Claude model id that is not present in the catalog. The
+  // route must reject this instead of treating a typo as an auto request.
+  unknownModel?: string;
 }
 
 // Resolve the model a `/v1/messages` request should route to, honoring the
@@ -126,6 +129,13 @@ export function resolveAnthropicModel(model?: string): ResolvedAnthropicModel {
 
   // Not a Claude alias: treat as a concrete catalog model id and pin it if it
   // exists and is enabled; otherwise auto-route (lenient, like the OpenAI route).
-  const id = lookupEnabled((model ?? '').trim());
-  return id != null ? { preferredModelDbId: id, pinned: true } : { pinned: false };
+  const concreteModel = (model ?? '').trim();
+  const id = lookupEnabled(concreteModel);
+  if (id != null) return { preferredModelDbId: id, pinned: true };
+
+  // Keep the existing graceful fallback for catalog models that are currently
+  // disabled, but never silently substitute an unrelated default-route model
+  // for an id the gateway does not know at all.
+  const exists = db.prepare('SELECT 1 FROM models WHERE model_id = ?').get(concreteModel);
+  return exists ? { pinned: false } : { pinned: false, unknownModel: concreteModel };
 }

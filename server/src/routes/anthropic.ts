@@ -413,6 +413,15 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
   // haiku/default → auto | a pinned catalog model). A concrete catalog id pins
   // directly. `pinned` drives the analytics requested-model label.
   const resolved = resolveAnthropicModel(body.model);
+  if (resolved.unknownModel) {
+    sendError(
+      res,
+      400,
+      'invalid_request_error',
+      `Model '${resolved.unknownModel}' is not in the catalog. Use 'auto' (or omit the model field), or call /v1/models for the available models.`,
+    );
+    return;
+  }
   const pinnedModelId = resolved.pinned ? (body.model ?? null) : null;
 
   // Session affinity: Claude Code stamps every request in a session with

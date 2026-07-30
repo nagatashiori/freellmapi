@@ -561,19 +561,21 @@ export default function AnalyticsPage() {
                 <div className="max-h-[420px] space-y-2 overflow-y-auto">
                   {routingTraces.traces.map(trace => {
                     const finalLabel = trace.finalState === 'ok' ? '最终成功' : trace.finalState === 'fail' ? '最终失败' : '进行中'
+                    const dispatchCount = trace.events.filter(event => event.event === 'start' || event.event === 'next').length
+                    const targetLabel = trace.finalState === 'next' ? '当前' : '最终'
                     return (
                       <details key={trace.requestId} className="rounded-lg border bg-muted/20 px-3 py-2">
                         <summary className="cursor-pointer list-none text-xs">
                           <span className={`mr-2 font-medium ${trace.finalState === 'ok' ? 'text-[#4ade80]' : trace.finalState === 'fail' ? 'text-destructive' : 'text-[#fbbf24]'}`}>{finalLabel}</span>
                           <span className="font-mono text-muted-foreground">{trace.requestId.slice(0, 12)}</span>
-                          <span className="ml-2 text-muted-foreground">{trace.surface} · {trace.events.length} 步 · {formatSqliteUtcToLocalTime(trace.createdAt, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
-                          <span className="ml-2 text-muted-foreground">请求：{trace.requestedModel ?? 'auto'} → 最终：{trace.finalPlatform}/{trace.finalModelId}</span>
+                          <span className="ml-2 text-muted-foreground">{trace.surface} · {dispatchCount} 次派发 · {trace.events.length} 个事件 · {formatSqliteUtcToLocalTime(trace.createdAt, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                          <span className="ml-2 text-muted-foreground">请求：{trace.requestedModel ?? 'auto'} → {targetLabel}：{trace.finalPlatform}/{trace.finalModelId}</span>
                         </summary>
                         <div className="mt-2 space-y-1 border-t pt-2 text-[11px]">
                           <div className="flex flex-wrap gap-x-3 text-muted-foreground">
                             <span>请求模型：<code>{trace.requestedModel ?? 'auto'}</code></span>
-                            <span>最终渠道：<code>{trace.finalPlatform}</code></span>
-                            <span>实际模型：<code>{trace.finalModelId}</code></span>
+                            <span>{targetLabel}渠道：<code>{trace.finalPlatform}</code></span>
+                            <span>{targetLabel}模型：<code>{trace.finalModelId}</code></span>
                           </div>
                           {trace.events.map((event, index) => {
                             const label = event.event === 'start' || event.event === 'next'
@@ -584,7 +586,7 @@ export default function AnalyticsPage() {
                                 <span className="font-medium text-foreground">#{event.attempt + 1} {label}</span>
                                 <span>渠道：<code>{event.platform}</code></span>
                                 <span>模型：<code>{event.modelId}</code></span>
-                                {event.latencyMs != null && <span>{event.latencyMs}ms</span>}
+                                {event.latencyMs != null && <span>累计 {event.latencyMs}ms</span>}
                                 {event.errorCategory && <span className="text-destructive">{errorCategoryLabel(event.errorCategory)}</span>}
                                 {event.error && <span className="text-destructive break-all">{event.error}</span>}
                               </div>
