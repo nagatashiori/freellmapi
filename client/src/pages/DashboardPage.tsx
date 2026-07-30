@@ -2,6 +2,7 @@ import { useMemo, useState, useCallback } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, RefreshCw, Play, ChevronDown, ChevronRight, Trash2 } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
+import { formatTimeAgo, formatSqliteUtcToLocalTime } from '@/lib/utils'
 import { useProbe } from '@/lib/use-probe'
 import { EmptyState } from '@/components/empty-state'
 import { Button } from '@/components/ui/button'
@@ -268,11 +269,24 @@ export default function DashboardPage() {
             <span className="text-[11px]" style={{ color: tone.color }}>
               {HEALTH_LABEL[tone.key]}
             </span>
+            {(() => {
+              const lastTime = entry.routingHealth?.lastProbedAt || ls?.lastAt
+              const timeAgoStr = formatTimeAgo(lastTime)
+              const localTimeStr = formatSqliteUtcToLocalTime(lastTime)
+              return (
+                <span
+                  className="text-[11px] text-muted-foreground tabular-nums truncate max-w-[5rem]"
+                  title={lastTime ? `最后探测：${localTimeStr} (${lastTime} UTC)` : '未产生探测记录'}
+                >
+                  {timeAgoStr}
+                </span>
+              )
+            })()}
             <span
               className="text-[11px] text-muted-foreground tabular-nums"
               title={avgN > 0 ? `24h 平均延迟（${avgN} 次成功探测）` : '24h 内无成功探测'}
             >
-              {avgN > 0 ? `24h ${avgMs}ms` : '—'}
+              {avgN > 0 ? `24h ${avgMs}ms` : '24h —'}
             </span>
             <button
               onClick={e => { e.stopPropagation(); doToggle(entry.modelDbId, isEnabled) }}

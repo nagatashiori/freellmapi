@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom'
 import { ChevronLeft, Save, Trash2, RefreshCw, Activity } from 'lucide-react'
 import { useI18n } from '@/i18n'
 import { apiFetch } from '@/lib/api'
+import { formatTimeAgo, formatSqliteUtcToLocalTime } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { ConfirmButton } from '@/components/confirm-button'
 import { Input } from '@/components/ui/input'
@@ -389,6 +390,9 @@ export default function ModelDetailPage() {
                   const meta = statusMeta(status)
                   const probing = status === 'probing'
                   const isEnabled = m.enabled
+                  const lastProbeTime = m.routingHealth?.lastProbedAt || m.latencyStats?.lastAt
+                  const timeAgoStr = formatTimeAgo(lastProbeTime)
+                  const localTimeStr = formatSqliteUtcToLocalTime(lastProbeTime)
                   return (
                     <div key={m.modelDbId} className="px-4 py-2.5" style={{ opacity: isEnabled ? 1 : 0.45 }}>
                       <div className="flex items-center gap-2 flex-wrap">
@@ -400,6 +404,12 @@ export default function ModelDetailPage() {
                         <span title="当前模型组中的有效派发顺序" className="text-[10px] text-muted-foreground tabular-nums">#{m.effectiveGroupRank ?? '-'}</span>
                         <span className="text-xs font-medium w-24 shrink-0 truncate">{providerLabel(m)}</span>
                         <code className="text-[11px] font-mono text-muted-foreground truncate flex-1 min-w-[8rem]">{m.modelId}</code>
+                        <span
+                          className="text-[10px] text-muted-foreground w-20 text-right tabular-nums truncate"
+                          title={lastProbeTime ? `最后探测时间：${localTimeStr} (${lastProbeTime} UTC)` : '该提供方尚未在 24 小时内产生探测记录'}
+                        >
+                          {timeAgoStr}
+                        </span>
                         <span className="text-[10px] text-muted-foreground w-14 text-right tabular-nums" title="本次探测的延迟">
                           {pr && pr.status !== 'probing' ? (pr.latency > 0 ? `${pr.latency}ms` : '-') : '-'}
                         </span>
@@ -441,7 +451,7 @@ export default function ModelDetailPage() {
                         </p>
                       )}
                       {m.routingHealth?.state === 'disabled' && (
-                        <p className="mt-1 text-[10px] text-muted-foreground">人工关闭：探测可见，但路由不会派发到这里。</p>
+                        <p className="mt-1 text-[10px] text-muted-foreground">人工关闭：后台自动任务不会对关闭状态的模型进行探测（24h 延迟显示为 —），手点“测试”仍可单次探测。</p>
                       )}
                     </div>
                   )
