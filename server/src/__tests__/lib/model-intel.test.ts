@@ -89,14 +89,12 @@ describe('niceDisplayName', () => {
     expect(repairLegacyDisplayName('claude-sonnet-4-5-20250929', 'Claude Sonnet 4.5')).toBe('Claude Sonnet 4.5');
   });
 
-  it('repairs GLM vision ids labeled as plain GLM 4.6', () => {
-    expect(repairLegacyDisplayName('glm-4.6v-flash', 'GLM-4.6')).toBe('GLM 4.6V Flash');
-    expect(repairLegacyDisplayName('GLM-4.6-V', 'GLM-4.6')).toBe('GLM 4.6 V');
-    expect(repairLegacyDisplayName('glm-4.6v', 'GLM-4.6')).toBe('GLM 4.6V');
-    expect(niceDisplayName('glm-4.6v-thinking-search')).toBe('GLM 4.6V Thinking Search');
-    // A true GLM 4.6 text row keeps the canonical text label.
+  it('collapses all GLM 4.6 variants (text + vision) into one GLM 4.6 label', () => {
+    expect(repairLegacyDisplayName('glm-4.6v-flash', 'GLM-4.6')).toBe('GLM 4.6');
+    expect(repairLegacyDisplayName('GLM-4.6-V', 'GLM-4.6')).toBe('GLM 4.6');
+    expect(repairLegacyDisplayName('glm-4.6v', 'GLM-4.6')).toBe('GLM 4.6');
     expect(repairLegacyDisplayName('glm-4.6', 'GLM-4.6')).toBe('GLM 4.6');
-    // GLM flash is its own model, not a variant of the base version.
+    // GLM flash (other versions) is its own model, not a variant of the base.
     expect(repairLegacyDisplayName('glm-4.7-flash', 'GLM-4.7')).toBe('GLM 4.7 Flash');
     expect(repairLegacyDisplayName('ZhipuAI/GLM-4.7-Flash', 'GLM-4.7')).toBe('GLM 4.7 Flash');
     expect(repairLegacyDisplayName('z-ai/glm-4.7-flash:free', 'GLM-4.7')).toBe('GLM 4.7 Flash');

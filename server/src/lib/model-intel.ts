@@ -255,10 +255,11 @@ export function repairLegacyDisplayName(modelId: string, storedDisplayName?: str
     return current;
   }
 
-  // GLM vision ids (glm-4.6v, GLM-4.6-V, GLM-4.6V-Flash) were imported under
-  // the plain "GLM-4.6" text label; give them their own version label.
-  if (/4\.6[-_]?v/i.test(modelId) && /^glm[- .]?4\.6$/i.test(stored)) {
-    return current;
+  // GLM 4.6: the operator collapsed the whole family (text + 4.6v/4.6V/4.6V-Flash
+  // vision variants) into one "GLM 4.6" group, so keep every 4.6 row on the same
+  // label instead of splitting vision out.
+  if (/^glm-4\.6/i.test(base) && /^glm[- .]?4\.6/i.test(stored)) {
+    return 'GLM 4.6';
   }
 
   // GLM flash is a distinct model from the base version (4.7 Flash ≠ 4.7).
