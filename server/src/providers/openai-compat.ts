@@ -51,6 +51,19 @@ export class OpenAICompatProvider extends BaseProvider {
     this.forceSingleToolCall = opts.forceSingleToolCall ?? false;
   }
 
+  /** OpenAI 兼容供应商默认使用 validateUrl 或 <baseUrl>/models。 */
+  getModelCatalogRequest(apiKey: string) {
+    if (!this.baseUrl) return null;
+    return {
+      url: this.validateUrl ?? `${this.baseUrl}/models`,
+      headers: {
+        Accept: 'application/json',
+        ...this.authHeader(apiKey),
+        ...this.extraHeaders,
+      },
+    };
+  }
+
   /** Resolve the parallel_tool_calls flag to send upstream. For providers that
    * only accept single tool calls (NVIDIA NIM), force `false` whenever tools are
    * present so the model never tries to emit two at once and 400s; otherwise pass

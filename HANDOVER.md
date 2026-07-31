@@ -1,4 +1,82 @@
-# HANDOVER — 2026-07-16
+# HANDOVER — 2026-07-31
+
+## Session 040 — 供应商模型目录简化与统一
+
+### 本轮范围
+
+本轮不是全项目推倒重写，只重构“供应商模型来源 → 远端发现 → 只增导入 → 本地管理/删除”子系统，并补充全项目中文架构说明。
+
+### 当前结构
+
+```text
+shared/types.ts
+  └─ 供应商模型目录前后端共用类型
+server/src/providers/*
+  └─ 每家供应商只声明模型列表请求差异
+server/src/services/provider-model-catalog.ts
+  └─ 唯一业务入口和数据库事务
+server/src/routes/provider-model-catalog.ts
+  └─ 参数校验、鉴权后的 HTTP 转换
+client/src/features/provider-model-catalog/ProviderModelCatalogPanel.tsx
+  └─ 该功能完整前端状态和 UI
+client/src/pages/StatusPage.tsx
+  └─ 只组合页面，不再保存目录业务逻辑
+```
+
+详细说明：
+
+- `docs/architecture-overview.zh-CN.md`：整个软件的中文请求流、数据库真相和修改地图。
+- `docs/provider-model-catalog.md`：该子系统的五个操作、保护边界和测试重点。
+
+### 已完成
+
+- `keys.ts` 删除供应商模型目录大段业务，只挂载专用 router。
+- `StatusPage.tsx` 从大型业务页面缩减为页面组合。
+- 前后端接口类型统一到 `shared/types.ts`。
+- 远端发现只读；空列表、401、超时不会删除或禁用本地模型。
+- 本地列表不依赖远端 `/models`。
+- 导入严格只新增，三个启用位默认关闭，不改人工优先级。
+- 删除必须显式确认；目录模型写 tombstone，防止后台重新加入。
+- Google 查询参数密钥和 URL 用户名/密码在返回浏览器前脱敏。
+- 同一 custom endpoint 的多把密钥合并为一个来源，不同 endpoint 分开。
+- 新增 8 个服务级回归场景。
+- 新模块和关键公开函数均有职责、边界和副作用注释。
+
+### 验证
+
+已通过：
+
+- 11 个变更 TS/TSX 文件 TypeScript 语法转译。
+- 客户端与服务端隔离 strict typecheck。
+- 关键安全不变量静态检查。
+- `git -c core.whitespace=cr-at-eol diff --check`。
+
+未完成：
+
+- 完整 `npm ci`、`npm test`、`npm run build` 未能执行。当前运行环境的内部 npm registry 缺少 `undici@6.26.0`；不能把隔离校验冒充完整构建。
+
+### 生产与数据库状态
+
+- 未部署。
+- 未连接或修改生产数据库。
+- 未运行 ranking、recalibrate、sort。
+- 未自动改变任何现有模型的 enabled 或 priority。
+
+### 下一步
+
+在有正常 npm registry 的本地工作区执行：
+
+```bash
+npm ci
+npm test
+npm run build
+```
+
+全部通过后再 commit、push、备份生产数据库并部署。若出现失败，优先检查新服务、专用 route、前端 feature 和 shared types，不要把逻辑重新塞回 `keys.ts` 或 `StatusPage.tsx`。
+
+---
+
+## 历史交接（2026-07-16）
 
 ## 当前目标
 

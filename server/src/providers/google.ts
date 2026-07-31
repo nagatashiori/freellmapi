@@ -465,6 +465,14 @@ export interface GoogleProviderOptions {
 }
 
 export class GoogleProvider extends BaseProvider {
+  /** Google 把 API key 放在查询参数中；service 返回前必须统一脱敏。 */
+  getModelCatalogRequest(apiKey: string) {
+    return {
+      url: `${API_BASE}/models?pageSize=1000&key=${encodeURIComponent(apiKey)}`,
+      headers: { Accept: 'application/json' },
+    };
+  }
+
   readonly platform = 'google' as const;
   readonly name = 'Google AI Studio';
   private readonly timeoutMs: number;

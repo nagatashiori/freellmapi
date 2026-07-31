@@ -187,6 +187,90 @@ export interface ApiKeyCreate {
   label?: string;
 }
 
+
+// ---- Provider Model Catalog ----
+// 供应商模型管理的前后端公共契约。所有字段只在这里定义，避免服务端、
+// 路由和 React 页面分别复制一套类型，后续改接口时只需要修改这一处。
+
+/** 一个可管理的供应商来源。自定义渠道会按 endpoint 分成不同 sourceId。 */
+export interface ProviderCatalogSource {
+  sourceId: string;
+  platform: string;
+  label: string;
+  keyCount: number;
+  enabledKeyCount: number;
+  healthyKeyCount: number;
+  modelCount: number;
+  canDiscover: boolean;
+  baseUrl: string | null;
+  listUrl: string | null;
+  kind: 'channel' | 'builtin';
+}
+
+/** 远端发现结果中的模型；发现操作只读，不会据此删除本地记录。 */
+export interface ProviderCatalogRemoteModel {
+  id: string;
+  name: string;
+  ownedBy?: string;
+  alreadyRegistered: boolean;
+  existsOtherSource: boolean;
+}
+
+/** 本地数据库中的模型状态；本地列表不依赖远端 /models 接口。 */
+export interface ProviderCatalogLocalModel {
+  id: string;
+  name: string;
+  modelDbId: number;
+  localEnabled: boolean;
+  routingEnabled: boolean;
+  catalogManaged: boolean;
+}
+
+/** GET /api/keys/model-catalog/platforms */
+export interface ProviderCatalogSourcesResponse {
+  sources: ProviderCatalogSource[];
+  /** 旧客户端兼容字段；新代码统一使用 sources。 */
+  platforms: ProviderCatalogSource[];
+}
+
+/** POST /api/keys/model-catalog/discover */
+export interface ProviderCatalogDiscoveryResult {
+  sourceId: string;
+  platform: string;
+  listUrl: string;
+  total: number;
+  registered: number;
+  newCount: number;
+  remoteState: 'ok' | 'empty';
+  warning?: string;
+  models: ProviderCatalogRemoteModel[];
+}
+
+/** POST /api/keys/model-catalog/local */
+export interface ProviderCatalogLocalResult {
+  sourceId: string;
+  platform: string;
+  total: number;
+  models: ProviderCatalogLocalModel[];
+}
+
+/** POST /api/keys/model-catalog/import */
+export interface ProviderCatalogImportResult {
+  sourceId: string;
+  platform: string;
+  added: number;
+  skipped: number;
+  models: Array<{ modelId: string; modelDbId: number }>;
+}
+
+/** POST /api/keys/model-catalog/remove */
+export interface ProviderCatalogRemoveResult {
+  sourceId: string;
+  platform: string;
+  removed: number;
+  models: Array<{ modelId: string; tombstoned: boolean }>;
+}
+
 // ---- Fallback Config ----
 
 export interface FallbackEntry {

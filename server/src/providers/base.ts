@@ -43,6 +43,12 @@ export function providerHttpError(res: Response, message: string): ProviderHttpE
 // Extended sampling knobs (top_k, seed, penalties, logit_bias, logprobs,
 // response_format…) ride along via ExtendedSamplingOptions; adapters forward
 // them per the platform policy in lib/sampling-params.ts.
+/** 供应商模型列表的完整请求描述；仅服务端可见，不得直接返回浏览器。 */
+export interface ModelCatalogRequest {
+  url: string;
+  headers?: Record<string, string>;
+}
+
 export interface CompletionOptions extends ExtendedSamplingOptions {
   model?: string;
   temperature?: number;
@@ -84,6 +90,14 @@ export abstract class BaseProvider {
   ): AsyncGenerator<ChatCompletionChunk>;
 
   abstract validateKey(apiKey: string, quotaContext?: QuotaObservationContext): Promise<boolean>;
+
+  /**
+   * 可选的模型列表请求。供应商 adapter 只声明请求方式，解析、脱敏和数据库规则
+   * 统一由 provider-model-catalog service 处理。
+   */
+  getModelCatalogRequest(_apiKey: string): ModelCatalogRequest | null {
+    return null;
+  }
 
   protected async fetchWithTimeout(
     url: string,

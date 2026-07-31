@@ -11,6 +11,7 @@ import { recordQuotaObservationsFromResponse, type QuotaObservationContext } fro
 import { stripSchemaKeys } from '../lib/tool-args.js';
 
 const API_BASE = 'https://api.cohere.ai/compatibility/v1';
+const MODELS_URL = 'https://api.cohere.com/v1/models?page_size=1000';
 
 // Cohere's compat-endpoint tool-schema validator rejects a couple of JSON-Schema
 // keywords that strict clients (opencode, continue.dev) send by default, 400-ing
@@ -32,6 +33,14 @@ function sanitizeCohereTools(tools?: ChatToolDefinition[]): ChatToolDefinition[]
 export class CohereProvider extends BaseProvider {
   readonly platform = 'cohere' as const;
   readonly name = 'Cohere';
+
+  /** Cohere 原生模型列表支持 page_size，单次取足常见账号的模型。 */
+  getModelCatalogRequest(apiKey: string) {
+    return {
+      url: MODELS_URL,
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+    };
+  }
 
   async chatCompletion(
     apiKey: string,

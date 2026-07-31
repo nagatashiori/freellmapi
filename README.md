@@ -736,6 +736,8 @@ Request volume, success rate, tokens in and out, average latency, and per-provid
 - **Rate-limit ledger** (`server/src/services/ratelimit.ts`) — in-memory RPM/RPD/TPM/TPD counters backed by SQLite, with cooldowns on 429s.
 - **Provider adapters** (`server/src/providers/*.ts`) — one file per provider, implementing the `Provider` base class: `chatCompletion()` and `streamChatCompletion()`.
 - **Health service** (`server/src/services/health.ts`) — periodic probe keeps key status fresh.
+- **Chinese architecture overview** ([`docs/architecture-overview.zh-CN.md`](docs/architecture-overview.zh-CN.md)) — request flow, database truth, routing, probes, and modification map.
+- **Provider model catalog** ([`docs/provider-model-catalog.md`](docs/provider-model-catalog.md)) — one documented path for remote discovery, additive import, and explicit local deletion.
 - **Dashboard** (`client/`) — React + Vite + shadcn/ui admin surface.
 - **Storage** — SQLite (`better-sqlite3`) with AES-256-GCM envelope encryption for keys.
 
