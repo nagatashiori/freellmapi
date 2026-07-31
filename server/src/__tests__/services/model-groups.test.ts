@@ -140,6 +140,23 @@ describe('groupRows', () => {
     ].sort());
   });
 
+  it('repairs already-imported legacy Kimi labels during grouping without a DB write', () => {
+    const rows = [
+      row(1, 'custom', 'kimi-k3', 'Kimi K2.6'),
+      row(2, 'custom', 'kimi-k3-instruct', 'Kimi K2.6'),
+      row(3, 'custom', 'kimi-k2-7-code', 'Kimi K2.7'),
+    ];
+    const groups = groupRows(rows, NO_OVERRIDES);
+
+    expect(groups).toHaveLength(3);
+    expect(groups.map(group => group.groupLabel).sort()).toEqual([
+      'Kimi K2-7 Code',
+      'Kimi K3',
+      'Kimi K3 Instruct',
+    ].sort());
+    expect(rows.map(item => item.display_name)).toEqual(['Kimi K2.6', 'Kimi K2.6', 'Kimi K2.7']);
+  });
+
   it('assigns deterministic, unique canonical ids (collisions get -2)', () => {
     const rows = [row(1, 'a', 'm1', 'Model X'), row(2, 'b', 'm2', 'Model X!')];
     const groups = groupRows(rows, NO_OVERRIDES);

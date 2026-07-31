@@ -14,7 +14,7 @@ import {
 import { encrypt, decrypt, maskKey } from '../lib/crypto.js';
 import { parseKeysFromFile, stripJsoncComments, stripTrailingCommas } from '../lib/key-parser.js';
 import { assessProviderUrl } from '../lib/url-guard.js';
-import { calibrateModelMeta, niceDisplayName } from '../lib/model-intel.js';
+import { calibrateModelMeta, niceDisplayName, repairLegacyDisplayName } from '../lib/model-intel.js';
 import { providerModelCatalogRouter } from './provider-model-catalog.js';
 
 export const keysRouter = Router();
@@ -189,7 +189,7 @@ keysRouter.get('/', (_req: Request, res: Response) => {
       id: m.id,
       kind: m.kind,
       modelId: m.model_id,
-      displayName: m.display_name,
+      displayName: repairLegacyDisplayName(m.model_id, m.display_name),
       family: m.family ?? null,
     });
     modelsByKeyId.set(keyId, list);
@@ -214,7 +214,7 @@ keysRouter.get('/', (_req: Request, res: Response) => {
       id: m.id,
       kind: m.kind,
       modelId: m.model_id,
-      displayName: m.display_name,
+      displayName: repairLegacyDisplayName(m.model_id, m.display_name),
       family: null,
     });
     modelsByPlatform.set(m.platform, list);

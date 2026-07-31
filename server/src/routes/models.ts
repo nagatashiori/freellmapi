@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import { z } from 'zod';
 import { getDb } from '../db/index.js';
 import { hasProvider } from '../providers/index.js';
+import { repairLegacyDisplayName } from '../lib/model-intel.js';
 import { deleteUnusedCustomEndpointKey } from '../lib/custom-provider-cleanup.js';
 import {
   isCatalogManagedModel,
@@ -234,7 +235,7 @@ modelsRouter.get('/', (_req: Request, res: Response) => {
     id: m.id,
     platform: m.platform,
     modelId: m.model_id,
-    displayName: m.display_name,
+    displayName: repairLegacyDisplayName(m.model_id, m.display_name),
     intelligenceRank: m.intelligence_rank,
     speedRank: m.speed_rank,
     sizeLabel: m.size_label,

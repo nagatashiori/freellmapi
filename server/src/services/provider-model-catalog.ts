@@ -11,7 +11,7 @@
  */
 import type { Db } from '../db/types.js';
 import { decrypt } from '../lib/crypto.js';
-import { calibrateModelMeta, niceDisplayName } from '../lib/model-intel.js';
+import { calibrateModelMeta, niceDisplayName, repairLegacyDisplayName } from '../lib/model-intel.js';
 import { assessProviderUrl } from '../lib/url-guard.js';
 import type {
   Platform,
@@ -486,7 +486,7 @@ function listLocal(db: Db, sourceIdOrPlatform: string): ProviderCatalogLocalResu
     total: rows.length,
     models: rows.map((row) => ({
       id: row.model_id,
-      name: row.display_name,
+      name: repairLegacyDisplayName(row.model_id, row.display_name),
       modelDbId: row.id,
       localEnabled: row.enabled === 1,
       routingEnabled: row.routing_enabled === 1,

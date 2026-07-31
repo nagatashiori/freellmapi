@@ -1,6 +1,7 @@
 import type { ModelListRow } from '@freellmapi/shared/types.js';
 import { getDb } from '../db/index.js';
 import { isUnifyEnabled, getModelGroups } from './model-groups.js';
+import { repairLegacyDisplayName } from '../lib/model-intel.js';
 
 // Shared catalog-listing logic behind both the OpenAI `GET /v1/models` and the
 // Anthropic `GET /v1/models` endpoints, so the two wire formats list the exact
@@ -86,7 +87,7 @@ export function buildModelListing(): ModelListing {
       WHERE rn = 1
     `).all() as (ModelListRow & { intelligence_rank: number; id: number; supports_tools: number })[];
     allListed = models.map(m => ({
-      id: m.model_id, name: m.display_name, ownedBy: m.platform,
+      id: m.model_id, name: repairLegacyDisplayName(m.model_id, m.display_name), ownedBy: m.platform,
       available: m.available, enabled: m.enabled, contextWindow: m.context_window,
       intel: m.intelligence_rank,
       platforms: [m.platform],

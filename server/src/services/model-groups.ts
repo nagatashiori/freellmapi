@@ -15,6 +15,7 @@
  */
 import { z } from 'zod';
 import { getDb, getSetting, setSetting } from '../db/index.js';
+import { repairLegacyDisplayName } from '../lib/model-intel.js';
 
 // ── Settings keys ────────────────────────────────────────────────────────────
 export const UNIFY_ENABLED_KEY = 'unify_models_enabled';
@@ -167,7 +168,14 @@ function assignCanonicalIds(groups: ModelGroup[]): void {
  */
 export function groupRows(rows: GroupableRow[], ov: UnifyOverrides): ModelGroup[] {
   const map = new Map<string, ModelGroup>();
-  for (const row of rows) {
+  // Older imports persisted guessed labels such as "Kimi K2.6" for every
+  // Kimi-family id. Repair those labels in memory so existing rows stop
+  // collapsing into one group; this deliberately performs no DB write.
+  const repairedRows = rows.map(row => ({
+    ...row,
+    display_name: repairLegacyDisplayName(row.model_id, row.display_name),
+  }));
+  for (const row of repairedRows) {
     const key = tokenForRow(row, ov);
     let g = map.get(key);
     if (!g) {
