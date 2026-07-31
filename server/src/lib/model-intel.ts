@@ -121,9 +121,12 @@ export function niceDisplayName(modelId: string, explicit?: string): string {
   if (explicit?.trim()) return explicit.trim();
   const id = modelId.trim();
   const base = id.split('/').pop() || id;
-  if (/k2\.6|k2-6|kimi-k2\.6/i.test(id)) return 'Kimi K2.6';
-  if (/k2\.7|k2-7|kimi-k2\.7/i.test(id)) return 'Kimi K2.7';
-  if (/kimi|moonshot/i.test(id)) return 'Kimi K2.6';
+  const normalizedBase = base.toLowerCase().replace(/_/g, '-');
+  // Only map exact canonical aliases. A broad `kimi` match incorrectly labels
+  // newer families such as kimi-k3 and variants such as kimi-k2-instruct as
+  // Kimi K2.6, which then makes model-groups merge unrelated models.
+  if (/^(?:kimi-)?k2[.-]6$/.test(normalizedBase)) return 'Kimi K2.6';
+  if (/^(?:kimi-)?k2[.-]7$/.test(normalizedBase)) return 'Kimi K2.7';
   if (/deepseek-v4-flash/i.test(id)) return 'DeepSeek V4 Flash';
   if (/deepseek-v4-pro/i.test(id)) return 'DeepSeek V4 Pro';
   if (/mistral-large/i.test(id)) return 'Mistral Large';
@@ -131,10 +134,19 @@ export function niceDisplayName(modelId: string, explicit?: string): string {
   if (/minimax/i.test(id)) return 'MiniMax';
   if (/gpt-oss-120/i.test(id)) return 'GPT-OSS 120B';
   if (/nemotron-3-ultra/i.test(id)) return 'Nemotron 3 Ultra 550B';
-  return base
-    .replace(/[:_]+/g, '-')
-    .split('-')
-    .filter(Boolean)
-    .map(w => (/^[a-z]/.test(w) ? w[0].toUpperCase() + w.slice(1) : w))
-    .join(' ');
+
+  // Keep numeric version separators such as `4-1` and `k2-7` intact. They are
+  // part of the model identity; turning every hyphen into a space makes
+  // Claude Opus 4-1 look like an unrelated or ambiguous label.
+  const tokens = base.replace(/[:_]+/g, '-').split('-').filter(Boolean);
+  const words: string[] = [];
+  for (const token of tokens) {
+    const previous = words[words.length - 1];
+    if (/^\d+$/.test(token) && previous && /\d$/.test(previous)) {
+      words[words.length - 1] = `${previous}-${token}`;
+      continue;
+    }
+    words.push(/^[a-z]/.test(token) ? token[0].toUpperCase() + token.slice(1) : token);
+  }
+  return words.join(' ');
 }

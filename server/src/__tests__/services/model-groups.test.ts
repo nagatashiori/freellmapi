@@ -8,6 +8,7 @@ import {
   type GroupableRow,
   type UnifyOverrides,
 } from '../../services/model-groups.js';
+import { niceDisplayName } from '../../lib/model-intel.js';
 
 const NO_OVERRIDES: UnifyOverrides = { merges: [], splits: [] };
 
@@ -117,6 +118,26 @@ describe('groupRows', () => {
       row(2, 'cohere', 'command-r-plus-08-2024', 'Command R+'),
     ];
     expect(groupRows(rows, NO_OVERRIDES)).toHaveLength(2);
+  });
+
+  it('does not merge newly discovered Kimi family variants through guessed labels', () => {
+    const ids = ['kimi-k2-7-code', 'kimi-k2-instruct', 'kimi-k3', 'kimi-k3-fast', 'kimi-k3-instruct'];
+    const rows = ids.map((modelId, index) => row(
+      index + 1,
+      'custom',
+      modelId,
+      niceDisplayName(modelId),
+    ));
+    const groups = groupRows(rows, NO_OVERRIDES);
+
+    expect(groups).toHaveLength(ids.length);
+    expect(groups.map(group => group.groupLabel).sort()).toEqual([
+      'Kimi K2 Instruct',
+      'Kimi K2-7 Code',
+      'Kimi K3',
+      'Kimi K3 Fast',
+      'Kimi K3 Instruct',
+    ].sort());
   });
 
   it('assigns deterministic, unique canonical ids (collisions get -2)', () => {
