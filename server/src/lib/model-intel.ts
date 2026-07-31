@@ -261,6 +261,12 @@ export function repairLegacyDisplayName(modelId: string, storedDisplayName?: str
     return current;
   }
 
+  // GLM flash is a distinct model from the base version (4.7 Flash ≠ 4.7).
+  // catalog sync imported glm-4.7-flash rows under the plain "GLM-4.7" label.
+  if (/^glm-\d+(?:\.\d+)?[a-z]*-flash$/i.test(base) && /^glm[- .]?\d+(?:\.\d+)?$/i.test(stored)) {
+    return current;
+  }
+
   // GPT / o1 / o3 family spec suffixes (mini/nano/pro/preview) that a stored
   // family label omitted: gpt-5-3-mini stored as "GPT-5.3", o1-mini stored as
   // "o1", o3-pro stored as "o3". Follow the id so spec variants stop collapsing

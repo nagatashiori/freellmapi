@@ -96,6 +96,9 @@ describe('niceDisplayName', () => {
     expect(niceDisplayName('glm-4.6v-thinking-search')).toBe('GLM 4.6V Thinking Search');
     // A true GLM 4.6 text row keeps the canonical text label.
     expect(repairLegacyDisplayName('glm-4.6', 'GLM-4.6')).toBe('GLM 4.6');
+    // GLM flash is its own model, not a variant of the base version.
+    expect(repairLegacyDisplayName('glm-4.7-flash', 'GLM-4.7')).toBe('GLM 4.7 Flash');
+    expect(repairLegacyDisplayName('ZhipuAI/GLM-4.7-Flash', 'GLM-4.7')).toBe('GLM 4.7 Flash');
   });
 
   it('labels compact MiniMax ids without the "-m" separator', () => {
