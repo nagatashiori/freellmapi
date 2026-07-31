@@ -155,6 +155,12 @@ export function niceDisplayName(modelId: string, explicit?: string): string {
       : '';
     return `GLM ${versionLabel}${variantLabel}`;
   }
+  const llama32 = /^llama-3\.2-(\d+)b/.exec(canonicalBase);
+  if (llama32) {
+    return `Llama 3.2 ${llama32[1]}B${/-vision/.test(canonicalBase) ? ' Vision' : ''}`;
+  }
+  if (/^hunyuanocr$/i.test(canonicalBase)) return 'Hunyuan OCR';
+  if (/^hunyuan-?mt-?7b$/i.test(canonicalBase)) return 'Hunyuan MT 7B';
 
   // Keep numeric version separators such as `4-1` and `k2-7` intact. They are
   // part of the model identity; turning every hyphen into a space makes
@@ -252,6 +258,32 @@ export function repairLegacyDisplayName(modelId: string, storedDisplayName?: str
   // GLM vision ids (glm-4.6v, GLM-4.6-V, GLM-4.6V-Flash) were imported under
   // the plain "GLM-4.6" text label; give them their own version label.
   if (/4\.6[-_]?v/i.test(modelId) && /^glm[- .]?4\.6$/i.test(stored)) {
+    return current;
+  }
+
+  // GPT / o1 / o3 family spec suffixes (mini/nano/pro/preview) that a stored
+  // family label omitted: gpt-5-3-mini stored as "GPT-5.3", o1-mini stored as
+  // "o1", o3-pro stored as "o3". Follow the id so spec variants stop collapsing
+  // into the base version group.
+  const baseSpec = /-?(?:mini|nano|pro|preview)(?:-|$)/i;
+  if (/^(?:o1|o3|gpt-5)/i.test(base) && baseSpec.test(base) && !baseSpec.test(stored)) {
+    return current;
+  }
+
+  // Llama 3.2 rows were all imported under one "Llama 3.2" label; the size is
+  // part of the model identity (1b/3b/11b are distinct checkpoints).
+  const llama32 = /^llama-3\.2-(\d+)b/.exec(base);
+  if (llama32 && /^llama 3\.2$/i.test(stored)) {
+    return current;
+  }
+
+  // Hunyuan OCR / MT-7B were labeled "Hunyuan Hy3" by an old override.
+  if (/hunyuan-?mt-?7b|hunyuanocr/i.test(modelId) && /^hunyuan hy3$/i.test(stored)) {
+    return current;
+  }
+
+  // Qwen2.5-Coder-32B was folded into the Qwen3 Coder group by an old override.
+  if (/qwen2?\.?5-coder-32b/i.test(modelId) && /^qwen3 coder$/i.test(stored)) {
     return current;
   }
 

@@ -103,4 +103,25 @@ describe('niceDisplayName', () => {
     expect(repairLegacyDisplayName('minimax2.7', 'MiniMax')).toBe('MiniMax M2.7');
     expect(repairLegacyDisplayName('minimax-m2.7', 'MiniMax')).toBe('MiniMax M2.7');
   });
+
+  it('keeps o1/o3/GPT spec variants out of the base-version group', () => {
+    expect(repairLegacyDisplayName('o1-mini', 'o1')).toBe('O1 Mini');
+    expect(repairLegacyDisplayName('o3-pro', 'o3')).toBe('O3 Pro');
+    expect(repairLegacyDisplayName('gpt-5-3-mini', 'GPT-5.3')).toBe('Gpt 5-3 Mini');
+    expect(repairLegacyDisplayName('gpt-5.4-nano', 'GPT-5.4')).toBe('Gpt 5.4 Nano');
+    // base version rows keep their stored label
+    expect(repairLegacyDisplayName('o1', 'o1')).toBe('O1');
+    expect(repairLegacyDisplayName('o3', 'o3')).toBe('O3');
+  });
+
+  it('keeps Llama 3.2 sizes separate instead of one shared label', () => {
+    expect(repairLegacyDisplayName('llama-3.2-1b-instruct', 'Llama 3.2')).toBe('Llama 3.2 1B');
+    expect(repairLegacyDisplayName('llama-3.2-11b-vision-instruct', 'Llama 3.2')).toBe('Llama 3.2 11B Vision');
+  });
+
+  it('repairs Hunyuan OCR/MT and Qwen2.5-Coder labels folded into other groups', () => {
+    expect(repairLegacyDisplayName('HunyuanOCR', 'Hunyuan Hy3')).toBe('Hunyuan OCR');
+    expect(repairLegacyDisplayName('Hunyuan-MT-7B', 'Hunyuan Hy3')).toBe('Hunyuan MT 7B');
+    expect(repairLegacyDisplayName('qwen2.5-coder-32b', 'Qwen3 Coder')).toBe('Qwen2.5 Coder 32b');
+  });
 });
