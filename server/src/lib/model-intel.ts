@@ -178,6 +178,21 @@ export function repairLegacyDisplayName(modelId: string, storedDisplayName?: str
   if (!stored) return niceDisplayName(modelId);
 
   const base = modelId.trim().split('/').pop() || modelId.trim();
+  // Provider/variant parentheticals such as "(CF)", "(NV)", "(HF)" and the
+  // trailing "free" pricing tier are cosmetic suffixes added by catalog sync.
+  // They must not prevent us from recognizing an otherwise auto-generated old
+  // label. Strip them before comparing with the legacy auto-label.
+  const stripCosmeticSuffixes = (value: string) => {
+    let s = value.trim();
+    let prev: string;
+    do {
+      prev = s;
+      s = s.replace(/\s*\([^()]*\)\s*$/, '').trim();
+      s = s.replace(/\s+free$/i, '').trim();
+    } while (s !== prev);
+    return s;
+  };
+
   const legacyTokens = base
     .replace(/[:_]+/g, '-')
     .split('-')
@@ -191,15 +206,18 @@ export function repairLegacyDisplayName(modelId: string, storedDisplayName?: str
     .replace(/\s+/g, ' ')
     .replace(/\s+free$/, '')
     .trim();
-  if (normalizeAutoLabel(stored) === normalizeAutoLabel(legacyTokens) && stored !== current) return current;
+  const strippedStored = stripCosmeticSuffixes(stored);
+  if (normalizeAutoLabel(strippedStored) === normalizeAutoLabel(legacyTokens) && stored !== current) return current;
 
   const normalizedBase = base.toLowerCase().replace(/_/g, '-').replace(/:free$/, '');
   if (/^minimax-m\d+(?:\.\d+)?(?:-|$)/.test(normalizedBase)
     && (/^minimax$/i.test(stored) || /^minimax m2\.7$/i.test(stored))) {
     return current;
   }
-  if (/^(?:kimi-for-coding|kimi-k2[.-]7-(?:code|coding))(?::free)?$/i.test(base)
-    && /^(?:kimi k2\.7|kimi 2\.7 coding)$/i.test(stored)) {
+  // Old catalog imports persisted labels such as "Kimi K2.7", "Kimi K2.7 Code",
+  // or "Kimi K2.7 Code (CF)" for models whose canonical identity is the
+  // Kimi 2.7 Coding family. Normalize them so the group does not split.
+  if (/^(?:kimi-for-coding|kimi-k2[.-]7-(?:code|coding))(?::free)?$/i.test(base)) {
     return current;
   }
 

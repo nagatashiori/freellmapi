@@ -60,4 +60,15 @@ describe('niceDisplayName', () => {
     expect(repairLegacyDisplayName('kimi-k3', 'Operator Label')).toBe('Operator Label');
     expect(repairLegacyDisplayName('kimi-k2.6', 'Kimi K2.6')).toBe('Kimi K2.6');
   });
+
+  it('repairs old labels with provider suffixes and outdated Kimi coding variants', () => {
+    // Cloudflare variant: stored with "(CF)" suffix and old "K2.7 Code" spelling
+    expect(repairLegacyDisplayName('@cf/moonshotai/kimi-k2.7-code', 'Kimi K2.7 Code (CF)')).toBe('Kimi 2.7 Coding');
+    // Generic old spelling without suffix
+    expect(repairLegacyDisplayName('kimi-k2.7-code', 'Kimi K2.7 Code')).toBe('Kimi 2.7 Coding');
+    // kimi-for-coding with provider suffix
+    expect(repairLegacyDisplayName('kimi-for-coding', 'Kimi For Coding (MapleLeaf)')).toBe('Kimi 2.7 Coding');
+    // Explicit operator label is still preserved for unrelated identities
+    expect(repairLegacyDisplayName('kimi-k3-fast', 'My Custom Kimi')).toBe('My Custom Kimi');
+  });
 });
