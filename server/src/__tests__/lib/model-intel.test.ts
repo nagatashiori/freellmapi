@@ -71,4 +71,35 @@ describe('niceDisplayName', () => {
     // Explicit operator label is still preserved for unrelated identities
     expect(repairLegacyDisplayName('kimi-k3-fast', 'My Custom Kimi')).toBe('My Custom Kimi');
   });
+
+  it('keeps Claude Opus version rows separate instead of labeling them 4.8', () => {
+    // catalog sync persisted "Claude Opus 4.8" on every claude-opus-4-N id; the
+    // label must follow the id's own version so 4-6/4-7 stop collapsing into 4.8.
+    expect(niceDisplayName('claude-opus-4-6')).toBe('Claude Opus 4-6');
+    expect(niceDisplayName('claude-opus-4-7')).toBe('Claude Opus 4-7');
+    expect(repairLegacyDisplayName('claude-opus-4-6', 'Claude Opus 4.8')).toBe('Claude Opus 4-6');
+    expect(repairLegacyDisplayName('claude-opus-4-7', 'Claude Opus 4.8')).toBe('Claude Opus 4-7');
+    expect(repairLegacyDisplayName('claude-opus-4-8', 'Claude Opus 4.8')).toBe('Claude Opus 4-8');
+  });
+
+  it('keeps Claude Sonnet 4 rows out of the Claude Sonnet 4.5 group', () => {
+    expect(repairLegacyDisplayName('claude-sonnet-4-20250514-thinking', 'Claude Sonnet 4.5')).toBe('Claude Sonnet 4-20250514 Thinking');
+    expect(repairLegacyDisplayName('claude-sonnet-4-thinking', 'Claude Sonnet 4.5')).toBe('Claude Sonnet 4 Thinking');
+    // A genuine 4.5 id keeps its correct stored label.
+    expect(repairLegacyDisplayName('claude-sonnet-4-5-20250929', 'Claude Sonnet 4.5')).toBe('Claude Sonnet 4.5');
+  });
+
+  it('repairs GLM vision ids labeled as plain GLM 4.6', () => {
+    expect(repairLegacyDisplayName('glm-4.6v-flash', 'GLM-4.6')).toBe('GLM 4.6V Flash');
+    expect(repairLegacyDisplayName('GLM-4.6-V', 'GLM-4.6')).toBe('GLM 4.6 V');
+    expect(repairLegacyDisplayName('glm-4.6v', 'GLM-4.6')).toBe('GLM 4.6V');
+    // A true GLM 4.6 text row keeps the canonical text label.
+    expect(repairLegacyDisplayName('glm-4.6', 'GLM-4.6')).toBe('GLM 4.6');
+  });
+
+  it('labels compact MiniMax ids without the "-m" separator', () => {
+    expect(niceDisplayName('minimax2.7')).toBe('MiniMax M2.7');
+    expect(repairLegacyDisplayName('minimax2.7', 'MiniMax')).toBe('MiniMax M2.7');
+    expect(repairLegacyDisplayName('minimax-m2.7', 'MiniMax')).toBe('MiniMax M2.7');
+  });
 });

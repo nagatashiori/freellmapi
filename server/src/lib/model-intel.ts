@@ -134,7 +134,7 @@ export function niceDisplayName(modelId: string, explicit?: string): string {
   if (/deepseek-v4-flash/i.test(id)) return 'DeepSeek V4 Flash';
   if (/deepseek-v4-pro/i.test(id)) return 'DeepSeek V4 Pro';
   if (/mistral-large/i.test(id)) return 'Mistral Large';
-  const miniMaxMatch = /^minimax-m(\d+(?:\.\d+)?)(?:-(.+))?$/.exec(canonicalBase);
+  const miniMaxMatch = /^minimax-?m?(\d+(?:\.\d+)?)(?:-(.+))?$/.exec(canonicalBase);
   if (miniMaxMatch) {
     const [, version, suffix] = miniMaxMatch;
     const suffixLabel = suffix
@@ -146,10 +146,11 @@ export function niceDisplayName(modelId: string, explicit?: string): string {
   if (/gpt-oss-120/i.test(id)) return 'GPT-OSS 120B';
   if (/^nemotron-3-super(?:-|$)/.test(canonicalBase)) return 'Nemotron 3 Super';
   if (/nemotron-3-ultra/i.test(id)) return 'Nemotron 3 Ultra 550B';
-  const glmMatch = /^glm-(\d+(?:\.\d+)?)(?:-(flash))?$/.exec(canonicalBase);
+  const glmMatch = /^glm-(\d+(?:\.\d+)?[a-z]*)(?:-([a-z]+))?$/.exec(canonicalBase);
   if (glmMatch) {
     const [, version, variant] = glmMatch;
-    return `GLM ${version}${variant ? ` ${variant[0].toUpperCase()}${variant.slice(1)}` : ''}`;
+    const versionLabel = version.replace(/[a-z]/g, ch => ch.toUpperCase());
+    return `GLM ${versionLabel}${variant ? ` ${variant[0].toUpperCase()}${variant.slice(1)}` : ''}`;
   }
 
   // Keep numeric version separators such as `4-1` and `k2-7` intact. They are
@@ -210,7 +211,7 @@ export function repairLegacyDisplayName(modelId: string, storedDisplayName?: str
   if (normalizeAutoLabel(strippedStored) === normalizeAutoLabel(legacyTokens) && stored !== current) return current;
 
   const normalizedBase = base.toLowerCase().replace(/_/g, '-').replace(/:free$/, '');
-  if (/^minimax-m\d+(?:\.\d+)?(?:-|$)/.test(normalizedBase)
+  if (/^minimax[-]?m?\d+(?:\.\d+)?(?:-|$)/.test(normalizedBase)
     && (/^minimax$/i.test(stored) || /^minimax m2\.7$/i.test(stored))) {
     return current;
   }
@@ -228,6 +229,26 @@ export function repairLegacyDisplayName(modelId: string, storedDisplayName?: str
   if ((stored === 'Kimi K2.6' || stored === 'Kimi K2.7')
     && /kimi|moonshot/i.test(modelId)
     && !exactKimiAlias) {
+    return current;
+  }
+
+  // catalog sync once persisted "Claude Opus 4.8" on every claude-opus-4-N id.
+  // Follow the id's own version (canonical "4-6"/"4-7"/"4-8") so they stop
+  // collapsing into one 4.8 group.
+  const opusVersion = /^claude-opus-4-(\d+)$/.exec(base);
+  if (opusVersion && /^claude opus 4\.8$/i.test(stored)) {
+    return current;
+  }
+
+  // voapi aliases for Sonnet 4 (claude-sonnet-4-*) were labeled "Claude Sonnet
+  // 4.5" by the old broad rules; keep genuine 4.5 ids but split the 4 ones out.
+  if (/^claude-sonnet-4-(?!5)/.test(base) && /^claude sonnet 4\.5$/i.test(stored)) {
+    return current;
+  }
+
+  // GLM vision ids (glm-4.6v, GLM-4.6-V, GLM-4.6V-Flash) were imported under
+  // the plain "GLM-4.6" text label; give them their own version label.
+  if (/4\.6[-_]?v/i.test(modelId) && /^glm[- .]?4\.6$/i.test(stored)) {
     return current;
   }
 
