@@ -133,7 +133,7 @@ describe('groupRows', () => {
     expect(groups).toHaveLength(ids.length);
     expect(groups.map(group => group.groupLabel).sort()).toEqual([
       'Kimi K2 Instruct',
-      'Kimi K2-7 Code',
+      'Kimi 2.7 Coding',
       'Kimi K3',
       'Kimi K3 Fast',
       'Kimi K3 Instruct',
@@ -150,7 +150,7 @@ describe('groupRows', () => {
 
     expect(groups).toHaveLength(3);
     expect(groups.map(group => group.groupLabel).sort()).toEqual([
-      'Kimi K2-7 Code',
+      'Kimi 2.7 Coding',
       'Kimi K3',
       'Kimi K3 Instruct',
     ].sort());

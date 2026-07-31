@@ -122,18 +122,35 @@ export function niceDisplayName(modelId: string, explicit?: string): string {
   const id = modelId.trim();
   const base = id.split('/').pop() || id;
   const normalizedBase = base.toLowerCase().replace(/_/g, '-');
+  const canonicalBase = normalizedBase.replace(/:free$/, '').replace(/-free$/, '');
   // Only map exact canonical aliases. A broad `kimi` match incorrectly labels
   // newer families such as kimi-k3 and variants such as kimi-k2-instruct as
   // Kimi K2.6, which then makes model-groups merge unrelated models.
-  if (/^(?:kimi-)?k2[.-]6$/.test(normalizedBase)) return 'Kimi K2.6';
-  if (/^(?:kimi-)?k2[.-]7$/.test(normalizedBase)) return 'Kimi K2.7';
+  if (/^kimi-for-coding$/.test(canonicalBase) || /^(?:kimi-)?k2[.-]7-(?:code|coding)$/.test(canonicalBase)) {
+    return 'Kimi 2.7 Coding';
+  }
+  if (/^(?:kimi-)?k2[.-]6$/.test(canonicalBase)) return 'Kimi K2.6';
+  if (/^(?:kimi-)?k2[.-]7$/.test(canonicalBase)) return 'Kimi K2.7';
   if (/deepseek-v4-flash/i.test(id)) return 'DeepSeek V4 Flash';
   if (/deepseek-v4-pro/i.test(id)) return 'DeepSeek V4 Pro';
   if (/mistral-large/i.test(id)) return 'Mistral Large';
-  if (/minimax.*m2\.7|m2\.7/i.test(id)) return 'MiniMax M2.7';
+  const miniMaxMatch = /^minimax-m(\d+(?:\.\d+)?)(?:-(.+))?$/.exec(canonicalBase);
+  if (miniMaxMatch) {
+    const [, version, suffix] = miniMaxMatch;
+    const suffixLabel = suffix
+      ? ` ${suffix.split('-').map(token => token[0].toUpperCase() + token.slice(1)).join(' ')}`
+      : '';
+    return `MiniMax M${version}${suffixLabel}`;
+  }
   if (/minimax/i.test(id)) return 'MiniMax';
   if (/gpt-oss-120/i.test(id)) return 'GPT-OSS 120B';
+  if (/^nemotron-3-super(?:-|$)/.test(canonicalBase)) return 'Nemotron 3 Super';
   if (/nemotron-3-ultra/i.test(id)) return 'Nemotron 3 Ultra 550B';
+  const glmMatch = /^glm-(\d+(?:\.\d+)?)(?:-(flash))?$/.exec(canonicalBase);
+  if (glmMatch) {
+    const [, version, variant] = glmMatch;
+    return `GLM ${version}${variant ? ` ${variant[0].toUpperCase()}${variant.slice(1)}` : ''}`;
+  }
 
   // Keep numeric version separators such as `4-1` and `k2-7` intact. They are
   // part of the model identity; turning every hyphen into a space makes
@@ -168,12 +185,27 @@ export function repairLegacyDisplayName(modelId: string, storedDisplayName?: str
     .map(token => (/^[a-z]/.test(token) ? token[0].toUpperCase() + token.slice(1) : token))
     .join(' ');
   const current = niceDisplayName(modelId);
-  if (stored === legacyTokens && stored !== current) return current;
+  const normalizeAutoLabel = (value: string) => value
+    .toLowerCase()
+    .replace(/[-_:]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+free$/, '')
+    .trim();
+  if (normalizeAutoLabel(stored) === normalizeAutoLabel(legacyTokens) && stored !== current) return current;
+
+  const normalizedBase = base.toLowerCase().replace(/_/g, '-').replace(/:free$/, '');
+  if (/^minimax-m\d+(?:\.\d+)?(?:-|$)/.test(normalizedBase)
+    && (/^minimax$/i.test(stored) || /^minimax m2\.7$/i.test(stored))) {
+    return current;
+  }
+  if (/^(?:kimi-for-coding|kimi-k2[.-]7-(?:code|coding))(?::free)?$/i.test(base)
+    && /^(?:kimi k2\.7|kimi 2\.7 coding)$/i.test(stored)) {
+    return current;
+  }
 
   // Older code used these two labels for every non-canonical Kimi/Moonshot id.
-  // Keep exact K2.6/K2.7 aliases intact, but repair variants such as K2-7-code,
-  // K2-instruct, and K3 that were already imported before the fix.
-  const normalizedBase = base.toLowerCase().replace(/_/g, '-').replace(/:free$/, '');
+  // Keep exact K2.6/K2.7 aliases intact, but repair variants such as K2-instruct
+  // and K3 that were already imported before the fix.
   const exactKimiAlias = /^(?:kimi-)?k2[.-][67]$/.test(normalizedBase);
   if ((stored === 'Kimi K2.6' || stored === 'Kimi K2.7')
     && /kimi|moonshot/i.test(modelId)
