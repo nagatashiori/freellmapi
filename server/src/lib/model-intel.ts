@@ -146,11 +146,14 @@ export function niceDisplayName(modelId: string, explicit?: string): string {
   if (/gpt-oss-120/i.test(id)) return 'GPT-OSS 120B';
   if (/^nemotron-3-super(?:-|$)/.test(canonicalBase)) return 'Nemotron 3 Super';
   if (/nemotron-3-ultra/i.test(id)) return 'Nemotron 3 Ultra 550B';
-  const glmMatch = /^glm-(\d+(?:\.\d+)?[a-z]*)(?:-([a-z]+))?$/.exec(canonicalBase);
+  const glmMatch = /^glm-(\d+(?:\.\d+)?[a-z]*)(?:-([a-z]+(?:-[a-z]+)*))?$/.exec(canonicalBase);
   if (glmMatch) {
     const [, version, variant] = glmMatch;
     const versionLabel = version.replace(/[a-z]/g, ch => ch.toUpperCase());
-    return `GLM ${versionLabel}${variant ? ` ${variant[0].toUpperCase()}${variant.slice(1)}` : ''}`;
+    const variantLabel = variant
+      ? ` ${variant.split('-').map(t => t[0].toUpperCase() + t.slice(1)).join(' ')}`
+      : '';
+    return `GLM ${versionLabel}${variantLabel}`;
   }
 
   // Keep numeric version separators such as `4-1` and `k2-7` intact. They are

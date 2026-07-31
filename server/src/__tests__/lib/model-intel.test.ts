@@ -93,6 +93,7 @@ describe('niceDisplayName', () => {
     expect(repairLegacyDisplayName('glm-4.6v-flash', 'GLM-4.6')).toBe('GLM 4.6V Flash');
     expect(repairLegacyDisplayName('GLM-4.6-V', 'GLM-4.6')).toBe('GLM 4.6 V');
     expect(repairLegacyDisplayName('glm-4.6v', 'GLM-4.6')).toBe('GLM 4.6V');
+    expect(niceDisplayName('glm-4.6v-thinking-search')).toBe('GLM 4.6V Thinking Search');
     // A true GLM 4.6 text row keeps the canonical text label.
     expect(repairLegacyDisplayName('glm-4.6', 'GLM-4.6')).toBe('GLM 4.6');
   });
