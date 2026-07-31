@@ -7,7 +7,7 @@ import { recordCatalogModelTombstone, upsertModelOverrides } from '../../service
 // applyCatalog is the write path between the published catalog and the live
 // router DB. These tests lock its contract: catalog metadata always wins, the
 // user's manual disables survive, custom-provider models are untouchable, and
-// disappeared models are removed in FK-safe order.
+// a catalog refresh never physically removes an unlisted local model.
 
 type AnyCatalog = Parameters<typeof applyCatalog>[1];
 
@@ -145,16 +145,16 @@ describe('applyCatalog', () => {
     expect(row.enabled).toBe(0);
   });
 
-  it('removes models that left the catalog (and their fallback rows)', () => {
+  it('keeps models that are absent from a later catalog refresh', () => {
     const models = existingAsCatalogModels().filter((m) => m.modelId !== 'brand-new-model');
     const before = getDb()
       .prepare("SELECT id FROM models WHERE model_id = 'brand-new-model'")
       .get() as { id: number };
 
     const counts = applyCatalog(getDb(), catalogOf(models));
-    expect(counts.removed).toBe(1);
-    expect(getDb().prepare("SELECT id FROM models WHERE model_id = 'brand-new-model'").get()).toBeUndefined();
-    expect(getDb().prepare('SELECT id FROM fallback_config WHERE model_db_id = ?').get(before.id)).toBeUndefined();
+    expect(counts.removed).toBe(0);
+    expect(getDb().prepare("SELECT id FROM models WHERE model_id = 'brand-new-model'").get()).toEqual(before);
+    expect(getDb().prepare('SELECT id FROM fallback_config WHERE model_db_id = ?').get(before.id)).toBeDefined();
   });
 
   it('never touches custom-provider models', () => {
@@ -246,10 +246,8 @@ describe('applyCatalog', () => {
   });
 });
 
-// reapplyCachedCatalog keeps the catalog authoritative across restarts:
-// migrations re-assert the bundled baseline on every boot (INSERT OR IGNORE
-// re-adds catalog-deleted models, family rules reset flags) while the boot
-// sync 304s on an unchanged version. The cached re-apply closes that gap.
+// reapplyCachedCatalog keeps catalog metadata fresh across restarts without
+// deleting local models that are absent from a cached snapshot.
 describe('reapplyCachedCatalog', () => {
   beforeAll(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
@@ -262,11 +260,9 @@ describe('reapplyCachedCatalog', () => {
     setSetting('catalog_applied_json', JSON.stringify(catalog));
   }
 
-  it('restores catalog state over a re-run of the baseline migrations', () => {
-    // Catalog says: one baseline model is gone. The victim must be one that a
-    // re-runnable migration re-inserts on boot (V23's INSERT OR IGNORE rows),
-    // not a first-init-only seed row — that re-insertion is the exact drift
-    // this function exists to undo.
+  it('does not remove a local model during cached catalog re-apply', () => {
+    // Catalog says: one baseline model is absent. The local row must survive
+    // both the first apply and the migration replay on boot.
     const models = existingAsCatalogModels();
     const victim = models.find((m) => m.platform === 'openrouter' && m.modelId === 'moonshotai/kimi-k2.6:free')!;
     expect(victim).toBeDefined();
@@ -276,7 +272,7 @@ describe('reapplyCachedCatalog', () => {
     cacheCatalog(catalog);
     expect(
       getDb().prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?').get(victim.platform, victim.modelId),
-    ).toBeUndefined();
+    ).toBeDefined();
 
     // Simulate a restart: migrations re-insert the baseline model.
     getDb().exec('DROP TABLE migrations');
@@ -285,13 +281,13 @@ describe('reapplyCachedCatalog', () => {
       getDb().prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?').get(victim.platform, victim.modelId),
     ).toBeDefined();
 
-    // Boot re-apply removes it again from the local cache, no network.
+    // Boot re-apply refreshes the cache, no network, without deleting it.
     const result = reapplyCachedCatalog();
     expect(result.reapplied).toBe(true);
     expect(result.version).toBe(catalog.version);
     expect(
       getDb().prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?').get(victim.platform, victim.modelId),
-    ).toBeUndefined();
+    ).toBeDefined();
   });
 
   it('clears the applied version when an older install has no cached document', () => {

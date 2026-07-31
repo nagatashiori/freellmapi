@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import type { Db } from '../db/types.js';
 import { getDb, getSetting, setSetting } from '../db/index.js';
-import { hasProvider, isUserPlatform } from '../providers/index.js';
+import { hasProvider } from '../providers/index.js';
 import { MEDIA_PLATFORMS } from './media.js';
 import type { Platform } from '@freellmapi/shared/types.js';
 import type { Scheduler } from '../lib/scheduler.js';
@@ -12,7 +12,6 @@ import {
   isCatalogModelTombstoned,
 } from './model-state.js';
 import {
-  deleteRoutingModelMemberships,
   ensureModelInProfile,
   getDefaultProfileId,
 } from './routing-groups.js';
@@ -167,8 +166,8 @@ function routableContextWindow(platform: string, modelId: string, contextWindow:
  *  - models the user added via custom providers (platform='custom' or bound to
  *    a key) are never touched;
  *  - catalog models the user deleted stay deleted via tombstones;
- *  - models that vanished from the catalog are deleted, exactly like the
- *    dead-model migrations do (fallback_config row first, FK order).
+ *  - models that vanish from a later catalog snapshot stay in the local
+ *    catalog; an operator can review and delete them explicitly from the UI.
  */
 export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['counts']> {
   const counts = { updated: 0, inserted: 0, removed: 0, skippedUnknownPlatform: 0, quirks: 0 };
@@ -206,9 +205,6 @@ export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['
   `);
 
   const apply = db.transaction(() => {
-    const inCatalog = new Set<string>();
-    const inMediaCatalog = new Set<string>();
-
     for (const m of catalog.models) {
       // Media modalities are gated on MEDIA_PLATFORMS (decoupled from the chat
       // provider registry) and routed to media_models, then skip the chat path.
@@ -219,7 +215,6 @@ export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['
           continue;
         }
         if (isCatalogModelTombstoned(db, 'media', m.platform, m.modelId)) continue;
-        inMediaCatalog.add(`${m.platform}:${m.modelId}`);
         const mrow = selectMedia.get(m.platform, m.modelId) as { id: number; enabled: number } | undefined;
         const mfields = {
           displayName: m.displayName,
@@ -245,8 +240,6 @@ export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['
         continue;
       }
       if (isCatalogModelTombstoned(db, 'chat', m.platform, m.modelId)) continue;
-      inCatalog.add(`${m.platform}:${m.modelId}`);
-
       const row = selectModel.get(m.platform, m.modelId) as { id: number; enabled: number } | undefined;
       const fields = {
         displayName: m.displayName,
@@ -292,57 +285,9 @@ export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['
       missingFb.forEach((r, i) => addFb.run(r.id, maxPriority + 1 + i));
     }
 
-    // Remove catalog-managed models that the catalog no longer lists.
-    //
-    // Operator-owned platforms must NEVER be pruned here (even if hasProvider
-    // is true after hydrateUserPlatformsFromDb):
-    //   - classic custom
-    //   - aihub (local first-class relay)
-    //   - any api_keys.platform that has a base_url (named platformId: modelscope,
-    //     locedge, …) — durable SQL check so we don't depend on in-memory Set
-    //   - isUserPlatform() in-memory Set as belt-and-suspenders
-    //
-    // Without this, boot catalog re-apply deleted every modelscope model while
-    // leaving the key row, so Web UI looked like "add failed".
-    const candidates = db
-      .prepare(`
-        SELECT id, platform, model_id
-          FROM models
-         WHERE platform != 'custom'
-           AND platform != 'aihub'
-           AND key_id IS NULL
-           AND size_label NOT IN ('User', 'Custom')
-           AND platform NOT IN (
-             SELECT DISTINCT platform FROM api_keys
-              WHERE base_url IS NOT NULL AND TRIM(base_url) != ''
-           )
-      `)
-      .all() as { id: number; platform: string; model_id: string }[];
-    const deleteFb = db.prepare('DELETE FROM fallback_config WHERE model_db_id = ?');
-    const deleteModel = db.prepare('DELETE FROM models WHERE id = ?');
-    for (const c of candidates) {
-      if (!hasProvider(c.platform as Platform)) continue; // not catalog-managed by this binary
-      if (isUserPlatform(c.platform)) continue;
-      if (!inCatalog.has(`${c.platform}:${c.model_id}`)) {
-        deleteRoutingModelMemberships(db, c.id);
-        deleteFb.run(c.id);
-        deleteModel.run(c.id);
-        counts.removed++;
-      }
-    }
-
-    // Remove media models the catalog no longer lists (own table, no fallback_config).
-    const mediaCandidates = db
-      .prepare('SELECT id, platform, model_id FROM media_models')
-      .all() as { id: number; platform: string; model_id: string }[];
-    const deleteMedia = db.prepare('DELETE FROM media_models WHERE id = ?');
-    for (const c of mediaCandidates) {
-      if (!MEDIA_PLATFORMS.has(c.platform)) continue; // not media-managed by this binary
-      if (!inMediaCatalog.has(`${c.platform}:${c.model_id}`)) {
-        deleteMedia.run(c.id);
-        counts.removed++;
-      }
-    }
+    // A catalog refresh is additive/update-only. Missing rows are intentionally
+    // retained so a partial/temporary upstream snapshot cannot erase local
+    // models. Explicit operator deletions are still handled by tombstones above.
 
     // Quirks are pure content: replace wholesale.
     db.prepare('DELETE FROM quirk_targets').run();
