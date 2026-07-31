@@ -263,7 +263,8 @@ export function repairLegacyDisplayName(modelId: string, storedDisplayName?: str
 
   // GLM flash is a distinct model from the base version (4.7 Flash ≠ 4.7).
   // catalog sync imported glm-4.7-flash rows under the plain "GLM-4.7" label.
-  if (/^glm-\d+(?:\.\d+)?[a-z]*-flash$/i.test(base) && /^glm[- .]?\d+(?:\.\d+)?$/i.test(stored)) {
+  const glmFlashBase = base.replace(/:free$/i, '');
+  if (/^glm-\d+(?:\.\d+)?[a-z]*-flash$/i.test(glmFlashBase) && /^glm[- .]?\d+(?:\.\d+)?$/i.test(stored)) {
     return current;
   }
 

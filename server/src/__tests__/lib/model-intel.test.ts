@@ -99,6 +99,7 @@ describe('niceDisplayName', () => {
     // GLM flash is its own model, not a variant of the base version.
     expect(repairLegacyDisplayName('glm-4.7-flash', 'GLM-4.7')).toBe('GLM 4.7 Flash');
     expect(repairLegacyDisplayName('ZhipuAI/GLM-4.7-Flash', 'GLM-4.7')).toBe('GLM 4.7 Flash');
+    expect(repairLegacyDisplayName('z-ai/glm-4.7-flash:free', 'GLM-4.7')).toBe('GLM 4.7 Flash');
   });
 
   it('labels compact MiniMax ids without the "-m" separator', () => {
