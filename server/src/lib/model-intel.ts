@@ -294,5 +294,13 @@ export function repairLegacyDisplayName(modelId: string, storedDisplayName?: str
     return current;
   }
 
+  // Mistral Large 2 checkpoint ids (2407 / 2-instruct / 2411 / pixtral-2411)
+  // were imported under the same "Mistral Large" label as Large 3; keep the
+  // generations apart.
+  if ((/^mistral-large-(?:2-instruct|2411|pixtral-2411)$/i.test(base) || /mistral-large-instruct-2407/i.test(modelId))
+    && /^mistral large( 3)?$/i.test(stored)) {
+    return 'Mistral Large 2';
+  }
+
   return stored;
 }

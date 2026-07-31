@@ -128,4 +128,15 @@ describe('niceDisplayName', () => {
     expect(repairLegacyDisplayName('Hunyuan-MT-7B', 'Hunyuan Hy3')).toBe('Hunyuan MT 7B');
     expect(repairLegacyDisplayName('qwen2.5-coder-32b', 'Qwen3 Coder')).toBe('Qwen2.5 Coder 32b');
   });
+
+  it('keeps Mistral Large 2 checkpoints apart from Large 3', () => {
+    expect(repairLegacyDisplayName('mistral-large-2-instruct', 'Mistral Large')).toBe('Mistral Large 2');
+    expect(repairLegacyDisplayName('mistral-large-2411', 'Mistral Large')).toBe('Mistral Large 2');
+    expect(repairLegacyDisplayName('mistralai/Mistral-Large-Instruct-2407', 'Mistral Large')).toBe('Mistral Large 2');
+    // Large 3 / latest rows keep their label
+    expect(repairLegacyDisplayName('mistral-large-latest', 'Mistral Large 3')).toBe('Mistral Large 3');
+    expect(repairLegacyDisplayName('mistral-large-3-675b-instruct-2512', 'Mistral Large 3')).toBe('Mistral Large 3');
+    // operator label survives
+    expect(repairLegacyDisplayName('mistral-large-2411', 'My Op')).toBe('My Op');
+  });
 });
