@@ -32,11 +32,17 @@ function utcFixture(daysAgo: number, hour: number) {
   };
 }
 
-function insertCall(createdAt: string, clientIp: string | null, clientUserAgent: string | null, status = 'success') {
+function insertCall(
+  createdAt: string,
+  clientIp: string | null,
+  clientUserAgent: string | null,
+  status = 'success',
+  requestType = 'chat',
+) {
   getDb().prepare(`
-    INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, latency_ms, error, created_at, client_ip, client_user_agent)
-    VALUES ('test', 'test-model', ?, 10, 5, 42, NULL, ?, ?, ?)
-  `).run(status, createdAt, clientIp, clientUserAgent);
+    INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, latency_ms, error, request_type, created_at, client_ip, client_user_agent)
+    VALUES ('test', 'test-model', ?, 10, 5, 42, NULL, ?, ?, ?, ?)
+  `).run(status, requestType, createdAt, clientIp, clientUserAgent);
 }
 
 describe('GET /api/analytics/requests', () => {
@@ -90,6 +96,24 @@ describe('GET /api/analytics/requests', () => {
 
     const clamped = await request(app, '/api/analytics/requests?range=7d&limit=99999');
     expect(clamped.body.rows).toHaveLength(5);
+  });
+
+  it('excludes health probes so recent calls match user dispatch traces', async () => {
+    const realCall = utcFixture(0, 1);
+    const probe = utcFixture(0, 2);
+    insertCall(realCall.db, '192.168.0.20', 'real-client/1.0');
+    insertCall(probe.db, null, 'probe-scheduler/1.0', 'ok', 'probe');
+
+    const { status, body } = await request(app, '/api/analytics/requests?range=7d');
+
+    expect(status).toBe(200);
+    expect(body.total).toBe(1);
+    expect(body.rows).toHaveLength(1);
+    expect(body.rows[0]).toMatchObject({
+      requestType: 'chat',
+      clientIp: '192.168.0.20',
+      clientUserAgent: 'real-client/1.0',
+    });
   });
 
   it('records the request-scoped caller identity through logRequest', async () => {

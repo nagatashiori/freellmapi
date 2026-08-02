@@ -590,7 +590,10 @@ analyticsRouter.get('/requests', (req: Request, res: Response) => {
   const db = getDb();
 
   const total = (db.prepare(
-    'SELECT COUNT(*) as c FROM requests WHERE created_at >= ?'
+    `SELECT COUNT(*) as c
+       FROM requests
+      WHERE created_at >= ?
+        AND (request_type IS NULL OR request_type != 'probe')`
   ).get(since) as { c: number }).c;
 
   const rows = db.prepare(`
@@ -600,6 +603,7 @@ analyticsRouter.get('/requests', (req: Request, res: Response) => {
            strftime('%Y-%m-%dT%H:%M:%SZ', created_at) as created_at_iso
     FROM requests
     WHERE created_at >= ?
+      AND (request_type IS NULL OR request_type != 'probe')
     ORDER BY created_at DESC, id DESC
     LIMIT ? OFFSET ?
   `).all(since, limit, offset) as any[];
