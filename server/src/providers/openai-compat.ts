@@ -131,7 +131,7 @@ export class OpenAICompatProvider extends BaseProvider {
         parallel_tool_calls: this.resolveParallelToolCalls(options),
         ...extendedBodyParams(this.platform, options),
       }),
-    }, options?.timeoutMs ?? this.timeoutMs);
+    }, options?.timeoutMs ?? this.timeoutMs, options?.signal);
 
     recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
@@ -244,7 +244,7 @@ export class OpenAICompatProvider extends BaseProvider {
         ...extendedBodyParams(this.platform, options),
         stream: true,
       }),
-    }, options?.timeoutMs ?? this.timeoutMs);
+    }, options?.timeoutMs ?? this.timeoutMs, options?.signal);
 
     recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
@@ -269,7 +269,7 @@ export class OpenAICompatProvider extends BaseProvider {
       throw providerHttpError(res, `${this.name} API error ${res.status}: ${(err as any).error?.message ?? res.statusText}`);
     }
 
-    yield* this.readSseStream(res);
+    yield* this.readSseStream(res, 90000, options?.signal);
   }
 
   async validateKey(apiKey: string, quotaContext?: QuotaObservationContext): Promise<boolean> {

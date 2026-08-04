@@ -513,7 +513,7 @@ export class GoogleProvider extends BaseProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    }, options?.timeoutMs ?? this.timeoutMs);
+    }, options?.timeoutMs ?? this.timeoutMs, options?.signal);
 
     recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
@@ -589,7 +589,7 @@ export class GoogleProvider extends BaseProvider {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    }, options?.timeoutMs ?? this.timeoutMs);
+    }, options?.timeoutMs ?? this.timeoutMs, options?.signal);
 
     recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
@@ -618,7 +618,7 @@ export class GoogleProvider extends BaseProvider {
 
     try {
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await this.readOrAbort(reader, options?.signal);
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });

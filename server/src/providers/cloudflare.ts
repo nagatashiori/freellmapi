@@ -65,7 +65,7 @@ export class CloudflareProvider extends BaseProvider {
         parallel_tool_calls: options?.parallel_tool_calls,
         ...extendedBodyParams(this.platform, options),
       }),
-    }, options?.timeoutMs ?? CHAT_TIMEOUT_MS);
+    }, options?.timeoutMs ?? CHAT_TIMEOUT_MS, options?.signal);
     recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
@@ -114,7 +114,7 @@ export class CloudflareProvider extends BaseProvider {
         ...extendedBodyParams(this.platform, options),
         stream: true,
       }),
-    }, options?.timeoutMs ?? CHAT_TIMEOUT_MS);
+    }, options?.timeoutMs ?? CHAT_TIMEOUT_MS, options?.signal);
     recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
@@ -129,7 +129,7 @@ export class CloudflareProvider extends BaseProvider {
       throw providerHttpError(res, `Cloudflare API error ${res.status}: ${(err as any).error?.message ?? (err as any).errors?.[0]?.message ?? res.statusText}`);
     }
 
-    yield* this.readSseStream(res);
+    yield* this.readSseStream(res, 90000, options?.signal);
   }
 
   async validateKey(apiKey: string, quotaContext?: QuotaObservationContext): Promise<boolean> {

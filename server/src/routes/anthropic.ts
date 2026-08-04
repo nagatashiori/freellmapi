@@ -488,15 +488,17 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
   const state = newFallbackState();
   const attemptLog: AttemptRecord[] = [];
   let clientGone = false;
-  res.on('close', () => { if (!res.writableEnded) clientGone = true; });
+  const clientAbort = new AbortController();
+  res.on('close', () => { if (!res.writableEnded) { clientGone = true; clientAbort.abort(); } });
 
   await runFallbackLoop({
     maxRetries: MAX_RETRIES,
     state,
     attemptLog,
     clientGone: () => clientGone,
+    clientAbort: clientAbort.signal,
     route: () => routeRequest(estimatedTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, routePreferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain ?? profileChain),
-    dispatch: async (route, attempt) => {
+    dispatch: async (route, attempt, ctx) => {
       traceRouteEvent('Anthropic', {
         event: attempt === 0 ? 'start' : 'next',
         requestId: requestGroupId,
@@ -507,7 +509,7 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
       });
       if (stream) {
         try {
-          await streamCompletion(res, route, messages, completionOptions, {
+          await streamCompletion(res, route, messages, { ...completionOptions, signal: ctx.signal }, {
             start, attempt, attemptLog, clientGone: () => clientGone, requestedModel, estimatedInputTokens, tools, pinnedModelId,
             sessionId, pinned: resolved.pinned,
           });
@@ -524,7 +526,7 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
         }
       }
 
-      const result = await route.provider.chatCompletion(route.apiKey, messages, route.modelId, completionOptions);
+      const result = await route.provider.chatCompletion(route.apiKey, messages, route.modelId, { ...completionOptions, signal: ctx.signal });
       const respMsg = result.choices?.[0]?.message;
       const respText = contentToString(respMsg?.content ?? '');
       let respToolCalls = respMsg?.tool_calls ?? [];

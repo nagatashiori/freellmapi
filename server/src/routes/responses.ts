@@ -458,7 +458,8 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
   const state = newFallbackState();
   const attemptLog: AttemptRecord[] = [];
   let clientGone = false;
-  res.on('close', () => { if (!res.writableEnded) clientGone = true; });
+  const clientAbort = new AbortController();
+  res.on('close', () => { if (!res.writableEnded) { clientGone = true; clientAbort.abort(); } });
 
   // Stream bookkeeping (used only when stream === true). `streamStarted` is the
   // commit flag: true once the response.created/in_progress skeleton has left,
@@ -477,8 +478,9 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
     state,
     attemptLog,
     clientGone: () => clientGone,
+    clientAbort: clientAbort.signal,
     route: () => routeRequest(estimatedTotal, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, false, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain, completionOpts.response_format !== undefined),
-    dispatch: async (route, attempt) => {
+    dispatch: async (route, attempt, ctx) => {
       traceRouteEvent('Responses', {
         event: attempt === 0 ? 'start' : 'next',
         requestId: requestGroupId,
@@ -548,7 +550,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
             route.apiKey,
             messages,
             route.modelId,
-            completionOpts,
+            { ...completionOpts, signal: ctx.signal },
             quotaContextForRoute(route, 'responses'),
           );
 
@@ -756,7 +758,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
         route.apiKey,
         messages,
         route.modelId,
-        completionOpts,
+        { ...completionOpts, signal: ctx.signal },
         quotaContextForRoute(route, 'responses'),
       );
 

@@ -402,6 +402,31 @@ export function exhaustedRetryError(lastError: any, maxRetries?: number, ctx?: E
 //                 possible, so stop without recording another retry.
 export type DispatchOutcome = 'done' | 'committed';
 
+// Which deadline aborted a per-attempt AbortController. Decides how the loop
+// classifies the resulting failure:
+//   'timeout' — the per-attempt single-hop timeout elapsed with budget left;
+//               a retryable provider failure, the next candidate gets the shot.
+//   'budget'  — the WALL-CLOCK budget ran out mid-attempt; stop the chain and
+//               render the timedOut exhaustion, not a provider failure.
+//   'client'  — the client disconnected; stop without benching the provider.
+export type AttemptAbortCause = 'budget' | 'client' | 'timeout';
+
+// Per-attempt context handed to dispatch so the surface can wire the loop's
+// deadline into the provider call (CompletionOptions.signal) and know how much
+// wall-clock budget this hop is allowed to spend.
+export interface AttemptContext {
+  /** Aborts when this attempt must stop: the per-attempt deadline (single-hop
+   *  timeout OR the remaining wall-clock budget, whichever is smaller) elapsed,
+   *  or the client disconnected. Adapters pass this into the provider options
+   *  so the upstream fetch is actually cancelled. */
+  signal: AbortSignal;
+  /** The single-hop per-attempt HTTP timeout in ms (options.timeoutMs). */
+  timeoutMs: number;
+  /** Wall-clock budget remaining when this attempt started; Infinity when the
+   *  total budget is disabled (timeBudgetMs 0). */
+  remainingBudgetMs: number;
+}
+
 // Per-request exhaustion metadata handed to the exhaustion hooks, so each
 // surface can stamp X-Fallback-Attempts on error responses (previously
 // success-only) without re-deriving the count.
@@ -416,6 +441,10 @@ export interface FallbackHooks {
   // Wall-clock retry budget override, mostly for tests. Defaults to
   // getFallbackTimeBudgetMs() (setting → env → 45s; 0 disables).
   timeBudgetMs?: number;
+  // Single-hop per-attempt timeout override, mostly for tests. Defaults to
+  // getFallbackAttemptTimeoutMs() (setting → env → 30s). The effective deadline
+  // for each attempt is min(this, remaining budget).
+  attemptTimeoutMs?: number;
   // Circuit-breaker threshold override, mostly for tests. Defaults to
   // getMaxConsecutiveUpstreamFails() (setting → env → 0 = disabled).
   breakerLimit?: number;
@@ -424,11 +453,15 @@ export interface FallbackHooks {
   // X-Fallback-Trail on successful responses too.
   attemptLog?: AttemptRecord[];
   // Returns true once the client has hung up. Checked before STARTING each
-  // retry: a chain nobody is waiting for must not keep burning provider
-  // quota. The in-flight attempt still completes (same boundary as the
-  // wall-clock budget); stream pumps additionally stop reading upstream on
-  // disconnect, which cancels the upstream request via reader.cancel().
+  // retry and after a failed attempt: a chain nobody is waiting for must not
+  // keep burning provider quota.
   clientGone?: () => boolean;
+  // An external signal that aborts the CURRENT in-flight attempt the moment the
+  // client hangs up. The routes wire this to res 'close' (guarded by
+  // !writableEnded), so an uncommitted request stops promptly instead of
+  // completing into a dead socket. Stop is not a provider failure: no cooldown,
+  // no penalty, no exhaustion render.
+  clientAbort?: AbortSignal;
   // Skip state; recordRetryableFailure / recordAuthFailure (called by the loop)
   // mutate it, and the surface's route() reads it to exclude failed keys/models.
   state: FallbackState;
@@ -451,7 +484,7 @@ export interface FallbackHooks {
    * this contract: any other return value is a programming error and fails
    * loudly instead of silently swallowing the request.
    */
-  dispatch(route: RouteResult, attempt: number): Promise<DispatchOutcome>;
+  dispatch(route: RouteResult, attempt: number, ctx: AttemptContext): Promise<DispatchOutcome>;
 
   /** Trace + log a per-attempt failure (per-surface scope + logRequest args). */
   logFailure(route: RouteResult, err: any, attempt: number): void;
@@ -482,6 +515,7 @@ export interface FallbackHooks {
 export async function runFallbackLoop(hooks: FallbackHooks): Promise<void> {
   const maxRetries = hooks.maxRetries ?? FALLBACK_MAX_RETRIES;
   const budgetMs = hooks.timeBudgetMs ?? getFallbackTimeBudgetMs();
+  const attemptTimeoutMs = hooks.attemptTimeoutMs ?? getFallbackAttemptTimeoutMs();
   const startedAt = Date.now();
   const attempts: AttemptRecord[] = hooks.attemptLog ?? [];
   const keyOrdinals = new Map<string, number>();
@@ -529,8 +563,10 @@ export async function runFallbackLoop(hooks: FallbackHooks): Promise<void> {
     }
 
     // Wall-clock budget: refuse to START another retry once spent. The first
-    // attempt always runs; a slow attempt is never aborted mid-flight (that is
-    // the TODO(fallback-v2) hedging work), it just becomes the last one.
+    // attempt always runs. A slow attempt is NOT merely the last one anymore —
+    // the per-attempt controller below aborts it the moment the remaining
+    // budget runs out mid-flight, so the budget is a hard ceiling on the whole
+    // chain, not just a "don't start attempt N" gate.
     if (attempt > 0 && budgetMs > 0 && Date.now() - startedAt >= budgetMs) {
       hooks.onExhausted(
         exhaustedRetryError(lastError, maxRetries, { attempts, timedOut: true, budgetMs }),
@@ -550,10 +586,69 @@ export async function runFallbackLoop(hooks: FallbackHooks): Promise<void> {
       return;
     }
 
+    // ── Per-attempt deadline ──
+    // One AbortController per attempt. Its effective deadline is
+    // min(single-hop attempt timeout, remaining wall-clock budget), so a slow
+    // provider is cut off the instant the budget runs out instead of merely
+    // being the last attempt to start. A client disconnect (clientAbort) also
+    // aborts it, so an uncommitted request stops promptly instead of completing
+    // into a dead socket. The CAUSE that fired decides the classification
+    // below: 'timeout' is a retryable provider failure, 'budget' is a timedOut
+    // exhaustion, 'client' is a no-fault stop.
+    let abortCause: AttemptAbortCause | undefined;
+    const controller = new AbortController();
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    if (budgetMs > 0) {
+      // The remaining budget can already be spent by the time routing hands us
+      // a route (DB lookups take ms). Floor the budget deadline at 1ms so the
+      // attempt is still cut off promptly instead of running with no deadline
+      // at all. attemptTimeoutMs 0 means "single-hop timeout disabled" — then
+      // only the (floored) budget deadline applies.
+      const remaining = startedAt + budgetMs - Date.now();
+      const budgetDeadline = Math.max(remaining, 1);
+      const effective = attemptTimeoutMs > 0 ? Math.min(attemptTimeoutMs, budgetDeadline) : budgetDeadline;
+      timeoutTimer = setTimeout(() => {
+        abortCause = Date.now() - startedAt >= budgetMs ? 'budget' : 'timeout';
+        controller.abort();
+      }, effective);
+    }
+    const onClientAbort = () => {
+      abortCause = 'client';
+      controller.abort();
+    };
+    if (hooks.clientAbort?.aborted) onClientAbort();
+    hooks.clientAbort?.addEventListener('abort', onClientAbort, { once: true });
+
     let outcome: DispatchOutcome;
     try {
-      outcome = await hooks.dispatch(route, attempt);
+      outcome = await hooks.dispatch(route, attempt, {
+        signal: controller.signal,
+        timeoutMs: attemptTimeoutMs,
+        remainingBudgetMs: budgetMs > 0 ? Math.max(0, startedAt + budgetMs - Date.now()) : Infinity,
+      });
     } catch (err: any) {
+      // Client disconnect cut the attempt short (via clientAbort or the flag):
+      // stop without benching the provider, penalizing the model, or rendering
+      // exhaustion — the socket is gone. A failure that merely HAPPENED at the
+      // same moment as the disconnect is not a provider-health signal.
+      if (abortCause === 'client' || hooks.clientGone?.()) {
+        console.log(`[FallbackLoop] client disconnected — dropping attempt without benching (${attempts.length} failed attempt(s))`);
+        return;
+      }
+      // Wall-clock budget ran out MID-attempt: stop the chain and render the
+      // shared timedOut exhaustion. Not a retryable provider failure — the next
+      // candidate would only burn more budget — and not a provider-health
+      // signal, so no cooldown/penalty. The cut-off attempt still enters the
+      // trail so the exhaustion body says what was tried.
+      if (abortCause === 'budget') {
+        attempts.push({ platform: route.platform, modelId: route.modelId, keyOrdinal: keyOrdinal(route), errorClass: classifyAttemptError(err) });
+        lastError = err;
+        hooks.onExhausted(
+          exhaustedRetryError(lastError, maxRetries, { attempts, timedOut: true, budgetMs }),
+          { attempts, timedOut: true },
+        );
+        return;
+      }
       hooks.logFailure(route, err, attempt);
       if (isKeyAuthError(err)) {
         // KEY-fatal, not request-fatal: rotate past the bad key and revalidate
@@ -579,6 +674,9 @@ export async function runFallbackLoop(hooks: FallbackHooks): Promise<void> {
       }
       hooks.onFatal(route, err, attempt);
       return;
+    } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      hooks.clientAbort?.removeEventListener('abort', onClientAbort);
     }
 
     // Enforce the dispatch contract: 'done'/'committed' mean the response is

@@ -137,7 +137,7 @@ export class AIHordeProvider extends BaseProvider {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(this.buildBody(messages, modelId, options)),
-    }, options?.timeoutMs ?? HORDE_TIMEOUT_MS);
+    }, options?.timeoutMs ?? HORDE_TIMEOUT_MS, options?.signal);
 
     recordQuotaObservationsFromResponse(res, {
       platform: this.platform,

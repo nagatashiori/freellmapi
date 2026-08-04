@@ -68,7 +68,7 @@ export class CohereProvider extends BaseProvider {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
-    }, options?.timeoutMs);
+    }, options?.timeoutMs, options?.signal);
     recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
@@ -115,7 +115,7 @@ export class CohereProvider extends BaseProvider {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
-    }, options?.timeoutMs);
+    }, options?.timeoutMs, options?.signal);
     recordQuotaObservationsFromResponse(res, {
       platform: this.platform,
       keyId: quotaContext?.keyId,
@@ -130,7 +130,7 @@ export class CohereProvider extends BaseProvider {
       throw providerHttpError(res, `Cohere API error ${res.status}: ${(err as any).error?.message ?? res.statusText}`);
     }
 
-    yield* this.readSseStream(res);
+    yield* this.readSseStream(res, 90000, options?.signal);
   }
 
   async validateKey(apiKey: string, quotaContext?: QuotaObservationContext): Promise<boolean> {

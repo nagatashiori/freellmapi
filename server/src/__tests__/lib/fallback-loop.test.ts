@@ -517,3 +517,116 @@ describe('runFallbackLoop: client disconnect + attempt log', () => {
     expect(attemptLog[0].errorClass).toBe('rate_limited');
   });
 });
+
+describe('runFallbackLoop: per-attempt abort signal + budget deadline', () => {
+  const retryable = () => Object.assign(new Error('429 Too Many Requests'), { status: 429 });
+
+  it('gives a second attempt only the remaining budget, not a fresh full budget', async () => {
+    const remaining: number[] = [];
+    const dispatch = vi.fn(async (_r: any, _a: number, ctx: any) => {
+      remaining.push(ctx.remainingBudgetMs);
+      await new Promise(r => setTimeout(r, 25)); // attempt 1 consumes ~half of a 50ms budget
+      throw retryable();
+    });
+    const onExhausted = vi.fn();
+
+    await runFallbackLoop(hooksSkeleton({ timeBudgetMs: 50, maxRetries: 3, dispatch, onExhausted }));
+
+    expect(dispatch).toHaveBeenCalledTimes(2);   // attempt 2 still starts on the leftover budget
+    expect(remaining[0]).toBeGreaterThan(45);    // first attempt sees ~the full budget
+    expect(remaining[1]).toBeLessThan(remaining[0]); // second attempt sees only the remainder
+    expect(remaining[1]).toBeGreaterThan(0);     // ...and it did get a real shot at what was left
+    expect(onExhausted.mock.calls[0][1].timedOut).toBe(true);
+  });
+
+  it('aborts an attempt still awaiting response headers once the budget is spent', async () => {
+    let signal: AbortSignal | null = null;
+    const dispatch = vi.fn(async (_r: any, _a: number, ctx: any) => {
+      signal = ctx.signal;
+      await new Promise((_, reject) => {
+        ctx.signal.addEventListener('abort', () => reject(new DOMException('The operation was aborted', 'AbortError')), { once: true });
+      });
+      throw retryable(); // unreachable — the budget abort fires first
+    });
+    const onExhausted = vi.fn();
+
+    await runFallbackLoop(hooksSkeleton({ timeBudgetMs: 30, maxRetries: 3, dispatch, onExhausted }));
+
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(onExhausted).toHaveBeenCalledTimes(1); // budget abort → timedOut exhaustion, NOT a retry
+    expect(onExhausted.mock.calls[0][1].timedOut).toBe(true);
+    expect(onExhausted.mock.calls[0][0].message).toContain('retry time budget');
+  });
+
+  it('timeBudgetMs 0 keeps the old semantics: no budget abort, single-hop timeouts only', async () => {
+    let calls = 0;
+    const signals: AbortSignal[] = [];
+    const dispatch = vi.fn(async (_r: any, _a: number, ctx: any) => {
+      signals.push(ctx.signal);
+      calls += 1;
+      await new Promise(r => setTimeout(r, 5));
+      if (calls <= 2) throw retryable();
+      return 'done' as const;
+    });
+    const onExhausted = vi.fn();
+
+    await runFallbackLoop(hooksSkeleton({ timeBudgetMs: 0, maxRetries: 3, dispatch, onExhausted }));
+
+    expect(calls).toBe(3);
+    expect(signals.every(s => !s.aborted)).toBe(true); // no budget timer ever fired
+    expect(onExhausted).not.toHaveBeenCalled();
+  });
+
+  it('client disconnect aborts the in-flight attempt without benching or penalizing', async () => {
+    const clientAbort = new AbortController();
+    let usedRoute: RouteResult | null = null;
+    const dispatch = vi.fn(async (route: RouteResult, _a: number, ctx: any) => {
+      usedRoute = route;
+      await new Promise((_, reject) => {
+        ctx.signal.addEventListener('abort', () => reject(new DOMException('The operation was aborted', 'AbortError')), { once: true });
+      });
+      return 'done'; // unreachable
+    });
+    const onExhausted = vi.fn();
+    setTimeout(() => clientAbort.abort(), 10);
+
+    await runFallbackLoop(hooksSkeleton({
+      timeBudgetMs: 0,
+      maxRetries: 3,
+      clientAbort: clientAbort.signal,
+      dispatch,
+      onExhausted,
+    }));
+
+    expect(dispatch).toHaveBeenCalledTimes(1);   // aborted before any retry
+    expect(onExhausted).not.toHaveBeenCalled();  // dead socket: nothing to render
+    const cooldown = getDb().prepare('SELECT 1 FROM rate_limit_cooldowns WHERE key_id = ?').get(usedRoute!.keyId);
+    expect(cooldown).toBeUndefined();            // no bench for the disconnected provider
+    expect(getAllPenalties().some(p => p.modelDbId === usedRoute!.modelDbId)).toBe(false);
+  });
+
+  it('a single-hop timeout abort is a retryable timeout and tries the next candidate', async () => {
+    const attemptLog: AttemptRecord[] = [];
+    const dispatch = vi.fn(async (_r: any, _a: number, ctx: any) => {
+      await new Promise((_, reject) => {
+        ctx.signal.addEventListener('abort', () => reject(new DOMException('The operation was aborted (fake, chat, 1s)', 'AbortError')), { once: true });
+      });
+      return 'done'; // unreachable — the 20ms per-attempt timeout aborts first
+    });
+    const onExhausted = vi.fn();
+
+    await runFallbackLoop(hooksSkeleton({
+      timeBudgetMs: 1000,
+      attemptTimeoutMs: 20,
+      maxRetries: 2,
+      attemptLog,
+      dispatch,
+      onExhausted,
+    }));
+
+    expect(dispatch).toHaveBeenCalledTimes(2);       // failed over to candidate 2
+    expect(attemptLog[0].errorClass).toBe('timeout');
+    expect(onExhausted).toHaveBeenCalledTimes(1);
+    expect(onExhausted.mock.calls[0][1].timedOut).toBe(false); // budget had room; ordinary exhaustion
+  });
+});

@@ -755,7 +755,8 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
   const state = newFallbackState();
   const attemptLog: AttemptRecord[] = [];
   let clientGone = false;
-  res.on('close', () => { if (!res.writableEnded) clientGone = true; });
+  const clientAbort = new AbortController();
+  res.on('close', () => { if (!res.writableEnded) { clientGone = true; clientAbort.abort(); } });
 
   // Legacy /completions is a thin adapter over the shared fallback loop
   // (lib/fallback-loop.ts): the cooldown/skip/penalty/exhaustion machinery is
@@ -765,6 +766,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
     state,
     attemptLog,
     clientGone: () => clientGone,
+    clientAbort: clientAbort.signal,
     route: () => routeRequest(
       estimatedTotal,
       state.skipKeys.size > 0 ? state.skipKeys : undefined,
@@ -774,7 +776,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
       state.skipModels.size > 0 ? state.skipModels : undefined,
       groupChain ?? resolvedChain?.chain,
     ),
-    dispatch: async (route, attempt) => {
+    dispatch: async (route, attempt, ctx) => {
       traceRouteEvent('Proxy', {
         event: attempt === 0 ? 'start' : 'next',
         requestId: requestGroupId,
@@ -810,7 +812,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
             route.apiKey,
             messages,
             route.modelId,
-            { temperature, max_tokens, top_p, stop, timeoutMs: attemptTimeoutMs },
+            { temperature, max_tokens, top_p, stop, timeoutMs: attemptTimeoutMs, signal: ctx.signal },
             quotaContextForRoute(route, 'chat/completions'),
           );
 
@@ -895,7 +897,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
         route.apiKey,
         messages,
         route.modelId,
-        { temperature, max_tokens, top_p, stop, timeoutMs: attemptTimeoutMs },
+        { temperature, max_tokens, top_p, stop, timeoutMs: attemptTimeoutMs, signal: ctx.signal },
         quotaContextForRoute(route, 'chat/completions'),
       );
 
@@ -1473,13 +1475,15 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   const state = newFallbackState();
   const attemptLog: AttemptRecord[] = [];
   let clientGone = false;
-  res.on('close', () => { if (!res.writableEnded) clientGone = true; });
+  const clientAbort = new AbortController();
+  res.on('close', () => { if (!res.writableEnded) { clientGone = true; clientAbort.abort(); } });
 
   await runFallbackLoop({
     maxRetries: MAX_RETRIES,
     state,
     attemptLog,
     clientGone: () => clientGone,
+    clientAbort: clientAbort.signal,
     route: () => {
       // When a handoff could fire this turn, pad the token estimate so the router's
       // context-window and TPM checks account for the extra system message overhead.
@@ -1490,7 +1494,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       const routingEstimate = handoffPossible ? estimatedTotal + HANDOFF_MAX_TOKENS : estimatedTotal;
       return routeRequest(routingEstimate, state.skipKeys.size > 0 ? state.skipKeys : undefined, preferredModel, hasImage, wantsTools, state.skipModels.size > 0 ? state.skipModels : undefined, groupChain ?? resolvedChain?.chain, samplingParams.response_format !== undefined);
     },
-    dispatch: async (route, attempt) => {
+    dispatch: async (route, attempt, ctx) => {
     const modelKey = `${route.platform}:${route.modelId}`;
     traceRouteEvent('Proxy', {
       event: attempt === 0 ? 'start' : 'next',
@@ -1569,7 +1573,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         try {
           const gen = route.provider.streamChatCompletion(
             route.apiKey, outboundMessages, route.modelId,
-            { temperature, max_tokens, top_p, stop, tools, tool_choice, parallel_tool_calls, timeoutMs: attemptTimeoutMs, ...samplingParams },
+            { temperature, max_tokens, top_p, stop, tools, tool_choice, parallel_tool_calls, timeoutMs: attemptTimeoutMs, signal: ctx.signal, ...samplingParams },
             quotaContextForRoute(route, 'chat/completions'),
           );
 
@@ -1783,7 +1787,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       } else {
         const result = await route.provider.chatCompletion(
           route.apiKey, outboundMessages, route.modelId,
-          { temperature, max_tokens, top_p, stop, tools, tool_choice, parallel_tool_calls, ...samplingParams, timeoutMs: attemptTimeoutMs },
+          { temperature, max_tokens, top_p, stop, tools, tool_choice, parallel_tool_calls, ...samplingParams, timeoutMs: attemptTimeoutMs, signal: ctx.signal },
           quotaContextForRoute(route, 'chat/completions'),
         );
 

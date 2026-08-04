@@ -62,6 +62,13 @@ export interface CompletionOptions extends ExtendedSamplingOptions {
    * stripped before the request body is built); used by the probe script so
    * NVIDIA's 15-60s serverless cold starts don't read as failures. */
   timeoutMs?: number;
+  /** External abort signal that cancels this request when it fires. The fallback
+   * loop passes the per-attempt deadline (single-hop timeout OR remaining
+   * budget) here, plus the client-disconnect signal, so a provider request
+   * actually stops instead of only being "the last attempt". Merged with the
+   * internal per-call timeout in fetchWithTimeout; either one aborting cancels
+   * the fetch. */
+  signal?: AbortSignal;
 }
 
 export abstract class BaseProvider {
@@ -103,16 +110,45 @@ export abstract class BaseProvider {
     url: string,
     init: RequestInit,
     timeoutMs = 15000,
+    externalSignal?: AbortSignal,
   ): Promise<Response> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    // Merge the external signal (per-attempt deadline from the fallback loop,
+    // or a client disconnect) with the internal timer: whichever fires first
+    // aborts the request. Both listeners are cleaned up in finally so no timer
+    // or listener leaks past the request.
+    const onExternalAbort = () => controller.abort();
+    if (externalSignal?.aborted) controller.abort();
+    externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
     try {
       // requestType='chat' + timeoutMs makes the AbortError message read
       // `<platform>, chat, 15s` for triage from the requests.error column.
       return await proxyFetch(url, { ...init, signal: controller.signal }, this.platform, 'chat', timeoutMs);
     } finally {
       clearTimeout(timeout);
+      externalSignal?.removeEventListener('abort', onExternalAbort);
     }
+  }
+
+  /** Race a ReadableStream read against an external abort signal. Lets a stream
+   *  pump (readSseStream, the Google adapter's own reader) stop promptly when
+   *  the fallback loop's budget/deadline or a client disconnect fires, instead
+   *  of blocking on the next upstream byte that may never come. */
+  protected async readOrAbort(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    signal?: AbortSignal,
+  ): Promise<{ done: boolean; value?: Uint8Array }> {
+    if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError');
+    if (!signal) return reader.read();
+    let listener: (() => void) | undefined;
+    const abort = new Promise<never>((_, reject) => {
+      listener = () => reject(new DOMException('The operation was aborted', 'AbortError'));
+      signal.addEventListener('abort', listener, { once: true });
+    });
+    return Promise.race([reader.read(), abort]).finally(() => {
+      if (listener) signal.removeEventListener('abort', listener);
+    });
   }
 
   protected makeId(): string {
@@ -138,6 +174,7 @@ export abstract class BaseProvider {
   protected async *readSseStream(
     res: Response,
     inactivityTimeoutMs = 90000,
+    signal?: AbortSignal,
   ): AsyncGenerator<ChatCompletionChunk> {
     const reader = res.body?.getReader();
     if (!reader) throw new Error('No response body');
@@ -150,7 +187,7 @@ export abstract class BaseProvider {
       while (true) {
         let timer: ReturnType<typeof setTimeout> | undefined;
         const result = await Promise.race([
-          reader.read(),
+          this.readOrAbort(reader, signal),
           new Promise<never>((_, reject) => {
             timer = setTimeout(
               () => reject(new Error(`${this.name} stream stalled: no data for ${inactivityTimeoutMs}ms (timeout)`)),
