@@ -1,20 +1,20 @@
 # HANDOVER — 2026-08-05
 
-## 当前任务卡：供应商模型管理统一勾选流程（v13.14）
+## 当前任务卡：模型目录更新后的全页面刷新（v13.15）
 
 ### 目标与用户可见结果
 
 - 供应商模型管理只保留一条流程：选择供应商 → 点击“拉取模型”。
 - 数据库已有模型自动打勾；勾选立即添加，取消勾选立即删除本地记录。
-- 远端没有返回的本地模型仍显示为已勾选，用户可明确取消后删除。
-- 远端失败、空列表或认证异常只显示提示，不自动删除或禁用任何本地模型。
+- 更新后同时刷新模型页、默认路由表、其他路由组、模型状态和探测历史视图，避免页面继续显示旧缓存。
+- 远端没有返回的本地模型仍显示为已勾选，用户可明确取消后删除；远端异常不自动删除本地模型。
 
 ### 当前状态
 
-- source `local/freellmapi-ops`：`a953c08`，已 push，标签 `v13.14` 已 push。
-- VPS `/home/debian/freellmapi` 已更新到 `a953c08`。
+- source `local/freellmapi-ops`：`9cd0dc1`，已 push，标签 `v13.15` 已 push。
+- VPS `/home/debian/freellmapi` 已更新到 `9cd0dc1`；本轮只更新前端，运行容器保持 healthy。
 - `freellmapi-freellmapi-1` 已重建并 healthy；内部与公网 `/api/ping` 均 200。
-- 前端已重新构建并上传；公网入口使用 `assets/index-D23g9hAn.js`，包含 `v13.14`，旧 `v13.13` 入口不再使用。
+- 前端已重新构建并原地成套替换；公网入口使用 `assets/index-DobtWmCQ.js`，包含 `v13.15`，旧 `v13.14` 入口不再使用。
 
 ### 修改文件
 
@@ -23,31 +23,39 @@
 - `server/src/routes/provider-model-catalog.ts`：增加 `/sync` 清单接口；保留旧接口兼容其他调用者。
 - `client/src/features/provider-model-catalog/ProviderModelCatalogPanel.tsx`：删除两个模式、批量选择和分开的添加/删除按钮，改为一个拉取按钮和逐行勾选。
 - `server/src/__tests__/services/provider-model-catalog.test.ts`：新增合并清单、远端失败保留本地记录测试。
+- `client/src/features/provider-model-catalog/cache-keys.ts`：集中声明模型目录变更需要刷新的所有页面缓存。
+- `client/src/features/provider-model-catalog/cache-keys.test.ts`：锁定模型、路由、路由组、状态和探测历史都必须刷新。
+- `client/src/pages/StatusPage.tsx`：更新页面说明，明确拉取后会同步相关视图。
 
 ### 保护边界
 
 - 没有修改 `profile_models.priority`、`enabled`、`intelligence_rank` 或生产业务数据。
 - 没有运行 ranking、recalibrate、sort。
 - 取消勾选仍通过后端显式删除接口执行，并写入既有 tombstone 规则。
+- 不自动重排 `profile_models.priority`；模型目录更新不会替用户改变人工路由顺序。
 
 ### fresh 验证
 
 - 供应商目录服务测试：10/10 通过。
+- 前端缓存刷新测试：1/1 通过（先失败后通过）。
 - server TypeScript 检查：通过。
 - server build：通过。
 - client build：通过；公网 bundle 已确认新界面文案存在，旧“发现并新增”模式不存在。
 - `git diff --check`：通过。
+- 生产只读核对：`models=278`、Default `profile_models=278`、活动 profile 为 Default、策略为 `priority`；默认路由数据与模型数据库一致。
+- 公网核对：入口 200、`Cache-Control: public, max-age=0`、HSTS 存在；新 bundle 含 `profile-models` 和 `probe-history` 刷新逻辑。
 - server 全量测试已运行；本地环境有 3 个与本次改动无关的既有/环境失败：公网离线保护测试收到真实 403、keys 测试超时、completions 测试遇到 undici bad port。不能将其记为全量通过。
 
 ### 部署备份
 
 - `/home/debian/freellmapi/deploy-backups/provider-model-catalog-v13.14-20260804_202554/`：数据库和旧前端目录。
 - `/home/debian/freellmapi/deploy-backups/frontend-v13.14-20260804_203435/`：替换前的前端目录。
+- `/home/debian/freellmapi/deploy-backups/model-view-refresh-v13.15-20260804_211227/`：本轮数据库和前端目录备份。
 - 未删除 VPS 原有未跟踪备份目录或 compose 本地改动。
 
 ### 唯一下一步
 
-- 用户在生产页面 Ctrl+F5，打开“供应商模型管理”，点击“拉取模型”，确认已有模型自动打勾；取消一个勾选确认本地记录删除，再重新勾选确认可以添加回来。
+- 用户在生产页面 Ctrl+F5，打开“供应商模型管理”重新拉取；对标记“本地已有，远端未返回”的旧模型取消勾选。随后打开模型页、路由表和模型状态页，确认三处都不再显示该模型。
 
 ---
 
