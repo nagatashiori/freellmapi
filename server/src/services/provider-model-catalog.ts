@@ -18,9 +18,11 @@ import type {
   ProviderCatalogDiscoveryResult,
   ProviderCatalogImportResult,
   ProviderCatalogLocalResult,
+  ProviderCatalogManagedModel,
   ProviderCatalogRemoveResult,
   ProviderCatalogRemoteModel,
   ProviderCatalogSource,
+  ProviderCatalogSyncResult,
 } from '@freellmapi/shared/types.js';
 import { isUserPlatform, resolveProvider } from '../providers/index.js';
 import {
@@ -496,6 +498,91 @@ function listLocal(db: Db, sourceIdOrPlatform: string): ProviderCatalogLocalResu
 }
 
 /**
+ * 返回一个供前端勾选的统一模型清单。
+ *
+ * 刷新只读取远端和本地状态；远端缺失、空列表或异常都不会触碰数据库。
+ * 本地已有但远端这次没有返回的模型仍保留在清单中，用户可以明确取消勾选后删除。
+ */
+async function sync(
+  db: Db,
+  sourceIdOrPlatform: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<ProviderCatalogSyncResult> {
+  const local = listLocal(db, sourceIdOrPlatform);
+
+  let discovery: ProviderCatalogDiscoveryResult;
+  try {
+    discovery = await discoverRemote(db, sourceIdOrPlatform, fetchImpl);
+  } catch (error) {
+    if (!(error instanceof ProviderModelCatalogError)) throw error;
+
+    const localModels: ProviderCatalogManagedModel[] = local.models.map(model => ({
+      id: model.id,
+      name: model.name,
+      alreadyRegistered: true,
+      existsOtherSource: false,
+      remotePresent: false,
+      localEnabled: model.localEnabled,
+      routingEnabled: model.routingEnabled,
+      catalogManaged: model.catalogManaged,
+    }));
+    return {
+      sourceId: local.sourceId,
+      platform: local.platform,
+      listUrl: null,
+      remoteTotal: 0,
+      localTotal: local.total,
+      remoteState: 'error',
+      warning: `远端模型拉取失败：${error.message}；本地记录已保留。`,
+      models: localModels,
+    };
+  }
+
+  const localById = new Map(local.models.map(model => [model.id, model]));
+  const remoteIds = new Set(discovery.models.map(model => model.id));
+  const models: ProviderCatalogManagedModel[] = discovery.models.map(model => {
+    const localModel = localById.get(model.id);
+    return {
+      ...model,
+      remotePresent: true,
+      ...(localModel
+        ? {
+            localEnabled: localModel.localEnabled,
+            routingEnabled: localModel.routingEnabled,
+            catalogManaged: localModel.catalogManaged,
+          }
+        : {}),
+    };
+  });
+
+  for (const localModel of local.models) {
+    if (remoteIds.has(localModel.id)) continue;
+    models.push({
+      id: localModel.id,
+      name: localModel.name,
+      alreadyRegistered: true,
+      existsOtherSource: false,
+      remotePresent: false,
+      localEnabled: localModel.localEnabled,
+      routingEnabled: localModel.routingEnabled,
+      catalogManaged: localModel.catalogManaged,
+    });
+  }
+  models.sort((a, b) => a.id.localeCompare(b.id));
+
+  return {
+    sourceId: discovery.sourceId,
+    platform: discovery.platform,
+    listUrl: discovery.listUrl,
+    remoteTotal: discovery.models.length,
+    localTotal: local.total,
+    remoteState: discovery.remoteState,
+    warning: discovery.warning,
+    models,
+  };
+}
+
+/**
  * 只新增不存在的模型。现有记录、元数据和优先级全部保持不变。
  */
 function importMissing(
@@ -608,6 +695,7 @@ function removeLocal(
  * - listSources: 列出来源，不解密密钥；
  * - discoverRemote: 只读远端；
  * - listLocal: 只读本地；
+ * - sync: 合并远端和本地清单，仍然只读；
  * - importMissing: 只新增；
  * - removeLocal: 显式删除本地。
  */
@@ -615,6 +703,7 @@ export const providerModelCatalog = {
   listSources,
   discoverRemote,
   listLocal,
+  sync,
   importMissing,
   removeLocal,
 } as const;

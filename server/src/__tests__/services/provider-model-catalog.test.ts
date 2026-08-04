@@ -192,4 +192,46 @@ describe('provider model catalog service', () => {
       catalogManaged: true,
     });
   });
+
+  it('returns one checked list that combines remote models with local-only records', async () => {
+    insertKey('groq', 'groq-test-key');
+    providerModelCatalog.importMissing(getDb(), 'platform:groq', ['catalog-refactor-local-only']);
+
+    const result = await providerModelCatalog.sync(getDb(), 'platform:groq', jsonFetch({
+      data: [{ id: 'catalog-refactor-remote-new' }],
+    }));
+
+    expect(result.remoteState).toBe('ok');
+    expect(result.remoteTotal).toBe(1);
+    expect(result.localTotal).toBeGreaterThanOrEqual(1);
+    expect(result.models).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'catalog-refactor-remote-new',
+        alreadyRegistered: false,
+        remotePresent: true,
+      }),
+      expect.objectContaining({
+        id: 'catalog-refactor-local-only',
+        alreadyRegistered: true,
+        remotePresent: false,
+        catalogManaged: true,
+      }),
+    ]));
+  });
+
+  it('keeps local rows visible when remote refresh fails', async () => {
+    insertKey('groq', 'groq-test-key');
+    providerModelCatalog.importMissing(getDb(), 'platform:groq', ['catalog-refactor-remote-error']);
+
+    const result = await providerModelCatalog.sync(getDb(), 'platform:groq', (async () => {
+      throw new Error('upstream unavailable');
+    }) as typeof fetch);
+
+    expect(result.remoteState).toBe('error');
+    expect(result.warning).toMatch(/本地记录已保留/);
+    expect(result.models).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'catalog-refactor-remote-error', alreadyRegistered: true, remotePresent: false }),
+    ]));
+    expect(getDb().prepare("SELECT 1 FROM models WHERE model_id = 'catalog-refactor-remote-error'").get()).toBeDefined();
+  });
 });

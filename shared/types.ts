@@ -254,6 +254,26 @@ export interface ProviderCatalogLocalResult {
   models: ProviderCatalogLocalModel[];
 }
 
+/** 供应商模型管理的统一清单；远端模型和本地孤儿记录都在这里展示。 */
+export interface ProviderCatalogManagedModel extends ProviderCatalogRemoteModel {
+  remotePresent: boolean;
+  localEnabled?: boolean;
+  routingEnabled?: boolean;
+  catalogManaged?: boolean;
+}
+
+/** POST /api/keys/model-catalog/sync；只刷新清单，不自动写入或删除数据库。 */
+export interface ProviderCatalogSyncResult {
+  sourceId: string;
+  platform: string;
+  listUrl: string | null;
+  remoteTotal: number;
+  localTotal: number;
+  remoteState: 'ok' | 'empty' | 'error';
+  warning?: string;
+  models: ProviderCatalogManagedModel[];
+}
+
 /** POST /api/keys/model-catalog/import */
 export interface ProviderCatalogImportResult {
   sourceId: string;

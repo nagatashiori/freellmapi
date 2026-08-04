@@ -123,6 +123,21 @@ providerModelCatalogRouter.post('/local', (req: Request, res: Response) => {
   }
 });
 
+/** 刷新统一清单；远端异常时仍返回本地记录，不自动增删任何模型。 */
+providerModelCatalogRouter.post('/sync', async (req: Request, res: Response) => {
+  const parsed = sourceSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: validationMessage(parsed.error) } });
+    return;
+  }
+
+  try {
+    res.json(await providerModelCatalog.sync(getDb(), sourceRef(parsed.data)));
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
 /** 只新增不存在的模型；不覆盖、删除或重排任何现有模型。 */
 providerModelCatalogRouter.post('/import', (req: Request, res: Response) => {
   const parsed = modelIdsSchema.safeParse(req.body);
