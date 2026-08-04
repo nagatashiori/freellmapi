@@ -1,20 +1,21 @@
 # HANDOVER — 2026-08-05
 
-## 当前任务卡：模型目录更新后的全页面刷新（v13.15）
+## 当前任务卡：所有模型变更统一刷新全页面（v13.16）
 
 ### 目标与用户可见结果
 
 - 供应商模型管理只保留一条流程：选择供应商 → 点击“拉取模型”。
 - 数据库已有模型自动打勾；勾选立即添加，取消勾选立即删除本地记录。
 - 更新后同时刷新模型页、默认路由表、其他路由组、模型状态和探测历史视图，避免页面继续显示旧缓存。
+- 从供应商模型、模型详情、路由表、仪表盘、密钥管理等入口修改后，其他相关页面都走同一个刷新入口。
 - 远端没有返回的本地模型仍显示为已勾选，用户可明确取消后删除；远端异常不自动删除本地模型。
 
 ### 当前状态
 
-- source `local/freellmapi-ops`：`9cd0dc1`，已 push，标签 `v13.15` 已 push。
-- VPS `/home/debian/freellmapi` 已更新到 `9cd0dc1`；本轮只更新前端，运行容器保持 healthy。
-- `freellmapi-freellmapi-1` 已重建并 healthy；内部与公网 `/api/ping` 均 200。
-- 前端已重新构建并原地成套替换；公网入口使用 `assets/index-DobtWmCQ.js`，包含 `v13.15`，旧 `v13.14` 入口不再使用。
+- source `local/freellmapi-ops`：`0bc9a6f`，已 push，标签 `v13.16` 已 push。
+- VPS `/home/debian/freellmapi` 已更新到 `0bc9a6f`；本轮只更新前端，运行容器保持 healthy，未重启服务。
+- `freellmapi-freellmapi-1` healthy；内部 `/api/ping` 200。
+- 前端已重新构建并原地成套替换；公网入口使用 `assets/index-wBNFCCWK.js`，包含 `v13.16`，旧入口不再使用。
 
 ### 修改文件
 
@@ -23,8 +24,10 @@
 - `server/src/routes/provider-model-catalog.ts`：增加 `/sync` 清单接口；保留旧接口兼容其他调用者。
 - `client/src/features/provider-model-catalog/ProviderModelCatalogPanel.tsx`：删除两个模式、批量选择和分开的添加/删除按钮，改为一个拉取按钮和逐行勾选。
 - `server/src/__tests__/services/provider-model-catalog.test.ts`：新增合并清单、远端失败保留本地记录测试。
-- `client/src/features/provider-model-catalog/cache-keys.ts`：集中声明模型目录变更需要刷新的所有页面缓存。
-- `client/src/features/provider-model-catalog/cache-keys.test.ts`：锁定模型、路由、路由组、状态和探测历史都必须刷新。
+- `client/src/lib/invalidate-model-views.ts`：集中声明并执行所有模型、路由、路由组、状态、探测历史和供应商目录缓存刷新。
+- `client/src/lib/invalidate-model-views.test.ts`：锁定共享刷新入口覆盖所有相关页面，并验证每个缓存前缀都会被刷新。
+- `client/src/pages/FallbackPage.tsx`、`DashboardPage.tsx`、`ModelDetailPage.tsx`：路由、启用、删除、策略和成员变更统一调用共享刷新入口。
+- `client/src/components/keys/*.tsx`、`StatusPage.tsx`、`use-probe.ts`、`PremiumPage.tsx`：密钥、健康探测和目录同步后也刷新对应模型视图；批量探测使用较窄的健康刷新范围，避免重复请求过多。
 - `client/src/pages/StatusPage.tsx`：更新页面说明，明确拉取后会同步相关视图。
 
 ### 保护边界
@@ -37,10 +40,9 @@
 ### fresh 验证
 
 - 供应商目录服务测试：10/10 通过。
-- 前端缓存刷新测试：1/1 通过（先失败后通过）。
-- server TypeScript 检查：通过。
-- server build：通过。
-- client build：通过；公网 bundle 已确认新界面文案存在，旧“发现并新增”模式不存在。
+- 前端缓存刷新测试：2/2 通过（先失败后通过）。
+- client TypeScript 检查与 build：通过；构建后标签为 `v13.16`。
+- 共享刷新入口和测试文件定向 ESLint：通过；全量 client lint 仍有仓库原有 66 个问题，未在本轮扩展修复。
 - `git diff --check`：通过。
 - 生产只读核对：`models=278`、Default `profile_models=278`、活动 profile 为 Default、策略为 `priority`；默认路由数据与模型数据库一致。
 - 公网核对：入口 200、`Cache-Control: public, max-age=0`、HSTS 存在；新 bundle 含 `profile-models` 和 `probe-history` 刷新逻辑。
@@ -50,12 +52,20 @@
 
 - `/home/debian/freellmapi/deploy-backups/provider-model-catalog-v13.14-20260804_202554/`：数据库和旧前端目录。
 - `/home/debian/freellmapi/deploy-backups/frontend-v13.14-20260804_203435/`：替换前的前端目录。
-- `/home/debian/freellmapi/deploy-backups/model-view-refresh-v13.15-20260804_211227/`：本轮数据库和前端目录备份。
+- `/home/debian/freellmapi/deploy-backups/model-view-refresh-v13.15-20260804_211227/`：上一轮数据库和前端目录备份。
+- `/home/debian/freellmapi/deploy-backups/model-view-refresh-v13.16-20260805_052655/`：本轮数据库（含 WAL/SHM）和前端目录备份。
 - 未删除 VPS 原有未跟踪备份目录或 compose 本地改动。
 
 ### 唯一下一步
 
-- 用户在生产页面 Ctrl+F5，打开“供应商模型管理”重新拉取；对标记“本地已有，远端未返回”的旧模型取消勾选。随后打开模型页、路由表和模型状态页，确认三处都不再显示该模型。
+- 用户在生产页面 Ctrl+F5，任选一个入口更新模型后打开模型页、路由表、路由策略和模型状态页，确认它们都会自动显示同一份最新结果。
+
+### 最新 Session（2026-08-05）
+
+- **根因**：之前只有供应商模型面板会刷新部分缓存；从模型页、路由表、仪表盘或密钥页修改时，其他页面仍保留旧数据。
+- **修复**：把所有模型变更入口接到 `invalidate-model-views.ts`；模型新增、删除、启用、路由组成员、策略和密钥/健康变化后，相关页面统一重新读取同一份数据库结果。
+- **保护**：只刷新前端缓存，不自动重排人工路由顺序；未改 `profile_models.priority`、`enabled`、`intelligence_rank`，未运行 ranking、recalibrate、sort。
+- **上线**：代码 `0bc9a6f`、标签 `v13.16` 已 push；VPS 前端已原地替换并通过本机/公网检查。
 
 ---
 
