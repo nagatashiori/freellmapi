@@ -43,12 +43,20 @@ export function createApp(config?: Config) {
     ...cfg.dashboardOrigins,
   ]);
 
+  // Reverse-proxy trust for caller identity. TRUST_PROXY_HOPS defaults to 0,
+  // so X-Forwarded-For is ignored and req.ip (used by the client-context
+  // middleware, the rate limiter and first-run auth) is the socket peer. A
+  // public nginx deployment sets it to 1 and must OVERWRITE (never trust)
+  // the client-supplied X-Forwarded-For, or req.ip becomes attacker-controlled.
+  app.set('trust proxy', cfg.trustProxyHops);
+
   // CSP intentionally disabled — the SPA bundles inline styles and the OG
   // image is loaded from the same origin; enabling helmet's default CSP
   // breaks the React build's hashed-asset loader. HSTS off because this is
-  // a single-user local proxy, served over HTTP on localhost. Both should
-  // stay disabled unless someone serves the proxy over HTTPS publicly
-  // (which is also not a supported deployment — see README).
+  // a single-user local proxy, served over HTTP on localhost. When the proxy
+  // IS served publicly over HTTPS behind a reverse proxy, HTTPS + HSTS +
+  // security headers are the reverse proxy layer's responsibility (nginx),
+  // not the application's — see docker/README.md.
   app.use(helmet({ contentSecurityPolicy: false, hsts: false }));
   app.use(cors({
     origin(origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) {

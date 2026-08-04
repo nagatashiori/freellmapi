@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { loadConfig } from '../../lib/config.js';
 
-const ENV_KEYS = ['PORT', 'HOST', 'FREEAPI_DB_PATH', 'DASHBOARD_ORIGINS', 'CLIENT_DIST', 'PROXY_RATE_LIMIT_RPM', 'NODE_ENV'];
+const ENV_KEYS = ['PORT', 'HOST', 'FREEAPI_DB_PATH', 'DASHBOARD_ORIGINS', 'CLIENT_DIST', 'PROXY_RATE_LIMIT_RPM', 'NODE_ENV', 'TRUST_PROXY_HOPS'];
 
 afterEach(() => {
   ENV_KEYS.forEach(k => delete process.env[k]);
@@ -16,6 +16,7 @@ describe('loadConfig', () => {
     expect(cfg.dashboardOrigins).toEqual([]);
     expect(cfg.clientDist).toBeNull();
     expect(cfg.proxyRateLimitRpm).toBe(120);
+    expect(cfg.trustProxyHops).toBe(0);
     expect(cfg.serveStaticAssets).toBe(true);
   });
 
@@ -59,6 +60,20 @@ describe('loadConfig', () => {
   it('accepts 0 to disable rate limiting', () => {
     process.env.PROXY_RATE_LIMIT_RPM = '0';
     expect(loadConfig().proxyRateLimitRpm).toBe(0);
+  });
+
+  it('reads TRUST_PROXY_HOPS as a hop count', () => {
+    process.env.TRUST_PROXY_HOPS = '1';
+    expect(loadConfig().trustProxyHops).toBe(1);
+    process.env.TRUST_PROXY_HOPS = '3';
+    expect(loadConfig().trustProxyHops).toBe(3);
+  });
+
+  it('falls back to 0 for invalid TRUST_PROXY_HOPS', () => {
+    for (const bad of ['abc', '-1', '1.5', 'NaN', 'Infinity', '999', '  ']) {
+      process.env.TRUST_PROXY_HOPS = bad;
+      expect(loadConfig().trustProxyHops, `TRUST_PROXY_HOPS=${bad}`).toBe(0);
+    }
   });
 
   it('reads NODE_ENV from env', () => {

@@ -52,16 +52,26 @@ function bearer(req: Request): string | undefined {
     ?? (req.headers['x-dashboard-token'] as string | undefined);
 }
 
-// Is the caller connecting from the local machine? We check the actual socket
-// peer address, NOT req.ip or X-Forwarded-For: those are attacker-controlled
-// behind a proxy (and trust proxy is off by default anyway), so trusting them
-// here would let a remote caller pretend to be local and skip the setup code.
-function isLoopbackRemote(req: Request): boolean {
-  let addr = req.socket.remoteAddress ?? '';
+function isLoopback(addr: string): boolean {
   // Node reports IPv4 loopback over a dual-stack socket as "::ffff:127.0.0.1".
-  if (addr.startsWith('::ffff:')) addr = addr.slice(7);
-  if (addr === '::1') return true;
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(addr);
+  let a = addr;
+  if (a.startsWith('::ffff:')) a = a.slice(7);
+  if (a === '::1') return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(a);
+}
+
+// Is the caller connecting from the local machine? BOTH checks must pass: the
+// immediate socket peer has to be loopback (a direct local process, or a
+// reverse proxy running on this host), and the Express-resolved client (req.ip)
+// also has to be loopback. When TRUST_PROXY_HOPS is set, req.ip is the real
+// client taken from the trusted proxy chain, so a remote caller forwarded by
+// nginx reads as remote even though the socket peer is the local proxy. req.ip
+// never reads X-Forwarded-For directly, so a forged header cannot fake loopback.
+function isLoopbackRemote(req: Request): boolean {
+  const peer = req.socket.remoteAddress ?? '';
+  if (!isLoopback(peer)) return false;
+  const client = req.ip ?? peer;
+  return isLoopback(client);
 }
 
 // Has the dashboard been set up yet, and is this caller authenticated?

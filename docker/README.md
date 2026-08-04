@@ -83,6 +83,7 @@ docker compose up -d --build
 | `FREEAPI_DB_BACKUP_KEY` | No | `ENCRYPTION_KEY` | 64-character hex key for backup encryption. Use a separate stable key if possible. |
 | `FREEAPI_CONFIG_PATH` | No | None | JSON config file applied idempotently after migrations on every boot. |
 | `FREEAPI_CONFIG_JSON` | No | None | Inline JSON config. Takes precedence over `FREEAPI_CONFIG_PATH`. |
+| `TRUST_PROXY_HOPS` | No | `0` | Number of reverse-proxy hops to trust for caller identity. `0` (default) ignores `X-Forwarded-For`; set `1` when nginx fronts the container (see below). |
 
 The `freellmapi-data` volume stores SQLite data at `/app/server/data`. Keep the same volume and `ENCRYPTION_KEY` when upgrading, otherwise existing encrypted provider keys cannot be decrypted.
 
@@ -105,6 +106,58 @@ Example `freellmapi.config.json`:
   "routing": { "strategy": "balanced" }
 }
 ```
+
+## Public reverse proxy (nginx)
+
+The container is built for localhost/LAN use: by default it publishes on
+`127.0.0.1` and serves plain HTTP with no CSP/HSTS (the SPA relies on inline
+styles). If you put it on the internet behind nginx, the *reverse proxy* must
+own the transport and security-header concerns — the application does not:
+
+1. **Terminate TLS at nginx** and proxy to the container (keep
+   `HOST_BIND=127.0.0.1` so the container itself is never reachable directly).
+2. **Overwrite, never append, the client-supplied `X-Forwarded-For`.** nginx
+   must set the header from the real remote address and drop whatever the
+   client sent. Appending with the default `$proxy_add_x_forwarded_for` leaves
+   an attacker-controlled value in the chain; `proxy_set_header
+   X-Forwarded-For $remote_addr;` replaces it entirely.
+3. **Set `TRUST_PROXY_HOPS=1`** in the container's `.env`. With `0` (the
+   default) the app ignores `X-Forwarded-For` and would rate-limit and log
+   every caller as the nginx address; with `1` it resolves the real client IP
+   from the hop nginx wrote.
+4. **Provide HTTPS + HSTS + security headers at nginx.** The app disables
+   helmet's HSTS and CSP because it runs over plain HTTP on localhost by
+   design. A public deployment must add them at the proxy layer, e.g.:
+
+   ```nginx
+   server {
+     listen 443 ssl http2;
+     server_name proxy.example.com;
+     # ssl_certificate / ssl_certificate_key ...
+
+     add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+     add_header X-Content-Type-Options nosniff always;
+     add_header X-Frame-Options DENY always;
+
+     location / {
+       proxy_pass http://127.0.0.1:3001;
+       proxy_set_header Host $host;
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $remote_addr;   # overwrite, not append
+       proxy_set_header X-Forwarded-Proto $scheme;
+     }
+   }
+   ```
+
+   Do not enable an application-level CSP that the built SPA does not already
+   satisfy — the React bundle uses inline styles and same-origin assets.
+
+First-run setup follows the same rule as a bare install: a browser on the host
+machine can claim the dashboard without the setup code; anyone remote needs the
+one-time code printed at boot. Behind nginx, "on the host machine" means the
+resolved client IP (what nginx overwrote the header with) is loopback — a
+forged `X-Forwarded-For: 127.0.0.1` never counts, because the header is
+replaced before it reaches the app.
 
 ## Published Image
 

@@ -11,13 +11,14 @@ export interface ClientContext {
 // proxy, responses, anthropic, fusion, embeddings and media paths all log).
 const storage = new AsyncLocalStorage<ClientContext>();
 
-// First X-Forwarded-For hop when present (reverse-proxy deployments, e.g.
-// Traefik), otherwise the socket peer address. The server is LAN-only, so a
-// spoofable header is an acceptable trade for working behind a proxy.
+// Express-resolved client address. With the app's `trust proxy` unset (the
+// default, TRUST_PROXY_HOPS=0) req.ip is the socket peer and a forged
+// X-Forwarded-For is ignored; when TRUST_PROXY_HOPS is configured for a public
+// reverse proxy, req.ip is the real client taken from the trusted hop. Never
+// read X-Forwarded-For directly here — it is attacker-controlled until the
+// trusted proxy layer has overwritten it (see app.ts).
 function resolveClientIp(req: Request): string | null {
-  const xff = req.headers['x-forwarded-for'];
-  const first = (Array.isArray(xff) ? xff[0] : xff)?.split(',')[0]?.trim();
-  const raw = first || req.socket.remoteAddress || null;
+  const raw = req.ip ?? req.socket.remoteAddress ?? null;
   // Normalize IPv4-mapped IPv6 ("::ffff:192.168.0.5" -> "192.168.0.5").
   return raw?.replace(/^::ffff:/i, '') ?? null;
 }
