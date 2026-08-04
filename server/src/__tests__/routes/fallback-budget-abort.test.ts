@@ -83,6 +83,8 @@ describe('fallback budget + cancellation (three-surface parity)', () => {
   });
 
   it('item 7: all three surfaces pass the per-attempt AbortSignal into provider options', async () => {
+    process.env.FALLBACK_TIME_BUDGET_MS = '500';
+    process.env.FALLBACK_ATTEMPT_TIMEOUT_MS = '1000';
     chatCompletion.mockResolvedValue(GOOD_RESULT);
     const cases: Array<[string, any]> = [
       ['/v1/chat/completions', { messages: [{ role: 'user', content: 'signal wiring' }] }],
@@ -95,6 +97,10 @@ describe('fallback budget + cancellation (three-surface parity)', () => {
       expect(status).toBe(200);
       const options = chatCompletion.mock.calls.at(-1)?.[3];
       expect(options?.signal).toBeInstanceOf(AbortSignal);
+      // The provider receives the effective deadline, not the original 1s
+      // single-hop setting, so its timeout matches the whole-chain budget.
+      expect(options?.timeoutMs).toBeGreaterThan(0);
+      expect(options?.timeoutMs).toBeLessThanOrEqual(500);
     }
     expect(chatCompletion).toHaveBeenCalledTimes(3);
   });

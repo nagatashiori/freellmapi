@@ -550,7 +550,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
             route.apiKey,
             messages,
             route.modelId,
-            { ...completionOpts, signal: ctx.signal },
+            { ...completionOpts, timeoutMs: ctx.timeoutMs, signal: ctx.signal },
             quotaContextForRoute(route, 'responses'),
           );
 
@@ -758,7 +758,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
         route.apiKey,
         messages,
         route.modelId,
-        { ...completionOpts, signal: ctx.signal },
+        { ...completionOpts, timeoutMs: ctx.timeoutMs, signal: ctx.signal },
         quotaContextForRoute(route, 'responses'),
       );
 

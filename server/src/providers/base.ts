@@ -113,7 +113,14 @@ export abstract class BaseProvider {
     externalSignal?: AbortSignal,
   ): Promise<Response> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    // A fallback attempt passes an external signal that already carries the
+    // effective deadline. Do not race a second, equally-timed local timer:
+    // whichever one happened to fire first could hide whether this was a
+    // provider timeout or the chain budget. Direct provider calls keep the
+    // local timeout as before.
+    const timeout = externalSignal || timeoutMs <= 0
+      ? undefined
+      : setTimeout(() => controller.abort(), timeoutMs);
     // Merge the external signal (per-attempt deadline from the fallback loop,
     // or a client disconnect) with the internal timer: whichever fires first
     // aborts the request. Both listeners are cleaned up in finally so no timer
@@ -126,7 +133,7 @@ export abstract class BaseProvider {
       // `<platform>, chat, 15s` for triage from the requests.error column.
       return await proxyFetch(url, { ...init, signal: controller.signal }, this.platform, 'chat', timeoutMs);
     } finally {
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       externalSignal?.removeEventListener('abort', onExternalAbort);
     }
   }

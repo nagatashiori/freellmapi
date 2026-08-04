@@ -46,15 +46,12 @@ import { newBreaker, recordBreakerFailure } from './guardrails.js';
 export const FALLBACK_MAX_RETRIES = 20;
 
 // ── Wall-clock retry budget ──────────────────────────────────────────────────
-// Serial failover has no time bound of its own: the observed worst case was a
-// 38.8s TTFB over 11 attempts, and the theoretical worst is maxRetries x the
-// per-attempt HTTP timeout. The budget is checked before STARTING each retry
-// (the first attempt always runs), so one slow attempt is never aborted
-// mid-flight — it just becomes the last one. 0 disables the budget entirely.
-// Precedence mirrors the response cache: the settings-table value wins when
-// present (runtime-tunable), then the env var, then the default.
-// TODO(fallback-v2): AbortController hedging so a stalled attempt can be
-// abandoned mid-flight instead of only refusing to start the next one.
+// Serial failover has a whole-chain wall-clock budget. Every attempt receives
+// the smaller of its own timeout and the time still left in that budget; the
+// shared abort signal stops a slow upstream request at that deadline. 0
+// disables only the whole-chain budget. Precedence mirrors the response cache:
+// the settings-table value wins when present (runtime-tunable), then the env
+// var, then the default.
 export const DEFAULT_FALLBACK_TIME_BUDGET_MS = 45_000;
 export const FALLBACK_TIME_BUDGET_SETTING = 'fallback_time_budget_ms';
 export const DEFAULT_FALLBACK_ATTEMPT_TIMEOUT_MS = 30_000;
@@ -420,7 +417,8 @@ export interface AttemptContext {
    *  or the client disconnected. Adapters pass this into the provider options
    *  so the upstream fetch is actually cancelled. */
   signal: AbortSignal;
-  /** The single-hop per-attempt HTTP timeout in ms (options.timeoutMs). */
+  /** The effective provider timeout in ms: single-hop timeout capped by the
+   * remaining whole-chain budget. 0 means no timeout is configured. */
   timeoutMs: number;
   /** Wall-clock budget remaining when this attempt started; Infinity when the
    *  total budget is disabled (timeBudgetMs 0). */
@@ -597,21 +595,27 @@ export async function runFallbackLoop(hooks: FallbackHooks): Promise<void> {
     // exhaustion, 'client' is a no-fault stop.
     let abortCause: AttemptAbortCause | undefined;
     const controller = new AbortController();
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-    if (budgetMs > 0) {
-      // The remaining budget can already be spent by the time routing hands us
-      // a route (DB lookups take ms). Floor the budget deadline at 1ms so the
-      // attempt is still cut off promptly instead of running with no deadline
-      // at all. attemptTimeoutMs 0 means "single-hop timeout disabled" — then
-      // only the (floored) budget deadline applies.
-      const remaining = startedAt + budgetMs - Date.now();
-      const budgetDeadline = Math.max(remaining, 1);
-      const effective = attemptTimeoutMs > 0 ? Math.min(attemptTimeoutMs, budgetDeadline) : budgetDeadline;
-      timeoutTimer = setTimeout(() => {
-        abortCause = Date.now() - startedAt >= budgetMs ? 'budget' : 'timeout';
+    const remainingBudgetMs = budgetMs > 0
+      ? Math.max(0, startedAt + budgetMs - Date.now())
+      : Infinity;
+    // The deadline source is decided before arming the timer, not by checking
+    // wall time after it fires. Timers can run a little early/late; using the
+    // selected source keeps a budget deadline from being misclassified as a
+    // provider timeout and wrongly benching the provider.
+    const budgetDeadline = budgetMs > 0 ? Math.max(remainingBudgetMs, 1) : Infinity;
+    const budgetWins = budgetMs > 0 && (attemptTimeoutMs === 0 || budgetDeadline <= attemptTimeoutMs);
+    const effectiveTimeoutMs = budgetWins
+      ? budgetDeadline
+      : attemptTimeoutMs;
+    const timeoutCause: AttemptAbortCause | undefined = effectiveTimeoutMs > 0
+      ? (budgetWins ? 'budget' : 'timeout')
+      : undefined;
+    const timeoutTimer = effectiveTimeoutMs > 0
+      ? setTimeout(() => {
+        abortCause = timeoutCause;
         controller.abort();
-      }, effective);
-    }
+      }, effectiveTimeoutMs)
+      : undefined;
     const onClientAbort = () => {
       abortCause = 'client';
       controller.abort();
@@ -623,8 +627,8 @@ export async function runFallbackLoop(hooks: FallbackHooks): Promise<void> {
     try {
       outcome = await hooks.dispatch(route, attempt, {
         signal: controller.signal,
-        timeoutMs: attemptTimeoutMs,
-        remainingBudgetMs: budgetMs > 0 ? Math.max(0, startedAt + budgetMs - Date.now()) : Infinity,
+        timeoutMs: effectiveTimeoutMs,
+        remainingBudgetMs,
       });
     } catch (err: any) {
       // Client disconnect cut the attempt short (via clientAbort or the flag):

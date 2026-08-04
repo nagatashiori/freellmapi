@@ -812,7 +812,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
             route.apiKey,
             messages,
             route.modelId,
-            { temperature, max_tokens, top_p, stop, timeoutMs: attemptTimeoutMs, signal: ctx.signal },
+            { temperature, max_tokens, top_p, stop, timeoutMs: ctx.timeoutMs, signal: ctx.signal },
             quotaContextForRoute(route, 'chat/completions'),
           );
 
@@ -897,7 +897,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
         route.apiKey,
         messages,
         route.modelId,
-        { temperature, max_tokens, top_p, stop, timeoutMs: attemptTimeoutMs, signal: ctx.signal },
+        { temperature, max_tokens, top_p, stop, timeoutMs: ctx.timeoutMs, signal: ctx.signal },
         quotaContextForRoute(route, 'chat/completions'),
       );
 
@@ -1573,7 +1573,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         try {
           const gen = route.provider.streamChatCompletion(
             route.apiKey, outboundMessages, route.modelId,
-            { temperature, max_tokens, top_p, stop, tools, tool_choice, parallel_tool_calls, timeoutMs: attemptTimeoutMs, signal: ctx.signal, ...samplingParams },
+            { temperature, max_tokens, top_p, stop, tools, tool_choice, parallel_tool_calls, timeoutMs: ctx.timeoutMs, signal: ctx.signal, ...samplingParams },
             quotaContextForRoute(route, 'chat/completions'),
           );
 
@@ -1787,7 +1787,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       } else {
         const result = await route.provider.chatCompletion(
           route.apiKey, outboundMessages, route.modelId,
-          { temperature, max_tokens, top_p, stop, tools, tool_choice, parallel_tool_calls, ...samplingParams, timeoutMs: attemptTimeoutMs, signal: ctx.signal },
+          { temperature, max_tokens, top_p, stop, tools, tool_choice, parallel_tool_calls, ...samplingParams, timeoutMs: ctx.timeoutMs, signal: ctx.signal },
           quotaContextForRoute(route, 'chat/completions'),
         );
 

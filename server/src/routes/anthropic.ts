@@ -509,7 +509,7 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
       });
       if (stream) {
         try {
-          await streamCompletion(res, route, messages, { ...completionOptions, signal: ctx.signal }, {
+          await streamCompletion(res, route, messages, { ...completionOptions, timeoutMs: ctx.timeoutMs, signal: ctx.signal }, {
             start, attempt, attemptLog, clientGone: () => clientGone, requestedModel, estimatedInputTokens, tools, pinnedModelId,
             sessionId, pinned: resolved.pinned,
           });
@@ -526,7 +526,7 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
         }
       }
 
-      const result = await route.provider.chatCompletion(route.apiKey, messages, route.modelId, { ...completionOptions, signal: ctx.signal });
+      const result = await route.provider.chatCompletion(route.apiKey, messages, route.modelId, { ...completionOptions, timeoutMs: ctx.timeoutMs, signal: ctx.signal });
       const respMsg = result.choices?.[0]?.message;
       const respText = contentToString(respMsg?.content ?? '');
       let respToolCalls = respMsg?.tool_calls ?? [];

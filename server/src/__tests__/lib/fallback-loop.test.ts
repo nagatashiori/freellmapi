@@ -558,6 +558,24 @@ describe('runFallbackLoop: per-attempt abort signal + budget deadline', () => {
     expect(onExhausted.mock.calls[0][0].message).toContain('retry time budget');
   });
 
+  it('passes the effective remaining deadline to the provider attempt', async () => {
+    let providerTimeoutMs = 0;
+
+    await runFallbackLoop(hooksSkeleton({
+      timeBudgetMs: 30,
+      attemptTimeoutMs: 1_000,
+      dispatch: async (_r: any, _a: number, ctx: any) => {
+        providerTimeoutMs = ctx.timeoutMs;
+        return 'done';
+      },
+    }));
+
+    // The provider must receive the actual deadline, not the original 1s
+    // setting, otherwise its timeout/error text can outlive the whole chain.
+    expect(providerTimeoutMs).toBeGreaterThan(0);
+    expect(providerTimeoutMs).toBeLessThanOrEqual(30);
+  });
+
   it('timeBudgetMs 0 keeps the old semantics: no budget abort, single-hop timeouts only', async () => {
     let calls = 0;
     const signals: AbortSignal[] = [];
