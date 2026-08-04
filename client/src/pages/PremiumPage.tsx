@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { FieldError } from '@/components/ui/field-error'
 import { CardSkeleton } from '@/components/ui/skeleton'
 import { useI18n } from '@/i18n'
+import { invalidateModelViews } from '@/lib/invalidate-model-views'
 
 interface LicenseStatus {
   valid: boolean
@@ -61,7 +62,7 @@ export default function PremiumPage() {
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['premium'] })
     // A sync may have changed the model list and quirks.
-    queryClient.invalidateQueries({ queryKey: ['models'] })
+    invalidateModelViews(queryClient)
   }
 
   const activate = useMutation({

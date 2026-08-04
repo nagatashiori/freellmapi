@@ -6,6 +6,7 @@ import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Activity, RefreshCw } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
+import { invalidateModelViews } from '@/lib/invalidate-model-views'
 import { PageHeader } from '@/components/page-header'
 import { Button } from '@/components/ui/button'
 import { ProviderModelCatalogPanel } from '@/features/provider-model-catalog/ProviderModelCatalogPanel'
@@ -19,9 +20,7 @@ export default function StatusPage() {
     mutationFn: () => apiFetch('/api/fallback/probe-all', { method: 'POST' }),
     onSuccess: () => {
       setProbeError('')
-      queryClient.invalidateQueries({ queryKey: ['health'] })
-      queryClient.invalidateQueries({ queryKey: ['models'] })
-      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      invalidateModelViews(queryClient)
     },
     onError: error => setProbeError(error instanceof Error ? error.message : '探测失败'),
   })

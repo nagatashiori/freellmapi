@@ -10,6 +10,7 @@ import type { ImportKey, ImportSelectedResponse, Platform, PreviewKey, PreviewRe
 import { Upload } from 'lucide-react'
 import { useI18n } from '@/i18n'
 import { toast } from '@/lib/toast'
+import { invalidateModelViews } from '@/lib/invalidate-model-views'
 import { PLATFORMS } from './shared'
 
 interface ImportRow extends PreviewKey {
@@ -67,9 +68,7 @@ export function ImportKeysSection({ onImported }: { onImported?: () => void } = 
         body: JSON.stringify({ keys }),
       }),
     onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['keys'] })
-      queryClient.invalidateQueries({ queryKey: ['health'] })
-      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      invalidateModelViews(queryClient)
       // The dialog closes on success, so surface the imported/failed counts as
       // a toast.
       if (onImported) {

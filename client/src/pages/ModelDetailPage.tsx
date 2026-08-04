@@ -5,6 +5,7 @@ import { ChevronLeft, Save, Trash2, RefreshCw, Activity } from 'lucide-react'
 import { useI18n } from '@/i18n'
 import { apiFetch } from '@/lib/api'
 import { formatTimeAgo, formatSqliteUtcToLocalTime } from '@/lib/utils'
+import { invalidateModelViews } from '@/lib/invalidate-model-views'
 import { Button } from '@/components/ui/button'
 import { ConfirmButton } from '@/components/confirm-button'
 import { Input } from '@/components/ui/input'
@@ -172,7 +173,7 @@ export default function ModelDetailPage() {
   const saveMutation = useMutation({
     mutationFn: (data: { modelDbId: number; priority: number; enabled: boolean }[]) =>
       apiFetch('/api/fallback', { method: 'PUT', body: JSON.stringify(data) }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['fallback'] }),
+    onSuccess: () => invalidateModelViews(queryClient),
   })
   const modelPatchMutation = useMutation({
     mutationFn: ({ modelDbId, patch }: { modelDbId: number; patch: ModelSettingsPatch }) =>
@@ -181,21 +182,13 @@ export default function ModelDetailPage() {
         body: JSON.stringify(patch),
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['fallback'] })
-      queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
-      queryClient.invalidateQueries({ queryKey: ['models'] })
-      queryClient.invalidateQueries({ queryKey: ['health'] })
-      queryClient.invalidateQueries({ queryKey: ['model-catalog-platforms'] })
+      invalidateModelViews(queryClient)
     },
   })
   const modelDeleteMutation = useMutation({
     mutationFn: (modelDbId: number) => apiFetch(`/api/models/${modelDbId}`, { method: 'DELETE' }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['fallback'] })
-      queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
-      queryClient.invalidateQueries({ queryKey: ['models'] })
-      queryClient.invalidateQueries({ queryKey: ['health'] })
-      queryClient.invalidateQueries({ queryKey: ['model-catalog-platforms'] })
+      invalidateModelViews(queryClient)
     },
   })
 
@@ -239,7 +232,7 @@ export default function ModelDetailPage() {
     saveMutation.mutate(all, {
       onSettled: () => {
         if (dragGeneration.current === gen) setLocalMembers(null)
-        queryClient.invalidateQueries({ queryKey: ['fallback'] })
+        invalidateModelViews(queryClient)
       },
     })
   }
@@ -257,8 +250,7 @@ export default function ModelDetailPage() {
     // Probe outcomes refresh runtime health and may restore AUTO participation
     // after a successful upstream Say OK probe.
     setTimeout(() => {
-      queryClient.invalidateQueries({ queryKey: ['health'] })
-      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      invalidateModelViews(queryClient)
     }, 400)
   }, [queryClient])
 

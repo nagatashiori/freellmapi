@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '@/lib/api'
+import { invalidateModelHealthViews } from './invalidate-model-views'
 
 export interface ProbeResult {
   modelDbId: number
@@ -62,8 +63,7 @@ export function useProbe() {
 
   const refreshLists = useCallback(() => {
     setTimeout(() => {
-      qc.invalidateQueries({ queryKey: ['health'] })
-      qc.invalidateQueries({ queryKey: ['fallback'] })
+      invalidateModelHealthViews(qc)
     }, 400)
   }, [qc])
 

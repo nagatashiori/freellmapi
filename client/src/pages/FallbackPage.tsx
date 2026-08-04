@@ -20,6 +20,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useI18n } from '@/i18n'
 import { apiFetch } from '@/lib/api'
 import { useProbe } from '@/lib/use-probe'
+import { invalidateModelViews } from '@/lib/invalidate-model-views'
 import {
   buildGroups,
   groupMaxContext,
@@ -134,7 +135,7 @@ export default function FallbackPage() {
     mutationFn: (data: { modelDbId: number; priority: number; enabled: boolean }[]) =>
       apiFetch('/api/fallback', { method: 'PUT', body: JSON.stringify(data) }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      invalidateModelViews(queryClient)
       setLocalEntries(null)
     },
   })
@@ -142,7 +143,7 @@ export default function FallbackPage() {
   const strategyMutation = useMutation({
     mutationFn: (payload: { strategy: RoutingStrategy; weights?: RoutingWeights }) =>
       apiFetch('/api/fallback/routing', { method: 'PUT', body: JSON.stringify(payload) }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] }),
+    onSuccess: () => invalidateModelViews(queryClient),
   })
 
   const strategy: RoutingStrategy = routing?.strategy ?? 'balanced'
@@ -185,11 +186,7 @@ export default function FallbackPage() {
   const membershipMutation = useMutation({
     mutationFn: (payload: { modelDbIds: number[]; add: string[]; remove: string[] }) =>
       apiFetch('/api/profiles/membership', { method: 'POST', body: JSON.stringify(payload) }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['routing-status'] })
-      if (!isDefaultTab) queryClient.invalidateQueries({ queryKey: ['profile-models', activeProfile] })
-      queryClient.invalidateQueries({ queryKey: ['fallback'] })
-    },
+    onSuccess: () => invalidateModelViews(queryClient),
   })
 
   // Save handler depends on active tab
@@ -216,8 +213,7 @@ export default function FallbackPage() {
         body: JSON.stringify(data),
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['profile-models', activeProfile] })
-      queryClient.invalidateQueries({ queryKey: ['routing-status'] })
+      invalidateModelViews(queryClient)
     },
   })
 
@@ -376,11 +372,7 @@ export default function FallbackPage() {
       Promise.all(group.members.map(m =>
         apiFetch(`/api/models/${m.modelDbId}`, { method: 'DELETE' })
       )).then(() => {
-        queryClient.invalidateQueries({ queryKey: ['fallback'] })
-        queryClient.invalidateQueries({ queryKey: ['models'] })
-        queryClient.invalidateQueries({ queryKey: ['health'] })
-        queryClient.invalidateQueries({ queryKey: ['routing-status'] })
-        queryClient.invalidateQueries({ queryKey: ['model-catalog-platforms'] })
+        invalidateModelViews(queryClient)
         setDeletingGroup(null)
       }).catch(() => setDeletingGroup(null))
     } else {
@@ -394,11 +386,7 @@ export default function FallbackPage() {
     Promise.all([...selectedIds].map(id =>
       apiFetch(`/api/models/${id}`, { method: 'DELETE' })
     )).then(() => {
-      queryClient.invalidateQueries({ queryKey: ['fallback'] })
-      queryClient.invalidateQueries({ queryKey: ['models'] })
-      queryClient.invalidateQueries({ queryKey: ['health'] })
-      queryClient.invalidateQueries({ queryKey: ['routing-status'] })
-      queryClient.invalidateQueries({ queryKey: ['model-catalog-platforms'] })
+      invalidateModelViews(queryClient)
       setSelectedIds(new Set())
       setBatchMode(false)
     })

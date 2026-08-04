@@ -4,6 +4,7 @@ import { Activity, RefreshCw, Play, ChevronDown, ChevronRight, Trash2 } from 'lu
 import { apiFetch } from '@/lib/api'
 import { formatTimeAgo, formatSqliteUtcToLocalTime } from '@/lib/utils'
 import { useProbe } from '@/lib/use-probe'
+import { invalidateModelViews } from '@/lib/invalidate-model-views'
 import { EmptyState } from '@/components/empty-state'
 import { Button } from '@/components/ui/button'
 import {
@@ -114,9 +115,7 @@ export default function DashboardPage() {
         method: 'PATCH',
         body: JSON.stringify({ enabled: newEnabled, fallbackEnabled: newEnabled }),
       })
-      qc.invalidateQueries({ queryKey: ['fallback'] })
-      qc.invalidateQueries({ queryKey: ['models'] })
-      qc.invalidateQueries({ queryKey: ['routing-status'] })
+      invalidateModelViews(qc)
     } catch {
       // Revert on error
       patchEnabledInCache(modelDbId, currentEnabled)
@@ -127,11 +126,7 @@ export default function DashboardPage() {
     if (deletingId === platform) { // Use platform string as group id
       try {
         await Promise.all(models.map(m => apiFetch(`/api/models/${m.modelDbId}`, { method: 'DELETE' })))
-        qc.invalidateQueries({ queryKey: ['fallback'] })
-        qc.invalidateQueries({ queryKey: ['models'] })
-        qc.invalidateQueries({ queryKey: ['health'] })
-        qc.invalidateQueries({ queryKey: ['routing-status'] })
-        qc.invalidateQueries({ queryKey: ['model-catalog-platforms'] })
+        invalidateModelViews(qc)
       } catch { /* ignore */ }
       setDeletingId(null)
     } else {

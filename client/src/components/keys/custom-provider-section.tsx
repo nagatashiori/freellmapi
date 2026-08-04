@@ -13,6 +13,7 @@ import { isHttpUrl } from '@/lib/validate'
 import { useI18n } from '@/i18n'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/utils'
+import { invalidateModelViews } from '@/lib/invalidate-model-views'
 
 // Split a free-text model field on commas / newlines into a clean id list,
 // dropping blanks and duplicates so one endpoint can take several models. (#281)
@@ -127,10 +128,7 @@ export function CustomProviderSection({ onAdded }: { onAdded?: () => void } = {}
     mutationFn: ({ path, body }: { path: string; body: Record<string, unknown> }) =>
       apiFetch(path, { method: 'POST', body: JSON.stringify(body) }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['keys'] })
-      queryClient.invalidateQueries({ queryKey: ['health'] })
-      queryClient.invalidateQueries({ queryKey: ['fallback'] })
-      queryClient.invalidateQueries({ queryKey: ['models'] })
+      invalidateModelViews(queryClient)
       queryClient.invalidateQueries({ queryKey: ['embeddings'] })
       queryClient.invalidateQueries({ queryKey: ['media'] })
       setModel('')

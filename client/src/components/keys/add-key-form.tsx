@@ -9,6 +9,7 @@ import { FieldError } from '@/components/ui/field-error'
 import type { ApiKey } from '../../../../shared/types'
 import { useI18n } from '@/i18n'
 import { toast } from '@/lib/toast'
+import { invalidateModelViews } from '@/lib/invalidate-model-views'
 import { GetKeyLink, PLATFORMS } from './shared'
 
 type PlatformOption = { value: string; label: string; url?: string; keyless?: boolean; user?: boolean }
@@ -64,9 +65,7 @@ export function AddKeyForm({ onSuccess }: { onSuccess: () => void }) {
     mutationFn: (body: { platform: string; key: string; label?: string }) =>
       apiFetch<{ notice?: string | null }>('/api/keys', { method: 'POST', body: JSON.stringify(body) }),
     onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['keys'] })
-      queryClient.invalidateQueries({ queryKey: ['health'] })
-      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      invalidateModelViews(queryClient)
       toast.success(t('keys.keyAdded'))
       // Server notice when the key is for a platform with no models in the
       // current catalog tier yet (#438) — surfaced as a toast now that the

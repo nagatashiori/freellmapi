@@ -20,6 +20,7 @@ import {
 import { ChevronDown, ExternalLink, KeyRound, MoreHorizontal, Pencil, Plus, RefreshCw, Save, Search, Trash2 } from 'lucide-react'
 import type { ApiKey, ApiKeyModel } from '../../../../shared/types'
 import { formatSqliteUtcToLocalTime } from '@/lib/utils'
+import { invalidateModelViews } from '@/lib/invalidate-model-views'
 import { useI18n } from '@/i18n'
 import {
   PLATFORMS,
@@ -83,7 +84,7 @@ function ProviderAutomaticDetection({
     }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['provider-schedules'] })
-      await queryClient.invalidateQueries({ queryKey: ['health'] })
+      invalidateModelViews(queryClient)
     },
   })
 
@@ -188,8 +189,7 @@ export function ProviderList({ onAddKey }: { onAddKey: () => void }) {
   const deleteKey = useMutation({
     mutationFn: (id: number) => apiFetch(`/api/keys/${id}`, { method: 'DELETE' }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['keys'] })
-      queryClient.invalidateQueries({ queryKey: ['health'] })
+      invalidateModelViews(queryClient)
       queryClient.invalidateQueries({ queryKey: ['provider-schedules'] })
     },
   })
@@ -197,10 +197,7 @@ export function ProviderList({ onAddKey }: { onAddKey: () => void }) {
   const deleteCustomModel = useMutation({
     mutationFn: (model: ApiKeyModel) => apiFetch(customModelDeletePath(model), { method: 'DELETE' }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['keys'] })
-      queryClient.invalidateQueries({ queryKey: ['health'] })
-      queryClient.invalidateQueries({ queryKey: ['fallback'] })
-      queryClient.invalidateQueries({ queryKey: ['models'] })
+      invalidateModelViews(queryClient)
       queryClient.invalidateQueries({ queryKey: ['embeddings'] })
       queryClient.invalidateQueries({ queryKey: ['media'] })
     },
@@ -208,10 +205,7 @@ export function ProviderList({ onAddKey }: { onAddKey: () => void }) {
 
   const checkKey = useMutation({
     mutationFn: (keyId: number) => apiFetch(`/api/health/check/${keyId}`, { method: 'POST' }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['health'] })
-      queryClient.invalidateQueries({ queryKey: ['keys'] })
-    },
+    onSuccess: () => invalidateModelViews(queryClient),
   })
 
   const togglePlatform = useMutation({
@@ -220,11 +214,7 @@ export function ProviderList({ onAddKey }: { onAddKey: () => void }) {
         method: 'PATCH',
         body: JSON.stringify({ enabled }),
       }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['keys'] })
-      queryClient.invalidateQueries({ queryKey: ['health'] })
-      queryClient.invalidateQueries({ queryKey: ['fallback'] })
-    },
+    onSuccess: () => invalidateModelViews(queryClient),
   })
 
   const updateKey = useMutation({
@@ -234,7 +224,7 @@ export function ProviderList({ onAddKey }: { onAddKey: () => void }) {
         body: JSON.stringify({ label }),
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['keys'] })
+      invalidateModelViews(queryClient)
       setEditingKeyId(null)
       setEditingLabel('')
     },

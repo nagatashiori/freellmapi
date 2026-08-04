@@ -17,7 +17,7 @@ import type {
 } from '@freellmapi/shared/types.js'
 import { apiFetch, type ApiError } from '@/lib/api'
 import { Button } from '@/components/ui/button'
-import { PROVIDER_CATALOG_INVALIDATION_KEYS } from './cache-keys'
+import { invalidateModelViews } from '@/lib/invalidate-model-views'
 
 type Notice = {
   text: string
@@ -78,13 +78,6 @@ export function ProviderModelCatalogPanel() {
     },
   })
 
-  function invalidateModelViews() {
-    for (const queryKey of PROVIDER_CATALOG_INVALIDATION_KEYS) {
-      queryClient.invalidateQueries({ queryKey })
-    }
-    queryClient.invalidateQueries({ queryKey: QUERY_KEYS.sources })
-  }
-
   const toggleModel = useMutation<ProviderCatalogImportResult | ProviderCatalogRemoveResult, unknown, {
     model: ProviderCatalogManagedModel
     checked: boolean
@@ -124,7 +117,8 @@ export function ProviderModelCatalogPanel() {
               : model),
         }
       })
-      invalidateModelViews()
+      invalidateModelViews(queryClient)
+      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.sources })
       setNotice({
         text: variables.checked ? '已添加模型。' : '已删除本地模型记录。',
         tone: 'success',
