@@ -28,7 +28,7 @@ export default function StatusPage() {
 
   return (
     <div className="space-y-6 max-w-3xl">
-      <PageHeader title="健康检查与模型目录" description="供应商健康检测、只增发现，以及独立的本地模型管理" />
+      <PageHeader title="健康检查与模型目录" description="供应商健康检测、拉取模型，并用勾选统一管理本地模型与路由列表" />
 
       <section className="rounded-xl border bg-card p-5 space-y-2">
         <h3 className="text-sm font-medium">模型组去重</h3>

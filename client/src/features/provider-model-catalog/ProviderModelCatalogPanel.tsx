@@ -17,6 +17,7 @@ import type {
 } from '@freellmapi/shared/types.js'
 import { apiFetch, type ApiError } from '@/lib/api'
 import { Button } from '@/components/ui/button'
+import { PROVIDER_CATALOG_INVALIDATION_KEYS } from './cache-keys'
 
 type Notice = {
   text: string
@@ -26,14 +27,6 @@ type Notice = {
 const QUERY_KEYS = {
   sources: ['provider-model-catalog', 'sources'] as const,
 }
-
-const MODEL_VIEW_QUERY_KEYS = [
-  ['fallback'],
-  ['models'],
-  ['health'],
-  ['routing-status'],
-  ['keys'],
-] as const
 
 function readableError(error: unknown, fallback: string): string {
   const apiError = error as ApiError
@@ -86,7 +79,7 @@ export function ProviderModelCatalogPanel() {
   })
 
   function invalidateModelViews() {
-    for (const queryKey of MODEL_VIEW_QUERY_KEYS) {
+    for (const queryKey of PROVIDER_CATALOG_INVALIDATION_KEYS) {
       queryClient.invalidateQueries({ queryKey })
     }
     queryClient.invalidateQueries({ queryKey: QUERY_KEYS.sources })
