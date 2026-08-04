@@ -1,78 +1,53 @@
-# HANDOVER — 2026-07-31
+# HANDOVER — 2026-08-05
 
-## Session 040 — 供应商模型目录简化与统一
+## 当前任务卡：供应商模型管理统一勾选流程（v13.14）
 
-### 本轮范围
+### 目标与用户可见结果
 
-本轮不是全项目推倒重写，只重构“供应商模型来源 → 远端发现 → 只增导入 → 本地管理/删除”子系统，并补充全项目中文架构说明。
+- 供应商模型管理只保留一条流程：选择供应商 → 点击“拉取模型”。
+- 数据库已有模型自动打勾；勾选立即添加，取消勾选立即删除本地记录。
+- 远端没有返回的本地模型仍显示为已勾选，用户可明确取消后删除。
+- 远端失败、空列表或认证异常只显示提示，不自动删除或禁用任何本地模型。
 
-### 当前结构
+### 当前状态
 
-```text
-shared/types.ts
-  └─ 供应商模型目录前后端共用类型
-server/src/providers/*
-  └─ 每家供应商只声明模型列表请求差异
-server/src/services/provider-model-catalog.ts
-  └─ 唯一业务入口和数据库事务
-server/src/routes/provider-model-catalog.ts
-  └─ 参数校验、鉴权后的 HTTP 转换
-client/src/features/provider-model-catalog/ProviderModelCatalogPanel.tsx
-  └─ 该功能完整前端状态和 UI
-client/src/pages/StatusPage.tsx
-  └─ 只组合页面，不再保存目录业务逻辑
-```
+- source `local/freellmapi-ops`：`a953c08`，已 push，标签 `v13.14` 已 push。
+- VPS `/home/debian/freellmapi` 已更新到 `a953c08`。
+- `freellmapi-freellmapi-1` 已重建并 healthy；内部与公网 `/api/ping` 均 200。
+- 前端已重新构建并上传；公网入口使用 `assets/index-D23g9hAn.js`，包含 `v13.14`，旧 `v13.13` 入口不再使用。
 
-详细说明：
+### 修改文件
 
-- `docs/architecture-overview.zh-CN.md`：整个软件的中文请求流、数据库真相和修改地图。
-- `docs/provider-model-catalog.md`：该子系统的五个操作、保护边界和测试重点。
+- `shared/types.ts`：增加统一模型清单类型。
+- `server/src/services/provider-model-catalog.ts`：新增只读统一清单，合并远端模型和本地孤儿记录；远端失败时返回本地记录。
+- `server/src/routes/provider-model-catalog.ts`：增加 `/sync` 清单接口；保留旧接口兼容其他调用者。
+- `client/src/features/provider-model-catalog/ProviderModelCatalogPanel.tsx`：删除两个模式、批量选择和分开的添加/删除按钮，改为一个拉取按钮和逐行勾选。
+- `server/src/__tests__/services/provider-model-catalog.test.ts`：新增合并清单、远端失败保留本地记录测试。
 
-### 已完成
+### 保护边界
 
-- `keys.ts` 删除供应商模型目录大段业务，只挂载专用 router。
-- `StatusPage.tsx` 从大型业务页面缩减为页面组合。
-- 前后端接口类型统一到 `shared/types.ts`。
-- 远端发现只读；空列表、401、超时不会删除或禁用本地模型。
-- 本地列表不依赖远端 `/models`。
-- 导入严格只新增，三个启用位默认关闭，不改人工优先级。
-- 删除必须显式确认；目录模型写 tombstone，防止后台重新加入。
-- Google 查询参数密钥和 URL 用户名/密码在返回浏览器前脱敏。
-- 同一 custom endpoint 的多把密钥合并为一个来源，不同 endpoint 分开。
-- 新增 8 个服务级回归场景。
-- 新模块和关键公开函数均有职责、边界和副作用注释。
+- 没有修改 `profile_models.priority`、`enabled`、`intelligence_rank` 或生产业务数据。
+- 没有运行 ranking、recalibrate、sort。
+- 取消勾选仍通过后端显式删除接口执行，并写入既有 tombstone 规则。
 
-### 验证
+### fresh 验证
 
-已通过：
+- 供应商目录服务测试：10/10 通过。
+- server TypeScript 检查：通过。
+- server build：通过。
+- client build：通过；公网 bundle 已确认新界面文案存在，旧“发现并新增”模式不存在。
+- `git diff --check`：通过。
+- server 全量测试已运行；本地环境有 3 个与本次改动无关的既有/环境失败：公网离线保护测试收到真实 403、keys 测试超时、completions 测试遇到 undici bad port。不能将其记为全量通过。
 
-- 11 个变更 TS/TSX 文件 TypeScript 语法转译。
-- 客户端与服务端隔离 strict typecheck。
-- 关键安全不变量静态检查。
-- `git -c core.whitespace=cr-at-eol diff --check`。
+### 部署备份
 
-未完成：
+- `/home/debian/freellmapi/deploy-backups/provider-model-catalog-v13.14-20260804_202554/`：数据库和旧前端目录。
+- `/home/debian/freellmapi/deploy-backups/frontend-v13.14-20260804_203435/`：替换前的前端目录。
+- 未删除 VPS 原有未跟踪备份目录或 compose 本地改动。
 
-- 完整 `npm ci`、`npm test`、`npm run build` 未能执行。当前运行环境的内部 npm registry 缺少 `undici@6.26.0`；不能把隔离校验冒充完整构建。
+### 唯一下一步
 
-### 生产与数据库状态
-
-- 未部署。
-- 未连接或修改生产数据库。
-- 未运行 ranking、recalibrate、sort。
-- 未自动改变任何现有模型的 enabled 或 priority。
-
-### 下一步
-
-在有正常 npm registry 的本地工作区执行：
-
-```bash
-npm ci
-npm test
-npm run build
-```
-
-全部通过后再 commit、push、备份生产数据库并部署。若出现失败，优先检查新服务、专用 route、前端 feature 和 shared types，不要把逻辑重新塞回 `keys.ts` 或 `StatusPage.tsx`。
+- 用户在生产页面 Ctrl+F5，打开“供应商模型管理”，点击“拉取模型”，确认已有模型自动打勾；取消一个勾选确认本地记录删除，再重新勾选确认可以添加回来。
 
 ---
 
