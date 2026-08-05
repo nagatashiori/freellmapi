@@ -1,5 +1,61 @@
 # HANDOVER — 2026-08-05
 
+## 当前任务卡：Playground 可选模型与实际可用模型同步（v13.17）
+
+### 目标与用户可见结果
+
+- Playground 的模型下拉列表只从当前 Auto 实际使用的 active profile 读取，不再误读 Default profile。
+- 只显示启用且存在模型级可用密钥的模型；同一逻辑模型的多个供应商仍合并为一个选项。
+- 模型被删除、关闭、移出当前路由组或失去可用密钥后，刷新数据会自动从下拉列表移除；旧的本地选择自动回到 Auto，不再发送已经失效的模型 ID。
+
+### 当前状态
+
+- source `local/freellmapi-ops`：`e98dacf`，已 push，标签 `v13.17` 已 push。
+- VPS `/home/debian/freellmapi`：`e98dacf`，已显式拉取标签 `v13.17`；镜像已重新构建并重启，容器保持 `running healthy`。
+- 前端已重新构建并原地替换绑定目录；公网入口使用 `assets/index-CU9IL6DR.js`，包含 `v13.17`。
+
+### 修改文件
+
+- `server/src/routes/fallback.ts`：`GET /api/fallback?profile=active` 读取 active profile，保留默认 `/api/fallback` 给模型管理页使用。
+- `client/src/lib/playground-models.ts`：统一判断模型级可用性、构建可选模型和清理过期选择。
+- `client/src/pages/PlaygroundPage.tsx`：改用 active profile 查询、模型级健康数量和过期选择回退逻辑。
+- `server/src/__tests__/routes/fallback-playground.test.ts`：锁定 Playground 必须读取 active profile。
+- `client/src/lib/playground-models.test.ts`：锁定模型级可用密钥筛选和删除模型后回退 Auto。
+
+### 保护边界
+
+- 未修改生产数据库、`profile_models.priority`、`enabled`、`intelligence_rank` 或人工路由顺序；测试写入的只有内存数据库。
+- 未运行 ranking、recalibrate、sort；未改变 Default 模型管理页的默认数据源。
+- 保留前端统一 `['fallback']` 前缀失效规则，因此模型、密钥、健康探测或路由组变更后，Playground 的 active 查询也会一起重新获取。
+
+### fresh 验证
+
+- 新服务端回归测试：1/1 通过；新前端测试：2/2 通过；相关 fallback 测试：78/78 通过。
+- server 全量测试 `npm run test -w server`：退出码 0。
+- server TypeScript、server build、client build：退出码 0；构建产物包含 `profile=active`、`playground.model` 和 `v13.17`。
+- `git diff --check`：通过。
+- VPS 备份：`/home/debian/freellmapi/deploy-backups/playground-model-sync-v13.17-20260805_011542/`，含数据库（WAL/SHM 如存在）、旧前端和 compose。
+- VPS：`e98dacf`、标签 `v13.17`、容器 `running healthy`、服务端编译文件包含 active profile 查询；内部 `/api/ping` 200。
+- 公网：`/playground` 200、首页 200、`/api/ping` 200、`Cache-Control: public, max-age=0`、HSTS 存在；公网 bundle 使用 `index-CU9IL6DR.js` 且包含 `v13.17`。
+
+### 阻塞
+
+- 无代码、测试或部署阻塞。用户已经打开的旧页面需要 Ctrl+F5 一次，之后刷新模型会自动同步。
+
+### 唯一下一步
+
+- 用户在生产 `/playground` 执行一次 Ctrl+F5，打开下拉框确认它只显示 active 路由中当前可用的模型；以后从模型管理、密钥或健康探测入口更新后会自动重新读取。
+
+### 最新 Session（2026-08-05）
+
+- **根因**：Playground 原来读取 Default profile，而 Auto 运行时读取 active profile；同时前端只看供应商级 keyCount，并保留 localStorage 里的旧模型选择。
+- **修复**：增加 active profile 查询参数；使用模型级 usableKeyCount；把可用模型筛选和旧选择清理抽成共享纯逻辑；后端、前端和测试一起提交为 `e98dacf`，标签 `v13.17`。
+- **上线**：先备份生产数据库和旧前端，再构建 Docker 镜像并重启，最后在绑定的 `dist` 目录内原地替换前端资源；容器和公网检查均通过。
+
+---
+
+## 历史交接（v13.16 及更早）
+
 ## 当前任务卡：所有模型变更统一刷新全页面（v13.16）
 
 ### 目标与用户可见结果
