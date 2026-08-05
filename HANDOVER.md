@@ -1,6 +1,56 @@
 # HANDOVER — 2026-08-05
 
-## 当前任务卡：Playground 可选模型与实际可用模型同步（v13.17）
+## 当前任务卡：Playground 融合模型显示全部可用供应商（v13.18）
+
+### 目标与用户可见结果
+
+- Playground 搜索 `Free` 时仍只显示一个融合模型，但供应商提示显示它的全部可用供应商，不再只显示当前第一行的 `mapleleaf`。
+- 同一供应商有多个模型行时只计一次；当前有可用密钥的供应商才计入数量。
+- 一个融合组只要至少有一个启用且可用的成员就继续显示；其他有可用密钥但暂未启用的成员用于展示供应商组成，不会单独变成可选路由。
+
+### 当前状态
+
+- source `local/freellmapi-ops`：`f999c80`，已 push，标签 `v13.18` 已 push。
+- VPS `/home/debian/freellmapi`：已快进到 `f999c80`，已拉取标签 `v13.18`；未重建或重启服务端镜像，容器保持 `running healthy`。
+- 前端已重新构建并原地替换绑定目录；公网入口使用 `assets/index-rYkAP6jK.js`，包含 `v13.18`。
+
+### 根因与修复
+
+- **根因**：旧代码先把“未启用”的供应商行过滤掉，再做融合分组，所以 `Free` 只剩当前启用的 `mapleleaf`。
+- **修复**：先按逻辑模型分组，再保留同组中所有有可用密钥的供应商；供应商数量按不同平台去重，避免一个平台的两行模型被重复计算。
+- **生产 Free 现状**：按当前数据库的可用密钥数据，`cmapi`、`kilo`、`mapleleaf` 三个平台会计入；没有可用密钥的平台不计入。
+
+### 修改文件
+
+- `client/src/lib/playground-models.ts`：先判断可见融合组，再收集同组可用供应商。
+- `client/src/lib/model-groups.ts`：供应商数量和平台列表去重。
+- `client/src/lib/playground-models.test.ts`：新增“一个启用成员 + 多个未启用但有可用密钥成员”回归测试。
+
+### 保护边界
+
+- 未修改生产数据库、`profile_models.priority`、`enabled`、`intelligence_rank`、人工路由顺序或供应商实际启用状态。
+- 未运行 ranking、recalibrate、sort；本轮只修 Playground 显示，不擅自把三个供应商全部打开参与实际调度。
+- 现有 active profile 数据源和失效模型自动回退逻辑保持不变。
+
+### fresh 验证
+
+- TDD 回归：先验证旧逻辑得到 1 个供应商，再实现修复；前端测试 `2 files / 5 tests` 全通过。
+- `npm run build -w client`：退出码 0；构建产物包含 `v13.18`、`providerCount`、`usableKeyCount`；`git diff --check` 通过。
+- VPS 备份：`/home/debian/freellmapi/deploy-backups/playground-provider-groups-v13.18-20260805_0935/`，含旧前端、数据库 WAL/SHM（如存在）、compose 和新前端压缩包。
+- VPS：代码 `f999c80`、标签 `v13.18`、容器 `running healthy`、内部 `/api/ping` 200；新前端文件哈希与本地构建一致。
+- 公网：`/`、`/playground`、`/api/ping` 均 200；`Cache-Control: public, max-age=0`、HSTS 存在；公网 bundle 为 `index-rYkAP6jK.js` 且包含 `v13.18`。
+
+### 阻塞
+
+- 无代码、测试或部署阻塞。旧页面仍可能保留浏览器缓存，需要 Ctrl+F5 一次。
+
+### 唯一下一步
+
+- 用户在生产 `/playground` 执行一次 Ctrl+F5，搜索 `Free`，确认提示变为当前可用的 `3 个供应商`；如果希望这三个供应商实际都参加 Auto/Fusion 调度，再单独确认路由表里的启用状态和顺序。
+
+---
+
+## 历史任务卡：Playground 可选模型与实际可用模型同步（v13.17）
 
 ### 目标与用户可见结果
 
