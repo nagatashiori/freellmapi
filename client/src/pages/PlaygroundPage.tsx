@@ -4,23 +4,12 @@ import { ChevronRight, CircleAlert } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { ModelCombobox } from '@/components/model-combobox'
-import { buildModelOptions } from '@/lib/model-groups'
+import { buildPlayableModelOptions, isPlayableModelEntry, reconcilePlaygroundModel } from '@/lib/playground-models'
+import type { FallbackEntry } from '@/lib/routing'
 import { PageHeader } from '@/components/page-header'
 import { Markdown } from '@/components/markdown'
 import { CopyButton } from '@/components/copy-button'
 import { useI18n } from '@/i18n'
-
-interface FallbackEntry {
-  modelDbId: number
-  priority: number
-  enabled: boolean
-  platform: string
-  modelId: string
-  displayName: string
-  sizeLabel: string
-  intelligenceRank: number
-  keyCount: number
-}
 
 interface ChatMessage {
   role: 'user' | 'assistant'
@@ -140,18 +129,27 @@ export default function PlaygroundPage() {
   })
 
   const { data: fallbackEntries = [] } = useQuery<FallbackEntry[]>({
-    queryKey: ['fallback'],
-    queryFn: () => apiFetch('/api/fallback'),
+    // Auto requests use the active routing profile. Keep this query separate
+    // from the Default-profile management query, while the shared
+    // ['fallback'] invalidation prefix still refreshes both after mutations.
+    queryKey: ['fallback', 'active'],
+    queryFn: () => apiFetch('/api/fallback?profile=active'),
   })
 
-  // Unification is always on now (the on/off toggle was removed), so the picker
-  // always collapses a model's providers into one option.
-  const unifyOn = true
+  // The active profile and model-specific health count are the same two gates
+  // used by Auto routing. Collapse duplicate providers into one logical option.
+  const availableModels = fallbackEntries.filter(isPlayableModelEntry)
+  const modelOptions = buildPlayableModelOptions(fallbackEntries)
+  const effectiveSelectedModel = reconcilePlaygroundModel(selectedModel, modelOptions)
 
-  const availableModels = fallbackEntries.filter(e => e.keyCount > 0 && e.enabled)
-  // Collapse the same model from multiple providers into one option (value =
-  // canonical id, which the proxy resolves to the whole group).
-  const modelOptions = buildModelOptions(availableModels, unifyOn)
+  // Remove a deleted/disabled model from localStorage as soon as the refreshed
+  // active-profile list arrives. The derived value above also prevents a stale
+  // id from being sent during the render before this effect runs.
+  useEffect(() => {
+    if (effectiveSelectedModel === selectedModel) return
+    setSelectedModel(effectiveSelectedModel)
+    localStorage.setItem('playground.model', effectiveSelectedModel)
+  }, [effectiveSelectedModel, selectedModel])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -224,7 +222,7 @@ export default function PlaygroundPage() {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
       if (keyData?.apiKey) headers['Authorization'] = `Bearer ${keyData.apiKey}`
 
-      const isFusion = selectedModel === 'fusion'
+      const isFusion = effectiveSelectedModel === 'fusion'
       const sysPrompt = systemPrompt.trim()
       const body: any = {
         messages: [
@@ -232,7 +230,7 @@ export default function PlaygroundPage() {
           ...newMessages.map(m => ({ role: m.role, content: m.content })),
         ],
       }
-      if (selectedModel !== 'auto') body.model = selectedModel
+      if (effectiveSelectedModel !== 'auto') body.model = effectiveSelectedModel
       // Fusion streams its panel + judge trace; ask for a stream so the
       // Playground can show the other models arriving before the final answer.
       if (isFusion) body.stream = true
@@ -341,11 +339,11 @@ export default function PlaygroundPage() {
     localStorage.setItem('playground.model', v)
   }
 
-  const activeModelLabel = selectedModel === 'auto'
+  const activeModelLabel = effectiveSelectedModel === 'auto'
     ? t('playground.autoModel')
-    : selectedModel === 'fusion'
+    : effectiveSelectedModel === 'fusion'
     ? t('playground.fusionModel')
-    : modelOptions.find(o => o.value === selectedModel)?.label ?? selectedModel
+    : modelOptions.find(o => o.value === effectiveSelectedModel)?.label ?? effectiveSelectedModel
 
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)]">
@@ -355,7 +353,7 @@ export default function PlaygroundPage() {
         actions={
           <>
             <ModelCombobox
-              value={selectedModel}
+              value={effectiveSelectedModel}
               options={pickerOptions}
               onSelect={pickModel}
               ariaLabel={t('playground.selectModel')}

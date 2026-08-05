@@ -72,9 +72,14 @@ fallbackRouter.put('/routing', (req: Request, res: Response) => {
 });
 
 // Get fallback chain (with dynamic penalties)
-fallbackRouter.get('/', (_req: Request, res: Response) => {
+fallbackRouter.get('/', (req: Request, res: Response) => {
   const db = getDb();
-  const defaultProfileId = getDefaultProfileId(db);
+  // Dashboard management keeps its historical Default view. Playground asks
+  // for `profile=active` because Auto requests use the active profile; this
+  // prevents the picker from showing models that Auto will never try.
+  const profileId = String(req.query.profile ?? '').toLowerCase() === 'active'
+    ? getActiveRoutingProfileId(db)
+    : getDefaultProfileId(db);
   const rows = db.prepare(`
     SELECT pm.model_db_id, pm.priority,
            CASE WHEN pm.enabled = 1 AND m.enabled = 1 THEN 1 ELSE 0 END AS enabled,
@@ -90,7 +95,7 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
     LEFT JOIN model_overrides mo ON mo.platform = m.platform AND mo.model_id = m.model_id
     WHERE pm.profile_id = ?
     ORDER BY pm.priority ASC
-  `).all(defaultProfileId) as any[];
+  `).all(profileId) as any[];
 
   // Count usable keys per platform — enabled AND healthy/unknown status. Unified
   // with /token-usage and the routing scorer (#456) so budget pooling is computed
