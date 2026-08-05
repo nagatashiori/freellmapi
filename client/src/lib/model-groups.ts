@@ -56,10 +56,8 @@ export function buildModelOptions(entries: PickerEntry[], unifyOn: boolean): Mod
     const rank = e.intelligenceRank ?? 999
     const existing = groups.get(key)
     if (existing) {
-      if (!existing.platforms.includes(e.platform)) {
-        existing.providerCount++
-        existing.platforms.push(e.platform)
-      }
+      existing.providerCount++
+      existing.platforms.push(e.platform)
       if (tier < existing.sizeTier || (tier === existing.sizeTier && rank < existing.intelligenceRank)) {
         existing.sizeTier = tier
         existing.intelligenceRank = rank
