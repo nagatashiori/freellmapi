@@ -1,6 +1,42 @@
 # HANDOVER — 2026-08-05
 
-## 当前任务卡：Playground 融合模型显示全部可用供应商（v13.18）
+## 当前任务卡：回滚 v13.18 Playground 供应商显示修改
+
+### 目标与用户可见结果
+
+- 撤回 v13.18 中“融合模型显示全部有可用密钥供应商”的前端修改。
+- Playground 恢复 v13.17 的行为：只保留 active profile 中启用且模型级可用的成员来生成下拉选项。
+- 不恢复生产数据库旧副本，不回退用户在 v13.18 之后产生的任何数据。
+
+### 当前状态
+
+- source `local/freellmapi-ops`：回滚提交 `d5891ff` 已 push；`v13.18` 标签保留为历史记录，不移动、不删除。
+- VPS 前端已从 v13.18 上线备份原地恢复为 `assets/index-CU9IL6DR.js`（v13.17）；服务端容器未重启，保持 `running healthy`。
+- VPS 回滚前的 v13.18 前端另存于 `/home/debian/freellmapi/deploy-backups/rollback-before-v13.18-restore-20260805_0945/frontend-dist-v13.18/`，便于再次恢复。
+
+### 回滚范围
+
+- 已撤回 `client/src/lib/playground-models.ts`、`client/src/lib/model-groups.ts` 和对应新增测试。
+- 只恢复前端静态资源；数据库、`profile_models.priority`、`enabled`、`intelligence_rank`、人工路由顺序和现有模型记录均保持不变。
+- 未运行 ranking、recalibrate、sort；未恢复旧数据库备份，避免覆盖后续业务数据。
+
+### fresh 验证
+
+- 回滚后前端测试 `2 files / 4 tests` 全通过；`npm run build -w client` 退出码 0；`git diff --check` 通过。
+- 生产回滚使用备份 `/home/debian/freellmapi/deploy-backups/playground-provider-groups-v13.18-20260805_0935/frontend-dist/`，备份资源哈希为 `a4670653170a18313baa4a7e5b635c86f7cc0e42d9060024a26373e0ef03883c`。
+- 公网：`/`、`/playground`、`/api/ping` 均 200；公网 bundle 为 `index-CU9IL6DR.js`，包含 `v13.17` 且不包含 `v13.18`；`Cache-Control: public, max-age=0` 和 HSTS 保持；容器 healthy。
+
+### 阻塞
+
+- 无代码、测试或部署阻塞。已打开的旧页面需要 Ctrl+F5 一次才能看到回滚后的静态资源。
+
+### 唯一下一步
+
+- 用户在生产 `/playground` 执行一次 Ctrl+F5，确认页面恢复到 v13.17 的供应商显示行为。
+
+---
+
+## 历史任务卡：Playground 融合模型显示全部可用供应商（v13.18）
 
 ### 目标与用户可见结果
 
