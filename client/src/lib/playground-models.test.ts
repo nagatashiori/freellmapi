@@ -27,6 +27,22 @@ describe('Playground model availability', () => {
     expect(options.map(option => option.value)).toEqual(['model-c'])
   })
 
+  it('keeps every usable provider in a visible logical group', () => {
+    const options = buildPlayableModelOptions([
+      entry({ platform: 'mapleleaf', enabled: true, keyCount: 2 }),
+      entry({ modelDbId: 2, platform: 'mapleleaf', modelId: 'kilo-auto/free', keyCount: 2 }),
+      entry({ modelDbId: 3, platform: 'cmapi', enabled: false, keyCount: 1 }),
+      entry({ modelDbId: 4, platform: 'kilo', enabled: false, keyCount: 1 }),
+      entry({ modelDbId: 5, platform: 'openrouter', enabled: false, keyCount: 0 }),
+    ])
+
+    expect(options).toHaveLength(1)
+    expect(options[0]).toMatchObject({
+      providerCount: 3,
+      platforms: ['mapleleaf', 'cmapi', 'kilo'],
+    })
+  })
+
   it('falls back to Auto when a refresh removes the selected model', () => {
     expect(reconcilePlaygroundModel('model-old', [{ value: 'model-new' }])).toBe('auto')
     expect(reconcilePlaygroundModel('model-new', [{ value: 'model-new' }])).toBe('model-new')
