@@ -541,7 +541,10 @@ describe('runFallbackLoop: per-attempt abort signal + budget deadline', () => {
 
   it('aborts an attempt still awaiting response headers once the budget is spent', async () => {
     let signal: AbortSignal | null = null;
-    const dispatch = vi.fn(async (_r: any, _a: number, ctx: any) => {
+    let usedRoute: RouteResult | null = null;
+    const logFailure = vi.fn();
+    const dispatch = vi.fn(async (route: RouteResult, _a: number, ctx: any) => {
+      usedRoute = route;
       signal = ctx.signal;
       await new Promise((_, reject) => {
         ctx.signal.addEventListener('abort', () => reject(new DOMException('The operation was aborted', 'AbortError')), { once: true });
@@ -550,12 +553,15 @@ describe('runFallbackLoop: per-attempt abort signal + budget deadline', () => {
     });
     const onExhausted = vi.fn();
 
-    await runFallbackLoop(hooksSkeleton({ timeBudgetMs: 30, maxRetries: 3, dispatch, onExhausted }));
+    await runFallbackLoop(hooksSkeleton({ timeBudgetMs: 30, maxRetries: 3, dispatch, onExhausted, logFailure }));
 
     expect(signal).toBeInstanceOf(AbortSignal);
     expect(onExhausted).toHaveBeenCalledTimes(1); // budget abort → timedOut exhaustion, NOT a retry
     expect(onExhausted.mock.calls[0][1].timedOut).toBe(true);
     expect(onExhausted.mock.calls[0][0].message).toContain('retry time budget');
+    expect(logFailure).toHaveBeenCalledWith(usedRoute, expect.any(Error), 0);
+    const cooldown = getDb().prepare('SELECT 1 FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?').get(usedRoute!.platform, usedRoute!.keyId);
+    expect(cooldown).toBeDefined(); // a budget-cut provider still failed and must be skipped next request
   });
 
   it('passes the effective remaining deadline to the provider attempt', async () => {

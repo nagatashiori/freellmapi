@@ -641,11 +641,16 @@ export async function runFallbackLoop(hooks: FallbackHooks): Promise<void> {
         return;
       }
       // Wall-clock budget ran out MID-attempt: stop the chain and render the
-      // shared timedOut exhaustion. Not a retryable provider failure — the next
-      // candidate would only burn more budget — and not a provider-health
-      // signal, so no cooldown/penalty. The cut-off attempt still enters the
-      // trail so the exhaustion body says what was tried.
+      // shared timedOut exhaustion. We do not start another candidate in this
+      // request, but the provider that was cut off did fail from the caller's
+      // point of view. Record that failure so the next request does not select
+      // the same timed-out key immediately. The cut-off attempt still enters
+      // the trail so the exhaustion body says what was tried.
       if (abortCause === 'budget') {
+        hooks.logFailure(route, err, attempt);
+        if (isRetryableError(err)) {
+          recordRetryableFailure(route, err, hooks.state);
+        }
         attempts.push({ platform: route.platform, modelId: route.modelId, keyOrdinal: keyOrdinal(route), errorClass: classifyAttemptError(err) });
         lastError = err;
         hooks.onExhausted(
