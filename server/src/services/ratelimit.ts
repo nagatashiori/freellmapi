@@ -503,6 +503,7 @@ export function recordRequest(platform: string, modelId: string, keyId: number) 
 
   recordUsage(platform, modelId, keyId, 'request', 0, now);
   clearNullLimitHits(platform, modelId, keyId);
+  clearCooldownHits(platform, modelId, keyId);
 }
 
 export function recordTokens(
@@ -548,6 +549,10 @@ export function getNextCooldownDuration(platform: string, modelId: string, keyId
   cooldownHits.set(key, hits);
   const idx = Math.min(hits.length - 1, COOLDOWN_DURATIONS.length - 1);
   return COOLDOWN_DURATIONS[idx]!;
+}
+
+function clearCooldownHits(platform: string, modelId: string, keyId: number): void {
+  cooldownHits.delete(`${platform}:${modelId}:${keyId}`);
 }
 
 // Short cooldown for a transient (per-minute) 429 — recovers within ~one window.
@@ -611,6 +616,16 @@ export function recentHitCount(
   return hits.filter(t => t > now - windowMs).length;
 }
 
+export interface CooldownLimitOptions {
+  /**
+   * True only when the upstream failure carries a real quota/rate-limit
+   * signal. Timeouts, 5xx responses, and transport errors are retryable but
+   * must not feed the null-limit exhaustion heuristic. The default stays true
+   * for older direct callers that already pass a known quota failure.
+   */
+  quotaSignal?: boolean;
+}
+
 // Decide how long to bench a model+key after an upstream 429. Escalate to the
 // long quarantine (getNextCooldownDuration, up to 24h) when the model is at its
 // DAILY limit (RPD/TPD counter ≥ cap), OR — when limits are unknown — when
@@ -630,6 +645,7 @@ export function getCooldownDurationForLimit(
   keyId: number,
   limits: { rpd: number | null; tpd: number | null },
   retryAfterMs?: number | null,
+  opts?: CooldownLimitOptions,
 ): number {
   const now = Date.now();
   const rpdExhausted =
@@ -642,7 +658,7 @@ export function getCooldownDurationForLimit(
   // 90s-cooldown-loop without requiring operator-side limit seeding.
   const unknownLimits = limits.rpd === null && limits.tpd === null;
   let heuristicallyExhausted = false;
-  if (unknownLimits) {
+  if (unknownLimits && (opts?.quotaSignal ?? true)) {
     // The current hit is recorded first so the threshold can be reached across
     // consecutive 429s, but only for providers where counters cannot decide.
     recordNullLimitHit(platform, modelId, keyId, now);

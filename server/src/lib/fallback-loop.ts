@@ -128,6 +128,7 @@ export function cooldownForError(route: RouteResult, err: any): number {
     route.keyId,
     { rpd: route.rpdLimit, tpd: route.tpdLimit },
     err?.retryAfterMs,
+    { quotaSignal: isRateLimitError(err) },
   );
 }
 

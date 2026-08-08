@@ -130,6 +130,19 @@ describe('Rate Limiter', () => {
       expect(getNextCooldownDuration('groq', `m-${id}`, id + 1)).toBe(2 * 60 * 1000);
       expect(getNextCooldownDuration('groq', `m-${id}-other`, id)).toBe(2 * 60 * 1000);
     });
+
+    it('resets the cooldown escalation ladder after a successful request', () => {
+      const id = Math.floor(Math.random() * 1_000_000);
+      const platform = 'groq';
+      const model = `cooldown-recovered-${id}`;
+
+      expect(getNextCooldownDuration(platform, model, id)).toBe(2 * 60 * 1000);
+      expect(getNextCooldownDuration(platform, model, id)).toBe(10 * 60 * 1000);
+
+      recordRequest(platform, model, id);
+
+      expect(getNextCooldownDuration(platform, model, id)).toBe(2 * 60 * 1000);
+    });
   });
 
   describe('getCooldownDurationForLimit (daily vs transient 429)', () => {
@@ -204,6 +217,17 @@ describe('Rate Limiter', () => {
 
       expect(recentHitCount(platform, model, id, Date.now())).toBe(0);
       expect(getCooldownDurationForLimit(platform, model, id, { rpd: null, tpd: null })).toBe(90 * 1000);
+    });
+
+    it('does not treat timeout/5xx-style failures as quota signals for null-limit keys', () => {
+      const id = Math.floor(Math.random() * 1_000_000);
+      const platform = 'ollama';
+      const model = `non-quota-failure-${id}`;
+      const args = [platform, model, id, { rpd: null, tpd: null }, undefined, { quotaSignal: false }] as const;
+
+      expect((getCooldownDurationForLimit as any)(...args)).toBe(90 * 1000);
+      expect((getCooldownDurationForLimit as any)(...args)).toBe(90 * 1000);
+      expect(recentHitCount(platform, model, id, Date.now())).toBe(0);
     });
 
     it('escalates only once the daily request limit is actually reached', () => {
