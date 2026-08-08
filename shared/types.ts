@@ -108,6 +108,9 @@ export type Platform =
   // AiHub relay (local modification) — OpenAI-compatible third-party free
   // gateway at aihub.071129.xyz. Registered as a first-class platform so DB
   // rows use platform='aihub' (not 'custom') and hasProvider('aihub') works.
+  | 'modelscope'
+  | 'sealion'
+  | 'navy'
   | 'aihub';
 
 export interface Model {

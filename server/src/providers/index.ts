@@ -5,6 +5,9 @@ import { OpenAICompatProvider } from './openai-compat.js';
 import { CohereProvider } from './cohere.js';
 import { CloudflareProvider } from './cloudflare.js';
 import { AIHordeProvider } from './aihorde.js';
+import { ModelScopeProvider } from './modelscope.js';
+import { SeaLionProvider } from './sealion.js';
+import { NavyProvider } from './navy.js';
 
 const providers = new Map<Platform, BaseProvider>();
 
@@ -325,6 +328,16 @@ register(new OpenAICompatProvider({
 // auto-configures and works anonymously (key 0000000000, lowest queue
 // priority); a registered aihorde.net key raises priority. See issue #345.
 register(new AIHordeProvider());
+
+// NavyAI — OpenAI-compatible unified API. Its edge requires an explicit UA.
+register(new NavyProvider());
+
+// SEA-LION (AI Singapore) — first-party OpenAI-compatible API.
+register(new SeaLionProvider());
+
+// ModelScope — OpenAI-compatible API with dedicated auth validation because
+// GET /v1/models does not authenticate the supplied token.
+register(new ModelScopeProvider());
 
 // Placeholder so getProvider('custom')/hasProvider('custom')/getAllProviders()
 // behave — but the real instance is built per-key by resolveProvider(), since
