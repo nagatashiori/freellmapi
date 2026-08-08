@@ -1,4 +1,49 @@
-# HANDOVER — 2026-08-05
+# HANDOVER — 2026-08-08
+
+## 当前任务卡：v13.20 多 API 官方账号选择修复
+
+### 目标与用户可见结果
+
+- 同一供应商、同一自定义端点下的多个 token/API key 进入同一个可用账号池。
+- 无历史数据时按 key ID 稳定轮询；有历史数据时使用官方 v0.6.9 的 Beta 后验抽样策略，可靠 key 更容易被选中，但其他 key 仍会被探索。
+- 同一端点的两个 token 文件可以互相轮换；不同端点不会混用；冷却、限流、并发占满或本次请求已经失败的 key 会跳过。
+- 前端已同步重新构建并部署，版本显示为 `v13.20`。
+
+### 当前状态
+
+- source `local/freellmapi-ops`：提交 `b88c037` 已 push；标签 `v13.20` 已 push。
+- VPS `/home/debian/freellmapi`：源码为 `b88c037`，镜像已重新构建；`freellmapi-freellmapi-1` 为 `running healthy`。
+- 公网入口使用 `assets/index-C5qINsoU.js` 和 `assets/index-D9saEn7T.css`；公网 JS 含 `v13.20` 且不含 `v13.19`。
+- 生产数据库未写入；只读取确认 `mapleleaf` 当前有同一端点的 2 个启用 key。
+
+### 修改文件
+
+- `server/src/services/router.ts`：key 有历史时采用 `sampleBeta` + `speedScore` 的官方账号选择方式；无历史时用 `ORDER BY id ASC` 保证轮询顺序稳定。
+- `server/src/__tests__/services/router-key-pool.test.ts`：增加历史后的双 key 探索测试、同端点双 token 轮换测试和不同端点隔离测试。
+
+### fresh 验证
+
+- 先红后绿：旧实现下新增历史测试的 24 次选择全部落在第一把 key；改为官方抽样后两把 key 都被选中。
+- key pool 定向测试：5/5 通过。
+- source 测试（排除其他 worktree 和公网 offline-fetch 保护测试）：退出码 0。
+- server TypeScript 检查、server build、client build、`git diff --check` 均通过。
+- VPS 容器 healthy，内部和公网 `/api/ping` 均 200；生产页面资源已更新到 `v13.20`。
+
+### 保护边界
+
+- 未修改模型、路由顺序、排名、enabled 或数据库资料；未运行 ranking、recalibrate、sort。
+- 未使用真实生产 token 发起上游请求；没有真实额度消耗。
+- 官方策略不是有历史后的强制 A/B/A/B，而是可靠性优先并保留探索；强制等比例轮换属于另一个策略，本次未擅自替换。
+
+### 阻塞
+
+- 默认全量扫描会额外发现 `.worktrees/` 中其他窗口的测试；公网 offline-fetch 测试在当前环境收到 HTTP 403，因此默认扫描有 5 个与本次改动无关的失败。源目录排除这些干扰后的测试通过。
+
+### 唯一下一步
+
+- 用户用同一端点的两把有效 token 发一次生产请求，在 Analytics 查看是否出现两个不同 API ID；没有真实请求证据前，不把上游轮换称为线上最终确认。
+
+---
 
 ## 当前任务卡：回滚 v13.18 Playground 供应商显示修改
 
