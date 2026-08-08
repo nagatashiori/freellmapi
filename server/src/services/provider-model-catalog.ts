@@ -5,7 +5,8 @@
  * - 本文件是供应商模型管理的唯一业务入口；路由和页面不得复制这里的规则。
  * - 远端发现只读，绝不根据远端缺失或空数组删除本地模型。
  * - 导入只新增，删除必须显式调用，二者不能合并成“同步”。
- * - 新模型在 models、fallback_config、Default profile 三处都保持关闭。
+ * - 选中的新模型同时写入 models、fallback_config 和当前使用的 profile，
+ *   并追加到各自链尾；原有顺序和状态不被触碰。
  *
  * 阅读顺序：先看文件底部 providerModelCatalog 的五个公开方法，再按需进入 helper。
  */
@@ -13,6 +14,7 @@ import type { Db } from '../db/types.js';
 import { decrypt } from '../lib/crypto.js';
 import { calibrateModelMeta, niceDisplayName, repairLegacyDisplayName } from '../lib/model-intel.js';
 import { assessProviderUrl } from '../lib/url-guard.js';
+import { endpointScopeForBaseUrl } from '../lib/endpoint-scope.js';
 import type {
   Platform,
   ProviderCatalogDiscoveryResult,
@@ -33,7 +35,7 @@ import {
 import {
   deleteRoutingModelMemberships,
   ensureModelInProfile,
-  getDefaultProfileId,
+  getActiveRoutingProfileId,
 } from './routing-groups.js';
 
 /** 可安全暴露给 HTTP 层的业务错误。 */
@@ -103,10 +105,23 @@ function preferredKey(rows: KeyRow[]): KeyRow {
  * 生成当前来源对应的本地模型过滤条件。
  * custom 来源可能有多把相同 endpoint 的密钥，因此使用整个 key 集合，而不是只看首选 key。
  */
-function localModelWhere(platform: string, keyIds: number[]): {
+function localModelWhere(platform: string, keyIds: number[], endpointScope?: string | null): {
   sql: string;
   values: Array<string | number>;
 } {
+  const scope = endpointScopeForBaseUrl(endpointScope);
+  if (scope) {
+    const placeholders = keyIds.map(() => '?').join(', ');
+    const legacy = keyIds.length > 0
+      ? ` OR (COALESCE(m.endpoint_scope, '') = '' AND m.key_id IN (${placeholders}))`
+      : '';
+    return {
+      sql: `m.platform = ? AND (COALESCE(m.endpoint_scope, '') = ?${legacy})`,
+      values: keyIds.length > 0
+        ? [platform, scope, ...keyIds]
+        : [platform, scope],
+    };
+  }
   if (platform === 'custom') {
     const placeholders = keyIds.map(() => '?').join(', ');
     return {
@@ -118,8 +133,8 @@ function localModelWhere(platform: string, keyIds: number[]): {
 }
 
 /** 统计来源当前拥有的本地模型数量。 */
-function countLocalModels(db: Db, platform: string, keyIds: number[]): number {
-  const where = localModelWhere(platform, keyIds);
+function countLocalModels(db: Db, platform: string, keyIds: number[], endpointScope?: string | null): number {
+  const where = localModelWhere(platform, keyIds, endpointScope);
   const row = db.prepare(`SELECT COUNT(*) AS count FROM models m WHERE ${where.sql}`).get(...where.values) as { count: number };
   return row.count;
 }
@@ -225,7 +240,7 @@ function buildSources(db: Db): SourceBundle[] {
       listUrl: catalogRequest.publicUrl,
       kind: baseUrl || selected.platform === 'custom' || isUserPlatform(selected.platform) ? 'channel' : 'builtin',
     };
-    source.modelCount = countLocalModels(db, source.platform, keys.map(key => key.id));
+    source.modelCount = countLocalModels(db, source.platform, keys.map(key => key.id), baseUrl);
     result.push({ source, keys, requestBaseUrl: baseUrl });
   }
 
@@ -408,16 +423,16 @@ async function discoverRemote(
     );
   }
 
-  const where = localModelWhere(source.platform, keys.map(key => key.id));
+  const where = localModelWhere(source.platform, keys.map(key => key.id), requestBaseUrl);
   const localRows = db.prepare(`
     SELECT m.id, m.model_id, m.enabled
       FROM models m
      WHERE ${where.sql}
   `).all(...where.values) as Array<{ id: number; model_id: string; enabled: number }>;
   const localIds = new Set(localRows.map((row) => row.model_id));
-  // models has UNIQUE(platform, model_id). For classic custom endpoints a model
-  // may already belong to another endpoint/key, so it must be treated as
-  // registered rather than selected for an insert that can only fail.
+  // A model id can exist on another provider or endpoint and still be a valid
+  // new candidate here. Only the current source controls the checkbox state;
+  // the other-source flag is informational for the fusion view.
   const platformIds = new Set(
     (db.prepare('SELECT model_id FROM models WHERE platform = ?').all(source.platform) as Array<{ model_id: string }>)
       .map((row) => row.model_id),
@@ -432,14 +447,14 @@ async function discoverRemote(
     if (!id || seen.has(id)) continue;
     seen.add(id);
     const registeredInThisSource = localIds.has(id);
-    const alreadyRegistered = platformIds.has(id);
+    const existsOtherSource = platformIds.has(id) && !registeredInThisSource;
     const ownedByRaw = item.owned_by ?? item.ownedBy ?? item.publisher ?? item.organization;
     models.push({
       id,
       name: displayNameFor(item, id),
       ownedBy: typeof ownedByRaw === 'string' ? ownedByRaw : undefined,
-      alreadyRegistered,
-      existsOtherSource: alreadyRegistered && !registeredInThisSource,
+      alreadyRegistered: registeredInThisSource,
+      existsOtherSource,
     });
   }
   models.sort((a, b) => a.id.localeCompare(b.id));
@@ -462,9 +477,9 @@ async function discoverRemote(
 
 /** 只读列出本地模型；不会访问供应商网络。 */
 function listLocal(db: Db, sourceIdOrPlatform: string): ProviderCatalogLocalResult {
-  const { source, keys } = resolveSource(db, sourceIdOrPlatform);
-  const where = localModelWhere(source.platform, keys.map(key => key.id));
-  const defaultProfileId = getDefaultProfileId(db);
+  const { source, keys, requestBaseUrl } = resolveSource(db, sourceIdOrPlatform);
+  const where = localModelWhere(source.platform, keys.map(key => key.id), requestBaseUrl);
+  const activeProfileId = getActiveRoutingProfileId(db);
   const rows = db.prepare(`
     SELECT m.id, m.model_id, m.display_name, m.enabled, m.key_id,
            COALESCE(pm.enabled, 0) AS routing_enabled
@@ -473,7 +488,7 @@ function listLocal(db: Db, sourceIdOrPlatform: string): ProviderCatalogLocalResu
         ON pm.model_db_id = m.id AND pm.profile_id = ?
      WHERE ${where.sql}
      ORDER BY m.display_name COLLATE NOCASE, m.model_id COLLATE NOCASE
-  `).all(defaultProfileId, ...where.values) as Array<{
+  `).all(activeProfileId, ...where.values) as Array<{
     id: number;
     model_id: string;
     display_name: string;
@@ -590,10 +605,11 @@ function importMissing(
   sourceIdOrPlatform: string,
   rawModelIds: string[],
 ): ProviderCatalogImportResult {
-  const { source, selectedKey } = resolveSource(db, sourceIdOrPlatform);
+  const { source, keys, selectedKey, requestBaseUrl } = resolveSource(db, sourceIdOrPlatform);
   const ids = normalizeModelIds(rawModelIds, 'imported');
 
-  const defaultProfileId = getDefaultProfileId(db);
+  const activeProfileId = getActiveRoutingProfileId(db);
+  const endpointScope = endpointScopeForBaseUrl(requestBaseUrl);
   const bindKeyId = source.platform === 'custom' ? selectedKey.id : null;
   let added = 0;
   let skipped = 0;
@@ -604,11 +620,21 @@ function importMissing(
     let fallbackPriority = maxFallback.priority;
 
     for (const modelId of ids) {
-      // The DB uniqueness invariant is platform + model_id, including classic
-      // custom endpoints. Never try to rebind an existing custom model merely
-      // because it was discovered through a different endpoint.
-      const existing = db.prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?')
-        .get(source.platform, modelId);
+      // Built-in rows are matched by platform/model. Custom rows additionally
+      // belong to their endpoint, so the same model id at two user endpoints
+      // remains two independent candidates.
+      const sourceKeyIds = keys.map(key => key.id);
+      const legacyEndpointClause = endpointScope && sourceKeyIds.length > 0
+        ? ` OR (endpoint_scope = '' AND key_id IN (${sourceKeyIds.map(() => '?').join(', ')}))`
+        : '';
+      const existingArgs: Array<string | number> = sourceKeyIds.length > 0 && legacyEndpointClause
+        ? [source.platform, modelId, endpointScope, ...sourceKeyIds]
+        : [source.platform, modelId, endpointScope];
+      const existing = db.prepare(`
+        SELECT id FROM models
+         WHERE platform = ? AND model_id = ?
+           AND (endpoint_scope = ?${legacyEndpointClause})
+      `).get(...existingArgs);
       if (existing) {
         skipped++;
         continue;
@@ -621,8 +647,8 @@ function importMissing(
       const info = db.prepare(`
         INSERT INTO models
           (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
-           enabled, key_id, supports_tools, supports_vision)
-        VALUES (?, ?, ?, ?, 35, ?, 0, ?, 1, 0)
+           enabled, key_id, supports_tools, supports_vision, endpoint_scope)
+        VALUES (?, ?, ?, ?, 35, ?, 1, ?, 1, 0, ?)
       `).run(
         source.platform,
         modelId,
@@ -630,12 +656,13 @@ function importMissing(
         meta.intelligenceRank,
         meta.sizeLabel,
         bindKeyId,
+        endpointScope,
       );
       const modelDbId = Number(info.lastInsertRowid);
       fallbackPriority++;
-      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 0)')
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)')
         .run(modelDbId, fallbackPriority);
-      ensureModelInProfile(db, defaultProfileId, modelDbId, 0);
+      ensureModelInProfile(db, activeProfileId, modelDbId, 1);
       inserted.push({ modelId, modelDbId });
       added++;
     }
@@ -653,11 +680,11 @@ function removeLocal(
   sourceIdOrPlatform: string,
   rawModelIds: string[],
 ): ProviderCatalogRemoveResult {
-  const { source, keys } = resolveSource(db, sourceIdOrPlatform);
+  const { source, keys, requestBaseUrl } = resolveSource(db, sourceIdOrPlatform);
   const ids = normalizeModelIds(rawModelIds, 'removed');
 
   const removed: Array<{ modelId: string; tombstoned: boolean }> = [];
-  const where = localModelWhere(source.platform, keys.map(key => key.id));
+  const where = localModelWhere(source.platform, keys.map(key => key.id), requestBaseUrl);
   const apply = db.transaction(() => {
     for (const modelId of ids) {
       const row = db.prepare(`

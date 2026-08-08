@@ -2,8 +2,16 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDb } from '../db/index.js';
 import { FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M } from '../db/model-pricing.js';
+import { endpointHandle } from '../lib/endpoint-scope.js';
 
 export const analyticsRouter = Router();
+
+// A request is tied to the API key that actually served it.  For user-defined
+// OpenAI-compatible endpoints the key's base URL is the only safe way to keep
+// two identical model IDs apart in model-level analytics.  Keep this as an
+// internal normalized value; responses expose only a short endpoint handle.
+const requestEndpointScopeSql =
+  "COALESCE(NULLIF(RTRIM(COALESCE(rk.base_url, ''), '/'), ''), '')";
 
 // Format UTC timestamps the same way SQLite stores created_at text values.
 const toSqliteDateTime = (timestamp: number) =>
@@ -95,17 +103,20 @@ analyticsRouter.get('/routing-traces', (req: Request, res: Response) => {
   const db = getDb();
   const rows = db.prepare(`
     SELECT * FROM (
-      SELECT id, request_id, surface, attempt, event, platform, model_id,
-             requested_model, latency_ms, input_tokens, output_tokens, error, created_at
-      FROM routing_events
-      WHERE created_at >= ?
-      ORDER BY id DESC
+      SELECT re.id, re.request_id, re.surface, re.attempt, re.event, re.platform, re.model_id,
+             re.key_id, k.label AS key_label, re.requested_model, re.latency_ms,
+             re.input_tokens, re.output_tokens, re.error, re.created_at
+      FROM routing_events AS re
+      LEFT JOIN api_keys AS k ON k.id = re.key_id
+      WHERE re.created_at >= ?
+      ORDER BY re.id DESC
       LIMIT ?
     )
     ORDER BY id ASC
   `).all(since, limit * 12) as Array<{
     id: number; request_id: string; surface: string; attempt: number; event: string;
-    platform: string; model_id: string; requested_model: string | null;
+    platform: string; model_id: string; key_id: number | null; key_label: string | null;
+    requested_model: string | null;
     latency_ms: number | null; input_tokens: number | null; output_tokens: number | null;
     error: string | null; created_at: string;
   }>;
@@ -129,11 +140,15 @@ analyticsRouter.get('/routing-traces', (req: Request, res: Response) => {
         finalState: last.event,
         finalPlatform: last.platform,
         finalModelId: last.model_id,
+        finalKeyId: last.key_id,
+        finalKeyLabel: last.key_label ?? (last.key_id != null ? `Key #${last.key_id}` : null),
         events: events.map(event => ({
           attempt: event.attempt,
           event: event.event,
           platform: event.platform,
           modelId: event.model_id,
+          keyId: event.key_id,
+          keyLabel: event.key_label ?? (event.key_id != null ? `Key #${event.key_id}` : null),
           latencyMs: event.latency_ms,
           inputTokens: event.input_tokens,
           outputTokens: event.output_tokens,
@@ -154,31 +169,35 @@ analyticsRouter.get('/channel-model-baselines', (req: Request, res: Response) =>
   const db = getDb();
   const rows = db.prepare(`
     SELECT
-      platform,
-      model_id,
+      r.platform,
+      r.model_id,
+      ${requestEndpointScopeSql} AS endpoint_scope,
       COUNT(*) AS attempts,
-      SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
-      SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS error_count,
-      COUNT(CASE WHEN status = 'success' AND latency_ms IS NOT NULL THEN 1 END) AS latency_count,
-      AVG(CASE WHEN status = 'success' THEN latency_ms ELSE NULL END) AS avg_latency_ms,
-      AVG(CASE WHEN status = 'success' THEN ttfb_ms ELSE NULL END) AS avg_ttfb_ms,
-      AVG(CASE WHEN status = 'success' AND output_tokens > 0 AND latency_ms > 0
-        THEN output_tokens / (latency_ms / 1000.0) ELSE NULL END) AS avg_tokens_per_second,
-      MAX(created_at) AS last_called_at
-    FROM requests
-    WHERE created_at >= ? AND COALESCE(request_type, 'chat') != 'probe'
-    GROUP BY platform, model_id
+      SUM(CASE WHEN r.status = 'success' THEN 1 ELSE 0 END) AS success_count,
+      SUM(CASE WHEN r.status = 'error' THEN 1 ELSE 0 END) AS error_count,
+      COUNT(CASE WHEN r.status = 'success' AND r.latency_ms IS NOT NULL THEN 1 END) AS latency_count,
+      AVG(CASE WHEN r.status = 'success' THEN r.latency_ms ELSE NULL END) AS avg_latency_ms,
+      AVG(CASE WHEN r.status = 'success' THEN r.ttfb_ms ELSE NULL END) AS avg_ttfb_ms,
+      AVG(CASE WHEN r.status = 'success' AND r.output_tokens > 0 AND r.latency_ms > 0
+        THEN r.output_tokens / (r.latency_ms / 1000.0) ELSE NULL END) AS avg_tokens_per_second,
+      MAX(r.created_at) AS last_called_at
+    FROM requests r
+    LEFT JOIN api_keys rk ON rk.id = r.key_id
+    WHERE r.created_at >= ? AND COALESCE(r.request_type, 'chat') != 'probe'
+    GROUP BY r.platform, r.model_id, ${requestEndpointScopeSql}
     ORDER BY last_called_at DESC, attempts DESC
   `).all(since) as Array<{
-    platform: string; model_id: string; attempts: number; success_count: number;
+    platform: string; model_id: string; endpoint_scope: string; attempts: number; success_count: number;
     error_count: number; latency_count: number; avg_latency_ms: number | null;
     avg_ttfb_ms: number | null; avg_tokens_per_second: number | null; last_called_at: string;
   }>;
   const percentileStmt = db.prepare(`
-    SELECT latency_ms FROM requests
-    WHERE created_at >= ? AND platform = ? AND model_id = ?
-      AND status = 'success' AND latency_ms IS NOT NULL
-      AND COALESCE(request_type, 'chat') != 'probe'
+    SELECT r.latency_ms FROM requests r
+    LEFT JOIN api_keys rk ON rk.id = r.key_id
+    WHERE r.created_at >= ? AND r.platform = ? AND r.model_id = ?
+      AND ${requestEndpointScopeSql} = ?
+      AND r.status = 'success' AND r.latency_ms IS NOT NULL
+      AND COALESCE(r.request_type, 'chat') != 'probe'
     ORDER BY latency_ms ASC
     LIMIT 1 OFFSET ?
   `);
@@ -187,12 +206,13 @@ analyticsRouter.get('/channel-model-baselines', (req: Request, res: Response) =>
     const percentileAt = (fraction: number): number | null => {
       if (row.latency_count === 0) return null;
       const offset = Math.floor((row.latency_count - 1) * fraction);
-      const result = percentileStmt.get(since, row.platform, row.model_id, offset) as { latency_ms: number } | undefined;
+      const result = percentileStmt.get(since, row.platform, row.model_id, row.endpoint_scope, offset) as { latency_ms: number } | undefined;
       return result ? Math.round(result.latency_ms) : null;
     };
     return {
       platform: row.platform,
       modelId: row.model_id,
+      endpointScope: row.endpoint_scope ? endpointHandle(row.endpoint_scope) : null,
       attempts: row.attempts,
       successCount: row.success_count ?? 0,
       successRate: Math.round(((row.success_count ?? 0) * 1000) / row.attempts) / 10,
@@ -241,7 +261,9 @@ analyticsRouter.get('/summary', (req: Request, res: Response) => {
       ELSE 0 END
     ), 0) as est_savings
     FROM requests r
+    LEFT JOIN api_keys rk ON rk.id = r.key_id
     LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
+      AND COALESCE(m.endpoint_scope, '') = ${requestEndpointScopeSql}
     WHERE r.created_at >= ?
   `).get(FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M, since) as { est_savings: number };
 
@@ -341,6 +363,7 @@ analyticsRouter.get('/by-model', (req: Request, res: Response) => {
     SELECT
       r.platform,
       r.model_id,
+      ${requestEndpointScopeSql} AS endpoint_scope,
       m.display_name,
       COUNT(*) as requests,
       SUM(CASE WHEN r.status = 'success' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as success_rate,
@@ -353,15 +376,18 @@ analyticsRouter.get('/by-model', (req: Request, res: Response) => {
         r.output_tokens * COALESCE(m.paid_output_per_m, ?) / 1000000.0
       ELSE 0 END) as est_cost
     FROM requests r
+    LEFT JOIN api_keys rk ON rk.id = r.key_id
     LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
+      AND COALESCE(m.endpoint_scope, '') = ${requestEndpointScopeSql}
     WHERE r.created_at >= ?
-    GROUP BY r.platform, r.model_id
+    GROUP BY r.platform, r.model_id, ${requestEndpointScopeSql}
     ORDER BY requests DESC
   `).all(FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M, since) as any[];
 
   res.json(rows.map(r => ({
     platform: r.platform,
     modelId: r.model_id,
+    endpointScope: r.endpoint_scope ? endpointHandle(r.endpoint_scope) : null,
     displayName: r.display_name ?? r.model_id,
     requests: r.requests,
     successRate: Math.round(r.success_rate * 10) / 10,

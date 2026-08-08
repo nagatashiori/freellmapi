@@ -392,6 +392,9 @@ export function ProviderList({ onAddKey }: { onAddKey: () => void }) {
           {t('keys.providerCountSummary', { providers: totalProviders, keys: totalKeys })}
         </span>
       </div>
+      <p className="mb-4 text-[11px] leading-5 text-muted-foreground">
+        多个 API 会按健康状态、成功率、速度和当前并发自动选择；每次请求使用的账号会记录在 Analytics。API 账号可通过接口的 <code className="rounded bg-muted px-1">modelScope</code> 限定可服务的模型，页面只显示脱敏密钥。
+      </p>
 
       {visibleGroups.length === 0 ? (
         <EmptyState title={t('keys.noFilterMatch')} />
@@ -526,6 +529,11 @@ export function ProviderList({ onAddKey }: { onAddKey: () => void }) {
                               </>
                             )}
                             <span className="text-xs text-muted-foreground">{statusLabelKey[status] ? t(statusLabelKey[status]) : status}</span>
+                            {k.modelScope && k.modelScope.length > 0 && (
+                              <span className="text-[11px] text-muted-foreground" title={k.modelScope.join(', ')}>
+                                限定 {k.modelScope.length} 个模型
+                              </span>
+                            )}
                             <div className="flex-1" />
                             {lastChecked && (
                               <span className="text-[11px] text-muted-foreground tabular-nums">

@@ -102,6 +102,7 @@ export function traceRouteEvent(
     attempt: number;
     platform: string;
     model: string;
+    keyId?: number | null;
     requestedModel?: string;
     latencyMs?: number;
     inputTokens?: number;
@@ -119,6 +120,7 @@ export function traceRouteEvent(
     '-',
     opts.model,
   ];
+  if (opts.keyId != null) parts.push(`api=Key #${opts.keyId}`);
   if (opts.requestedModel) parts.push(`req=${opts.requestedModel}`);
   if (opts.latencyMs != null) parts.push(`lat=${opts.latencyMs}ms`);
   if (opts.inputTokens != null) parts.push(`in=${opts.inputTokens}`);
@@ -134,8 +136,8 @@ export function traceRouteEvent(
   try {
     getDb().prepare(`
       INSERT INTO routing_events
-        (request_id, surface, attempt, event, platform, model_id, requested_model, latency_ms, input_tokens, output_tokens, error)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (request_id, surface, attempt, event, platform, model_id, key_id, requested_model, latency_ms, input_tokens, output_tokens, error)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       opts.requestId,
       scope,
@@ -143,6 +145,7 @@ export function traceRouteEvent(
       opts.event,
       opts.platform,
       opts.model,
+      opts.keyId ?? null,
       opts.requestedModel ?? null,
       opts.latencyMs ?? null,
       opts.inputTokens ?? null,
@@ -783,6 +786,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
         attempt,
         platform: route.platform,
         model: route.modelId,
+        keyId: route.keyId,
         requestedModel: attempt === 0 ? requestedModelLabel : undefined,
       });
 
@@ -865,6 +869,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
             attempt,
             platform: route.platform,
             model: route.modelId,
+            keyId: route.keyId,
             latencyMs: Date.now() - start,
             inputTokens: estimatedInputTokens,
             outputTokens: totalOutputTokens,
@@ -883,6 +888,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
               attempt,
               platform: route.platform,
               model: route.modelId,
+              keyId: route.keyId,
               latencyMs: Date.now() - start,
               error: sanitizeProviderErrorMessage(streamErr.message),
             });
@@ -941,6 +947,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
         attempt,
         platform: route.platform,
         model: route.modelId,
+        keyId: route.keyId,
         latencyMs: Date.now() - start,
         inputTokens: promptTokens,
         outputTokens: completionTokens,
@@ -957,6 +964,7 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
         attempt,
         platform: route.platform,
         model: route.modelId,
+        keyId: route.keyId,
         latencyMs: latency,
         error: safeError,
       });
@@ -1502,6 +1510,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       attempt,
       platform: route.platform,
       model: route.modelId,
+      keyId: route.keyId,
       requestedModel: attempt === 0 ? requestedModelLabel : undefined,
     });
     let outboundMessages = messages;
@@ -1598,6 +1607,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
                 attempt,
                 platform: route.platform,
                 model: route.modelId,
+                keyId: route.keyId,
                 latencyMs: Date.now() - start,
                 error: sanitizeProviderErrorMessage(String(msg)),
               });
@@ -1752,6 +1762,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
             attempt,
             platform: route.platform,
             model: route.modelId,
+            keyId: route.keyId,
             latencyMs: Date.now() - start,
             inputTokens: estimatedInputTokens + injectedHandoffTokens,
             outputTokens: totalOutputTokens,
@@ -1772,6 +1783,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
               attempt,
               platform: route.platform,
               model: route.modelId,
+              keyId: route.keyId,
               latencyMs: Date.now() - start,
               error: sanitizeProviderErrorMessage(streamErr.message),
             });
@@ -1920,6 +1932,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           attempt,
           platform: route.platform,
           model: route.modelId,
+          keyId: route.keyId,
           latencyMs: Date.now() - start,
           inputTokens: promptTokens,
           outputTokens: completionTokens,
@@ -1937,6 +1950,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         attempt,
         platform: route.platform,
         model: route.modelId,
+        keyId: route.keyId,
         latencyMs: latency,
         error: safeError,
       });

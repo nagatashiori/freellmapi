@@ -159,6 +159,32 @@ resolved client IP (what nginx overwrote the header with) is loopback — a
 forged `X-Forwarded-For: 127.0.0.1` never counts, because the header is
 replaced before it reaches the app.
 
+## Multiple API accounts
+
+Every enabled key for a provider is an independent account in the routing pool.
+Before a request starts, FreeLLMAPI skips disabled, unhealthy, cooling-down,
+model-incompatible, rate-limited, or already-full accounts. It prefers a
+reliable and fast account when history exists, and uses stable round-robin
+rotation when there is no history yet. The selected key is held by a short
+lease and released on success, failure, timeout, or client disconnect.
+
+Optional environment limits are:
+
+```dotenv
+MAX_CONCURRENT_REQUESTS_PER_KEY=2
+MAX_CONCURRENT_REQUESTS_PER_KEY_GROQ=2
+PROVIDER_MINUTE_REQUEST_CAP_NVIDIA=40
+PROVIDER_DAILY_REQUEST_CAP_MODELSCOPE=1800
+PROVIDER_DAILY_TOKEN_CAP_NAVY=150000
+```
+
+The platform-specific value overrides the global per-key value. Set a cap to
+`0` to disable that cap. API-key records can also carry `model_scope_json`:
+`NULL` means all models for that provider, while a JSON array such as
+`["model-a", "model-b"]` restricts that account to exact model IDs. The API
+and Analytics expose only the key ID and label; the real key and encrypted
+key material are never returned.
+
 ## Published Image
 
 Images are published to GitHub Container Registry:

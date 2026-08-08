@@ -145,6 +145,113 @@ describe('applyCatalog', () => {
     expect(row.enabled).toBe(0);
   });
 
+  it('official built-in matching updates only existing A1-A10 metadata', () => {
+    const platform = 'groq';
+    const modelId = 'llama-3.3-70b-versatile';
+    const beforeModel = getDb().prepare(`
+      SELECT id, display_name, intelligence_rank, speed_rank, size_label, enabled,
+             rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget,
+             context_window, supports_vision, supports_tools
+        FROM models
+       WHERE platform = ? AND model_id = ?
+    `).get(platform, modelId) as Record<string, unknown>;
+    expect(beforeModel).toBeDefined();
+
+    const beforeProfile = getDb().prepare(`
+      SELECT priority, enabled
+        FROM profile_models
+       WHERE model_db_id = ?
+       ORDER BY profile_id
+       LIMIT 1
+    `).get(beforeModel.id) as { priority: number; enabled: number };
+    const beforeFallback = getDb().prepare(
+      'SELECT priority, enabled FROM fallback_config WHERE model_db_id = ?',
+    ).get(beforeModel.id) as { priority: number; enabled: number };
+
+    const models = [baseModel({ platform, modelId })];
+    const target = models[0];
+    target.displayName = 'Official Groq Name';
+    target.intelligenceRank = 1;
+    target.speedRank = 1;
+    target.sizeLabel = 'Changed By Catalog';
+    target.limits = { rpm: 99, rpd: 999, tpm: 8888, tpd: 7777 };
+    target.monthlyTokenBudget = '~9M';
+    target.contextWindow = 32768;
+    target.supportsVision = true;
+    target.supportsTools = false;
+    target.enabled = false;
+    models.push(baseModel({ platform, modelId: 'official-only-new-model' }));
+
+    const counts = applyCatalog(getDb(), catalogOf(models), { officialBuiltInMatchOnly: true });
+
+    expect(counts.updated).toBe(1);
+    expect(counts.inserted).toBe(0);
+    expect(getDb().prepare(
+      'SELECT id FROM models WHERE platform = ? AND model_id = ?',
+    ).get(platform, 'official-only-new-model')).toBeUndefined();
+
+    const afterModel = getDb().prepare(`
+      SELECT id, display_name, intelligence_rank, speed_rank, size_label, enabled,
+             rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget,
+             context_window, supports_vision, supports_tools
+        FROM models
+       WHERE platform = ? AND model_id = ?
+    `).get(platform, modelId) as Record<string, unknown>;
+    expect(afterModel).toEqual({
+      id: beforeModel.id,
+      display_name: 'Official Groq Name',
+      intelligence_rank: beforeModel.intelligence_rank,
+      speed_rank: beforeModel.speed_rank,
+      size_label: beforeModel.size_label,
+      enabled: beforeModel.enabled,
+      rpm_limit: 99,
+      rpd_limit: 999,
+      tpm_limit: 8888,
+      tpd_limit: 7777,
+      monthly_token_budget: '~9M',
+      context_window: 32768,
+      supports_vision: 1,
+      supports_tools: 0,
+    });
+
+    expect(getDb().prepare(`
+      SELECT priority, enabled
+        FROM profile_models
+       WHERE model_db_id = ?
+       ORDER BY profile_id
+       LIMIT 1
+    `).get(beforeModel.id)).toEqual(beforeProfile);
+    expect(getDb().prepare(
+      'SELECT priority, enabled FROM fallback_config WHERE model_db_id = ?',
+    ).get(beforeModel.id)).toEqual(beforeFallback);
+  });
+
+  it('official built-in matching leaves the existing quirk set untouched', () => {
+    const existingQuirk = [{
+      slug: 'operator-quirk',
+      title: 'Operator quirk',
+      body: 'Keep this runtime note.',
+      severity: 'info' as const,
+      targets: [{ platform: 'groq', modelGlob: null }],
+    }];
+    applyCatalog(getDb(), catalogOf([], existingQuirk));
+
+    const counts = applyCatalog(
+      getDb(),
+      catalogOf([baseModel({ modelId: 'llama-3.3-70b-versatile' })], [{
+        slug: 'upstream-quirk',
+        title: 'Upstream quirk',
+        body: 'Must not replace the operator set in safe mode.',
+        severity: 'warning',
+        targets: [{ platform: 'groq', modelGlob: null }],
+      }]),
+      { officialBuiltInMatchOnly: true },
+    );
+
+    expect(counts.quirks).toBe(0);
+    expect(getDb().prepare('SELECT slug FROM quirks').all()).toEqual([{ slug: 'operator-quirk' }]);
+  });
+
   it('keeps models that are absent from a later catalog refresh', () => {
     const models = existingAsCatalogModels().filter((m) => m.modelId !== 'brand-new-model');
     const before = getDb()

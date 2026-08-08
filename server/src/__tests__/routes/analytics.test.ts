@@ -330,6 +330,38 @@ describe('Analytics API', () => {
     });
   });
 
+  it('keeps identical models on different user endpoints separate in analytics', async () => {
+    const db = getDb();
+    const insertKey = db.prepare(`
+      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
+      VALUES ('custom', ?, 'fixture', 'fixture', 'fixture', 'healthy', 1, ?)
+    `);
+    const firstKey = Number(insertKey.run('Endpoint A', 'https://one.example/v1').lastInsertRowid);
+    const secondKey = Number(insertKey.run('Endpoint B', 'https://two.example/v1').lastInsertRowid);
+    expect(db.prepare('SELECT id, base_url FROM api_keys WHERE id IN (?, ?) ORDER BY id').all(firstKey, secondKey))
+      .toEqual([
+        { id: firstKey, base_url: 'https://one.example/v1' },
+        { id: secondKey, base_url: 'https://two.example/v1' },
+      ]);
+
+    insertRaw({ platform: 'custom', modelId: 'same-model', keyId: firstKey, latencyMs: 100, createdAt: '2026-05-29 11:00:00' });
+    insertRaw({ platform: 'custom', modelId: 'same-model', keyId: secondKey, latencyMs: 200, createdAt: '2026-05-29 11:01:00' });
+
+    const byModel = await request(app, '/api/analytics/by-model?range=24h');
+    expect(byModel.status).toBe(200);
+    expect(byModel.body.filter((row: any) => row.modelId === 'same-model')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ platform: 'custom', endpointScope: 'one.example-v1', requests: 1 }),
+      expect.objectContaining({ platform: 'custom', endpointScope: 'two.example-v1', requests: 1 }),
+    ]));
+
+    const baselines = await request(app, '/api/analytics/channel-model-baselines?range=24h');
+    expect(baselines.status).toBe(200);
+    expect(baselines.body.filter((row: any) => row.modelId === 'same-model')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ platform: 'custom', endpointScope: 'one.example-v1', attempts: 1 }),
+      expect.objectContaining({ platform: 'custom', endpointScope: 'two.example-v1', attempts: 1 }),
+    ]));
+  });
+
   describe('extended by-platform fields', () => {
     it('adds p95 latency, avg TTFT, error count, and tokens/sec per platform', async () => {
       // groq: 1 success (100ms, ttfb 20, 1000 out tok) + 1 error (300ms, ttfb 40).

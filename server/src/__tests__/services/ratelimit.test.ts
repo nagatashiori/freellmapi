@@ -14,6 +14,15 @@ import {
   canUseProvider,
   providerDailyRequestCount,
   getProviderDailyRequestCap,
+  getProviderMinuteRequestCap,
+  getProviderDailyTokenCap,
+  canUseProviderMinute,
+  canUseProviderTokens,
+  getKeyConcurrencyLimit,
+  canUseKeyConcurrency,
+  acquireLease,
+  releaseLease,
+  resetLeases,
 } from '../../services/ratelimit.js';
 import { parseRetryAfterMs } from '../../providers/base.js';
 
@@ -287,6 +296,65 @@ describe('Rate Limiter', () => {
       expect(canUseProvider('openrouter', testId)).toBe(true); // 2 < 3
       recordRequest('openrouter', 'model-c', testId);
       expect(canUseProvider('openrouter', testId)).toBe(false); // 3 >= 3
+    });
+
+    it('includes the official ModelScope default and uses UTC day boundaries', () => {
+      expect(getProviderDailyRequestCap('modelscope')).toBe(1800);
+      expect(getProviderDailyRequestCap('groq')).toBeNull();
+    });
+  });
+
+  describe('official account-level gates', () => {
+    afterEach(() => {
+      delete process.env.MAX_CONCURRENT_REQUESTS_PER_KEY;
+      delete process.env.MAX_CONCURRENT_REQUESTS_PER_KEY_GROQ;
+      delete process.env.PROVIDER_MINUTE_REQUEST_CAP_NVIDIA;
+      delete process.env.PROVIDER_DAILY_TOKEN_CAP_NAVY;
+      resetLeases();
+    });
+
+    it('uses an explicit concurrency cap and releases leases idempotently', () => {
+      process.env.MAX_CONCURRENT_REQUESTS_PER_KEY = '1';
+      const keyId = Math.floor(Math.random() * 1_000_000);
+      expect(getKeyConcurrencyLimit('groq')).toBe(1);
+      const lease = acquireLease('groq', 'lease-model', keyId, 100);
+      expect(canUseKeyConcurrency('groq', keyId)).toBe(false);
+      releaseLease(lease);
+      releaseLease(lease);
+      expect(canUseKeyConcurrency('groq', keyId)).toBe(true);
+    });
+
+    it('counts in-flight requests against model limits before they are recorded', () => {
+      const keyId = Math.floor(Math.random() * 1_000_000);
+      const lease = acquireLease('groq', 'lease-rpm-model', keyId, 100);
+      expect(canMakeRequest('groq', 'lease-rpm-model', keyId, {
+        rpm: 1, rpd: null, tpm: null, tpd: null,
+      })).toBe(false);
+      releaseLease(lease);
+    });
+
+    it('enforces the official NVIDIA minute and Navy daily-token caps', () => {
+      expect(getProviderMinuteRequestCap('nvidia')).toBe(40);
+      expect(getProviderDailyTokenCap('navy')).toBe(150_000);
+
+      const oldMinute = process.env.PROVIDER_MINUTE_REQUEST_CAP_NVIDIA;
+      const oldTokens = process.env.PROVIDER_DAILY_TOKEN_CAP_NAVY;
+      try {
+        process.env.PROVIDER_MINUTE_REQUEST_CAP_NVIDIA = '1';
+        process.env.PROVIDER_DAILY_TOKEN_CAP_NAVY = '1000';
+        const nvidiaKey = Math.floor(Math.random() * 1_000_000);
+        recordRequest('nvidia', `cap-${nvidiaKey}`, nvidiaKey);
+        expect(canUseProviderMinute('nvidia', nvidiaKey)).toBe(false);
+
+        const navyKey = Math.floor(Math.random() * 1_000_000);
+        recordTokens('navy', `cap-${navyKey}`, navyKey, 900);
+        expect(canUseProviderTokens('navy', navyKey, `cap-${navyKey}`, 101)).toBe(false);
+      } finally {
+        if (oldMinute === undefined) delete process.env.PROVIDER_MINUTE_REQUEST_CAP_NVIDIA;
+        else process.env.PROVIDER_MINUTE_REQUEST_CAP_NVIDIA = oldMinute;
+        if (oldTokens === undefined) delete process.env.PROVIDER_DAILY_TOKEN_CAP_NAVY;
+        else process.env.PROVIDER_DAILY_TOKEN_CAP_NAVY = oldTokens;
+      }
     });
   });
 });

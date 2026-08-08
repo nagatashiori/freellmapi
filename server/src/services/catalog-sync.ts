@@ -119,6 +119,27 @@ interface Catalog {
   quirks: CatalogQuirk[];
 }
 
+/** Built-in channels whose existing model rows are matched to official data.
+ * The matcher is deliberately exact and update-only: it never imports a new
+ * row, deletes a local row, or changes routing/ranking fields. */
+export const OFFICIAL_MATCH_PLATFORMS = new Set<Platform>([
+  'google',
+  'zhipu',
+  'groq',
+  'cerebras',
+  'nvidia',
+  'mistral',
+  'cohere',
+  'cloudflare',
+  'github',
+  'ollama',
+]);
+
+export interface CatalogApplyOptions {
+  /** Apply the protected A1-A10 metadata-only policy to official rows. */
+  officialBuiltInMatchOnly?: boolean;
+}
+
 export interface SyncResult {
   ok: boolean;
   action: 'applied' | 'up_to_date' | 'skipped_older' | 'error';
@@ -169,10 +190,70 @@ function routableContextWindow(platform: string, modelId: string, contextWindow:
  *  - models that vanish from a later catalog snapshot stay in the local
  *    catalog; an operator can review and delete them explicitly from the UI.
  */
-export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['counts']> {
+function clearOfficialMetadataOverrides(db: Db, platform: string, modelId: string): void {
+  const row = db.prepare(
+    'SELECT overrides_json FROM model_overrides WHERE platform = ? AND model_id = ?',
+  ).get(platform, modelId) as { overrides_json: string } | undefined;
+  if (!row) return;
+
+  let parsed: Record<string, unknown>;
+  try {
+    const value: unknown = JSON.parse(row.overrides_json);
+    parsed = value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : {};
+  } catch {
+    parsed = {};
+  }
+
+  for (const key of [
+    'displayName',
+    'rpmLimit',
+    'rpdLimit',
+    'tpmLimit',
+    'tpdLimit',
+    'monthlyTokenBudget',
+    'contextWindow',
+    'supportsVision',
+    'supportsTools',
+  ]) {
+    delete parsed[key];
+  }
+
+  if (Object.keys(parsed).length === 0) {
+    db.prepare('DELETE FROM model_overrides WHERE platform = ? AND model_id = ?').run(platform, modelId);
+    return;
+  }
+  db.prepare(`
+    UPDATE model_overrides
+       SET overrides_json = ?, updated_at = datetime('now')
+     WHERE platform = ? AND model_id = ?
+  `).run(JSON.stringify(parsed), platform, modelId);
+}
+
+export function applyCatalog(
+  db: Db,
+  catalog: Catalog,
+  options: CatalogApplyOptions = {},
+): NonNullable<SyncResult['counts']> {
+  const officialBuiltInMatchOnly = options.officialBuiltInMatchOnly === true;
   const counts = { updated: 0, inserted: 0, removed: 0, skippedUnknownPlatform: 0, quirks: 0 };
 
-  const selectModel = db.prepare('SELECT id, enabled FROM models WHERE platform = ? AND model_id = ?');
+  const selectModel = db.prepare(`
+    SELECT id, enabled, key_id
+      FROM models
+     WHERE platform = ? AND model_id = ? AND COALESCE(endpoint_scope, '') = ''
+     ORDER BY id ASC
+     LIMIT 1
+  `);
+  const updateOfficialMetadata = db.prepare(`
+    UPDATE models SET
+      display_name = @displayName,
+      rpm_limit = @rpm, rpd_limit = @rpd, tpm_limit = @tpm, tpd_limit = @tpd,
+      monthly_token_budget = @monthlyTokenBudget, context_window = @contextWindow,
+      supports_vision = @supportsVision, supports_tools = @supportsTools
+    WHERE id = @id
+  `);
   const updateModel = db.prepare(`
     UPDATE models SET
       display_name = @displayName, intelligence_rank = @intelligenceRank, speed_rank = @speedRank,
@@ -206,9 +287,25 @@ export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['
 
   const apply = db.transaction(() => {
     for (const m of catalog.models) {
+      // The protected sync is an overlay for the existing A1-A10 built-in
+      // rows only. It must not import a newer official row, touch ModelScope,
+      // or silently change any local/custom channel just because the catalog
+      // payload happens to contain it.
+      if (officialBuiltInMatchOnly && !OFFICIAL_MATCH_PLATFORMS.has(m.platform as Platform)) {
+        counts.skippedUnknownPlatform++;
+        continue;
+      }
+
       // Media modalities are gated on MEDIA_PLATFORMS (decoupled from the chat
       // provider registry) and routed to media_models, then skip the chat path.
       const modality = m.modality ?? 'text';
+      if (officialBuiltInMatchOnly && MEDIA_MODALITIES.has(modality)) {
+        // The protected A1-A10 overlay is for the existing chat model rows only;
+        // media catalogs keep their separate lifecycle and are not imported or
+        // rewritten by this metadata-only sync.
+        counts.skippedUnknownPlatform++;
+        continue;
+      }
       if (MEDIA_MODALITIES.has(modality)) {
         if (!MEDIA_PLATFORMS.has(m.platform)) {
           counts.skippedUnknownPlatform++;
@@ -255,6 +352,32 @@ export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['
         supportsVision: m.supportsVision ? 1 : 0,
         supportsTools: m.supportsTools ? 1 : 0,
       };
+
+      if (officialBuiltInMatchOnly && OFFICIAL_MATCH_PLATFORMS.has(m.platform as Platform)) {
+        // The official A1-A10 path is an exact, existing-row metadata match.
+        // A model bound to a user API key is treated as user-owned and remains
+        // outside the official catalog overlay.
+        const protectedRow = row as { id: number; enabled: number; key_id: number | null } | undefined;
+        if (!protectedRow || protectedRow.key_id != null) continue;
+        updateOfficialMetadata.run({
+          displayName: fields.displayName,
+          rpm: fields.rpm,
+          rpd: fields.rpd,
+          tpm: fields.tpm,
+          tpd: fields.tpd,
+          monthlyTokenBudget: fields.monthlyTokenBudget,
+          contextWindow: fields.contextWindow,
+          supportsVision: fields.supportsVision,
+          supportsTools: fields.supportsTools,
+          id: protectedRow.id,
+        });
+        // Official values win only for the documented metadata fields. Any
+        // local rank/size override remains intact and is re-applied below.
+        clearOfficialMetadataOverrides(db, m.platform, m.modelId);
+        counts.updated++;
+        continue;
+      }
+
       if (row) {
         // Catalog disable wins (dead upstream); local disable also wins.
         const enabled = m.enabled ? row.enabled : 0;
@@ -270,11 +393,19 @@ export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['
       }
     }
 
-    counts.removed += deleteTombstonedCatalogModels(db);
-    applyAllModelOverrides(db);
+    if (!officialBuiltInMatchOnly) {
+      counts.removed += deleteTombstonedCatalogModels(db);
+    }
+    // The safe A1-A10 overlay has already applied its explicit metadata
+    // whitelist above. Re-applying the broad legacy override map here could
+    // alter ranks, size labels, or enabled flags, so keep that old behavior
+    // exclusively for the legacy full-catalog path.
+    if (!officialBuiltInMatchOnly) applyAllModelOverrides(db);
 
     // Ensure every model has a fallback_config row (same invariant migrations keep).
-    const missingFb = db
+    const missingFb = officialBuiltInMatchOnly && counts.inserted === 0
+      ? []
+      : db
       .prepare(
         `SELECT m.id FROM models m LEFT JOIN fallback_config f ON m.id = f.model_db_id WHERE f.id IS NULL`,
       )
@@ -289,20 +420,24 @@ export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['
     // retained so a partial/temporary upstream snapshot cannot erase local
     // models. Explicit operator deletions are still handled by tombstones above.
 
-    // Quirks are pure content: replace wholesale.
-    db.prepare('DELETE FROM quirk_targets').run();
-    db.prepare('DELETE FROM quirks').run();
-    const insertQuirk = db.prepare(
-      `INSERT INTO quirks (slug, title, body, severity, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?)`,
-    );
-    const insertTarget = db.prepare(
-      `INSERT INTO quirk_targets (quirk_id, platform, model_glob) VALUES (?, ?, ?)`,
-    );
-    const now = Date.now();
-    for (const q of catalog.quirks) {
-      const info = insertQuirk.run(q.slug, q.title, q.body, q.severity, now, now);
-      for (const t of q.targets) insertTarget.run(info.lastInsertRowid, t.platform ?? null, t.modelGlob ?? null);
-      counts.quirks++;
+    // The protected A1-A10 path is a model-metadata overlay, not a wholesale
+    // catalog replacement. Quirks can alter runtime behavior, so leave the
+    // existing operator-visible quirk set untouched there as well.
+    if (!officialBuiltInMatchOnly) {
+      db.prepare('DELETE FROM quirk_targets').run();
+      db.prepare('DELETE FROM quirks').run();
+      const insertQuirk = db.prepare(
+        `INSERT INTO quirks (slug, title, body, severity, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+      const insertTarget = db.prepare(
+        `INSERT INTO quirk_targets (quirk_id, platform, model_glob) VALUES (?, ?, ?)`,
+      );
+      const now = Date.now();
+      for (const q of catalog.quirks) {
+        const info = insertQuirk.run(q.slug, q.title, q.body, q.severity, now, now);
+        for (const t of q.targets) insertTarget.run(info.lastInsertRowid, t.platform ?? null, t.modelGlob ?? null);
+        counts.quirks++;
+      }
     }
   });
 
@@ -355,7 +490,7 @@ export async function syncCatalog(force = false): Promise<SyncResult> {
 
     const sameAsApplied = applied === catalog.version && getSetting(SETTING_APPLIED_TIER) === catalog.tier;
     if (!sameAsApplied) {
-      const counts = applyCatalog(db, catalog);
+      const counts = applyCatalog(db, catalog, { officialBuiltInMatchOnly: true });
       setSetting(SETTING_APPLIED_VERSION, catalog.version);
       setSetting(SETTING_APPLIED_TIER, catalog.tier);
       // Cache the verified document so boots can re-apply it offline (see
@@ -462,7 +597,7 @@ export function reapplyCachedCatalog(): { reapplied: boolean; version?: string }
     }
     const parsed: unknown = JSON.parse(raw);
     if (!isCatalog(parsed) || parsed.version < MIN_CATALOG_VERSION) return { reapplied: false };
-    applyCatalog(getDb(), parsed);
+    applyCatalog(getDb(), parsed, { officialBuiltInMatchOnly: true });
     console.log(`[catalog-sync] re-applied cached ${parsed.tier} v${parsed.version} after boot`);
     return { reapplied: true, version: parsed.version };
   } catch (err) {

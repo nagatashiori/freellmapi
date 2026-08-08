@@ -243,6 +243,29 @@ describe('Keys API', () => {
     expect(keys[0].label).toBe('');
   });
 
+  it('PATCH /api/keys/:id stores an exact model scope without exposing key material', async () => {
+    const { body: created } = await request(app, 'POST', '/api/keys', {
+      platform: 'groq',
+      key: 'gsk_scope_test_123',
+      label: 'Scoped account',
+    });
+
+    const updated = await request(app, 'PATCH', `/api/keys/${created.id}`, {
+      modelScope: ['model-b', 'model-a', 'model-a'],
+    });
+    expect(updated.status).toBe(200);
+    expect(updated.body.modelScope).toEqual(['model-a', 'model-b']);
+
+    const listed = await request(app, 'GET', '/api/keys');
+    expect(listed.body[0]).toMatchObject({
+      id: created.id,
+      modelScope: ['model-a', 'model-b'],
+    });
+    expect(listed.body[0].encrypted_key).toBeUndefined();
+    expect(listed.body[0].iv).toBeUndefined();
+    expect(listed.body[0].auth_tag).toBeUndefined();
+  });
+
   it('PATCH /api/keys/:id returns 400 when no fields provided', async () => {
     const { body: created } = await request(app, 'POST', '/api/keys', {
       platform: 'groq',

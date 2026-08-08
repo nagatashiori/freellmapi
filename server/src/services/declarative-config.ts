@@ -16,6 +16,7 @@ import {
   upsertModelOverrides,
   type ModelOverridePatch,
 } from './model-state.js';
+import { endpointScopeForBaseUrl } from '../lib/endpoint-scope.js';
 
 const modelEntrySchema = z.union([
   z.string().min(1),
@@ -196,6 +197,7 @@ function ensureDefaultRoutingRow(db: Db, modelDbId: number, enabled = true, upda
 }
 
 function registerCustomProvider(db: Db, input: z.infer<typeof customProviderSchema>): number {
+  const endpointScope = endpointScopeForBaseUrl(input.baseUrl);
   const keyId = upsertApiKey(db, {
     platform: 'custom',
     key: input.apiKey,
@@ -210,9 +212,9 @@ function registerCustomProvider(db: Db, input: z.infer<typeof customProviderSche
       INSERT INTO models
         (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
          rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window,
-         enabled, supports_vision, supports_tools, key_id)
-      VALUES ('custom', ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, 1, ?, ?, ?)
-      ON CONFLICT(platform, model_id)
+         enabled, supports_vision, supports_tools, key_id, endpoint_scope)
+      VALUES ('custom', ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, 1, ?, ?, ?, ?)
+      ON CONFLICT(platform, model_id, endpoint_scope)
       DO UPDATE SET
         display_name = excluded.display_name,
         intelligence_rank = excluded.intelligence_rank,
@@ -235,8 +237,10 @@ function registerCustomProvider(db: Db, input: z.infer<typeof customProviderSche
       model.supportsVision ? 1 : 0,
       model.supportsTools ? 1 : 0,
       keyId,
+      endpointScope,
     );
-    const row = db.prepare("SELECT id FROM models WHERE platform = 'custom' AND model_id = ?").get(model.modelId) as { id: number };
+    const row = db.prepare("SELECT id FROM models WHERE platform = 'custom' AND model_id = ? AND endpoint_scope = ?")
+      .get(model.modelId, endpointScope) as { id: number };
     ensureDefaultRoutingRow(db, row.id, model.fallbackEnabled !== false);
     registered++;
   }

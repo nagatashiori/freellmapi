@@ -163,6 +163,33 @@ describe('groupRows', () => {
     const ids = groups.map(g => g.canonicalId).sort();
     expect(ids).toEqual(['model-x', 'model-x-2']);
   });
+
+  it('keeps identical custom models on different endpoints in separate groups', () => {
+    const rows = [
+      { ...row(1, 'custom', 'model-a', 'Model A'), endpoint_scope: 'http://one.example/v1' },
+      { ...row(2, 'custom', 'model-a', 'Model A'), endpoint_scope: 'http://two.example/v1' },
+      { ...row(3, 'custom', 'model-a-variant', 'Model A'), endpoint_scope: 'http://one.example/v1' },
+    ];
+    const groups = groupRows(rows, NO_OVERRIDES);
+    expect(groups).toHaveLength(2);
+    expect(groups.map(group => group.members.map(member => member.model_db_id).sort())).toEqual([
+      [1, 3],
+      [2],
+    ]);
+  });
+
+  it('allows an explicit merge to cross custom endpoint scopes', () => {
+    const rows = [
+      { ...row(1, 'custom', 'model-a', 'Model A'), endpoint_scope: 'http://one.example/v1' },
+      { ...row(2, 'custom', 'model-a', 'Model A'), endpoint_scope: 'http://two.example/v1' },
+    ];
+    const groups = groupRows(rows, {
+      merges: [{ into: 'Model A', keys: ['custom:model-a'] }],
+      splits: [],
+    });
+    expect(groups).toHaveLength(1);
+    expect(groups[0].members.map(member => member.model_db_id).sort()).toEqual([1, 2]);
+  });
 });
 
 describe('slugifyGroupLabel', () => {

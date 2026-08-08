@@ -13,6 +13,9 @@ const REQUEST_CLIENT_INFO_FILENAME = '20260706_000001_request_client_info.ts';
 const CUSTOM_MODEL_TOOL_SUPPORT_FILENAME = '20260706_000002_custom_model_tool_support.ts';
 const ROUTING_PROFILE_SOURCE_FILENAME = '20260716_000001_routing_profile_source.ts';
 const ROUTING_EVENTS_FILENAME = '20260717_000001_routing_events.ts';
+const ROUTING_EVENT_KEY_ID_FILENAME = '20260808_000001_routing_event_key_id.ts';
+const API_KEY_MODEL_SCOPE_FILENAME = '20260808_000002_api_key_model_scope.ts';
+const MODEL_ENDPOINT_SCOPE_FILENAME = '20260808_000003_model_endpoint_scope.ts';
 
 interface SchemaRow {
   type: string;
@@ -72,6 +75,9 @@ describe('migration round trip', () => {
         CUSTOM_MODEL_TOOL_SUPPORT_FILENAME,
         ROUTING_PROFILE_SOURCE_FILENAME,
         ROUTING_EVENTS_FILENAME,
+        ROUTING_EVENT_KEY_ID_FILENAME,
+        API_KEY_MODEL_SCOPE_FILENAME,
+        MODEL_ENDPOINT_SCOPE_FILENAME,
       ]);
     } finally {
       db.close();

@@ -144,7 +144,7 @@ export function ProviderModelCatalogPanel() {
   }, [catalog, filter])
 
   function onToggleModel(model: ProviderCatalogManagedModel, checked: boolean) {
-    if (toggleModel.isPending || model.existsOtherSource && model.localEnabled === undefined) return
+    if (toggleModel.isPending) return
     if (checked === model.alreadyRegistered) return
     toggleModel.mutate({ model, checked })
   }
@@ -235,21 +235,20 @@ export function ProviderModelCatalogPanel() {
               ) : (
                 <ul className="divide-y divide-border/40">
                   {visibleModels.map(model => {
-                    const lockedByOtherSource = model.existsOtherSource && model.localEnabled === undefined
                     return (
                       <li key={model.id}>
-                        <label className={`flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-muted/40 ${lockedByOtherSource ? 'opacity-50 cursor-default' : 'cursor-pointer'}`}>
+                        <label className="flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-muted/40 cursor-pointer">
                           <input
                             type="checkbox"
                             checked={model.alreadyRegistered}
-                            disabled={lockedByOtherSource || toggleModel.isPending}
+                            disabled={toggleModel.isPending}
                             onChange={(event: ChangeEvent<HTMLInputElement>) => onToggleModel(model, event.target.checked)}
                             className="rounded border shrink-0"
                           />
                           <span className="font-medium truncate flex-1">{model.name}</span>
                           <span className="text-muted-foreground truncate max-w-[40%] text-right">{model.id}</span>
-                          {lockedByOtherSource
-                            ? <span className="text-[10px] text-[#fbbf24] shrink-0">其他来源已有</span>
+                          {model.existsOtherSource
+                            ? <span className="text-[10px] text-[#fbbf24] shrink-0">其他来源也有</span>
                             : model.remotePresent
                               ? <span className="text-[10px] text-muted-foreground shrink-0">{model.alreadyRegistered ? '已添加' : '未添加'}</span>
                               : <span className="text-[10px] text-[#fbbf24] shrink-0">本地已有，远端未返回</span>}
@@ -271,7 +270,7 @@ export function ProviderModelCatalogPanel() {
         <div className="text-xs text-muted-foreground space-y-2">
           <p>拉取只刷新显示；远端失败、认证失败或空数组不会自动删除或禁用本地模型。</p>
           <p>只有用户明确取消勾选时，才会删除对应的本地记录。</p>
-          <p>新增模型保持关闭，不修改现有优先级，也不运行 ranking、recalibrate 或 sort。</p>
+          <p>新勾选的模型会自动追加到当前路由链末尾并启用；原有顺序和状态不变，也不运行 ranking、recalibrate 或 sort。</p>
         </div>
       </section>
     </>

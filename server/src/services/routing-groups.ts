@@ -25,6 +25,7 @@ export interface RoutingChainRow {
   supports_tools: number;
   context_window: number | null;
   key_id: number | null;
+  endpoint_scope?: string;
 }
 
 function profileExists(db: Db, profileId: number): boolean {
@@ -66,9 +67,13 @@ export function getRoutingChain(db: Db, profileId: number): RoutingChainRow[] {
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.speed_rank, m.size_label, m.monthly_token_budget,
            m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
-           m.supports_vision, m.supports_tools, m.context_window, m.key_id
+           m.supports_vision, m.supports_tools, m.context_window, m.key_id,
+           COALESCE(NULLIF(m.endpoint_scope, ''),
+             CASE WHEN m.key_id IS NOT NULL THEN RTRIM(COALESCE(ak.base_url, ''), '/') ELSE '' END
+           ) AS endpoint_scope
     FROM profile_models pm
     JOIN models m ON m.id = pm.model_db_id AND m.enabled = 1
+    LEFT JOIN api_keys ak ON ak.id = m.key_id
     WHERE pm.profile_id = ?
     ORDER BY pm.priority ASC, pm.model_db_id ASC
   `).all(profileId) as RoutingChainRow[];

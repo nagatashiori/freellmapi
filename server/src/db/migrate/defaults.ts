@@ -8,6 +8,9 @@ import * as requestClientInfo from '../migrations/20260706_000001_request_client
 import * as customModelToolSupport from '../migrations/20260706_000002_custom_model_tool_support.js';
 import * as routingProfileSource from '../migrations/20260716_000001_routing_profile_source.js';
 import * as routingEvents from '../migrations/20260717_000001_routing_events.js';
+import * as routingEventKeyId from '../migrations/20260808_000001_routing_event_key_id.js';
+import * as apiKeyModelScope from '../migrations/20260808_000002_api_key_model_scope.js';
+import * as modelEndpointScope from '../migrations/20260808_000003_model_endpoint_scope.js';
 
 export interface MigrationModule {
   up(db: Db): void;
@@ -28,6 +31,9 @@ export const REQUEST_CLIENT_INFO_FILENAME = '20260706_000001_request_client_info
 export const CUSTOM_MODEL_TOOL_SUPPORT_FILENAME = '20260706_000002_custom_model_tool_support.ts';
 export const ROUTING_PROFILE_SOURCE_FILENAME = '20260716_000001_routing_profile_source.ts';
 export const ROUTING_EVENTS_FILENAME = '20260717_000001_routing_events.ts';
+export const ROUTING_EVENT_KEY_ID_FILENAME = '20260808_000001_routing_event_key_id.ts';
+export const API_KEY_MODEL_SCOPE_FILENAME = '20260808_000002_api_key_model_scope.ts';
+export const MODEL_ENDPOINT_SCOPE_FILENAME = '20260808_000003_model_endpoint_scope.ts';
 
 export const DEFAULT_MIGRATIONS: readonly DefaultMigration[] = [
   { filename: LEGACY_BASELINE_FILENAME, module: legacyBaseline },
@@ -39,4 +45,7 @@ export const DEFAULT_MIGRATIONS: readonly DefaultMigration[] = [
   { filename: CUSTOM_MODEL_TOOL_SUPPORT_FILENAME, module: customModelToolSupport },
   { filename: ROUTING_PROFILE_SOURCE_FILENAME, module: routingProfileSource },
   { filename: ROUTING_EVENTS_FILENAME, module: routingEvents },
+  { filename: ROUTING_EVENT_KEY_ID_FILENAME, module: routingEventKeyId },
+  { filename: API_KEY_MODEL_SCOPE_FILENAME, module: apiKeyModelScope },
+  { filename: MODEL_ENDPOINT_SCOPE_FILENAME, module: modelEndpointScope },
 ];

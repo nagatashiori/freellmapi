@@ -16,6 +16,7 @@
 import { z } from 'zod';
 import { getDb, getSetting, setSetting } from '../db/index.js';
 import { repairLegacyDisplayName } from '../lib/model-intel.js';
+import { endpointHandle } from '../lib/endpoint-scope.js';
 
 // ── Settings keys ────────────────────────────────────────────────────────────
 export const UNIFY_ENABLED_KEY = 'unify_models_enabled';
@@ -49,6 +50,8 @@ export interface GroupableRow {
   model_id: string;
   display_name: string;
   intelligence_rank?: number;
+  /** Non-empty only for custom models bound to a specific endpoint. */
+  endpoint_scope?: string | null;
 }
 
 export interface ModelGroup {
@@ -131,7 +134,10 @@ export function slugifyGroupLabel(label: string): string {
 
 // ── Grouping ─────────────────────────────────────────────────────────────────
 function memberId(row: GroupableRow): string {
-  return `${row.platform}:${row.model_id}`;
+  const base = `${row.platform}:${row.model_id}`;
+  return row.endpoint_scope
+    ? `${base}#${endpointHandle(row.endpoint_scope)}`
+    : base;
 }
 
 // The grouping token for a row, after applying overrides. Split wins first
@@ -144,8 +150,18 @@ function tokenForRow(row: GroupableRow, ov: UnifyOverrides): string {
   if (split) return split.groupKey ? normalizeGroupKey(split.groupKey) : `__split__:${mid}`;
 
   const base = normalizeGroupKey(row.display_name);
-  const merge = ov.merges.find(mg => mg.keys.some(k => k === mid || normalizeGroupKey(k) === base));
-  return merge ? normalizeGroupKey(merge.into) : base;
+  const unqualifiedMid = `${row.platform}:${row.model_id}`;
+  const merge = ov.merges.find(mg => mg.keys.some(k =>
+    k === mid || k === unqualifiedMid || normalizeGroupKey(k) === base,
+  ));
+  if (merge) return normalizeGroupKey(merge.into);
+  if (row.endpoint_scope) {
+    // The same label at two user endpoints is not interchangeable: keep the
+    // logical groups, speed history and fallback candidates isolated unless an
+    // operator explicitly merges them.
+    return `${base}@${endpointHandle(row.endpoint_scope)}`;
+  }
+  return base;
 }
 
 // Assign a unique canonicalId to each group. Deterministic: groups sorted by
@@ -265,7 +281,8 @@ export function resolveRequestedIdToMembers(requested: string, groups: ModelGrou
 export function getModelGroups(): ModelGroup[] {
   const db = getDb();
   const rows = db.prepare(`
-    SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name, m.intelligence_rank
+    SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name, m.intelligence_rank,
+           m.endpoint_scope
     FROM models m
   `).all() as GroupableRow[];
   return groupRows(rows, getUnifyOverrides());

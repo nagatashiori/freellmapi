@@ -679,6 +679,10 @@ export async function runFallbackLoop(hooks: FallbackHooks): Promise<void> {
       hooks.onFatal(route, err, attempt);
       return;
     } finally {
+      // Account selection acquires a short-lived in-memory lease before the
+      // upstream request starts. Release it on every outcome: success, retry,
+      // fatal error, timeout, budget exhaustion and client disconnect.
+      try { route.release?.(); } catch { /* release is intentionally idempotent */ }
       if (timeoutTimer) clearTimeout(timeoutTimer);
       hooks.clientAbort?.removeEventListener('abort', onClientAbort);
     }

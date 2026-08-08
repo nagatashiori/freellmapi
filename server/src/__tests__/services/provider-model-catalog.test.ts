@@ -2,7 +2,7 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { getDb, initDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { providerModelCatalog } from '../../services/provider-model-catalog.js';
-import { getDefaultProfileId } from '../../services/routing-groups.js';
+import { getActiveRoutingProfileId } from '../../services/routing-groups.js';
 
 function insertKey(
   platform: string,
@@ -82,7 +82,7 @@ describe('provider model catalog service', () => {
       .toContain(modelId);
   });
 
-  it('does not offer a custom model that is already bound to another endpoint', async () => {
+  it('allows the same custom model id at a different endpoint', async () => {
     const firstKey = insertKey('custom', 'key-a', { label: 'Local A', baseUrl: 'http://127.0.0.1:6101/v1' });
     insertKey('custom', 'key-b', { label: 'Local B', baseUrl: 'http://127.0.0.1:6102/v1' });
     const sources = providerModelCatalog.listSources(getDb()).filter(source => source.platform === 'custom');
@@ -101,8 +101,10 @@ describe('provider model catalog service', () => {
       .run(Number(info.lastInsertRowid));
 
     const discovered = await providerModelCatalog.discoverRemote(getDb(), second!.sourceId, jsonFetch({ data: [{ id: modelId }] }));
-    expect(discovered.models[0]).toMatchObject({ alreadyRegistered: true, existsOtherSource: true });
-    expect(providerModelCatalog.importMissing(getDb(), second!.sourceId, [modelId])).toMatchObject({ added: 0, skipped: 1 });
+    expect(discovered.models[0]).toMatchObject({ alreadyRegistered: false, existsOtherSource: true });
+    expect(providerModelCatalog.importMissing(getDb(), second!.sourceId, [modelId])).toMatchObject({ added: 1, skipped: 0 });
+    expect(getDb().prepare("SELECT COUNT(*) AS count FROM models WHERE platform = 'custom' AND model_id = ?").get(modelId))
+      .toMatchObject({ count: 2 });
   });
 
   it('parses Google model names and strips the models/ prefix', async () => {
@@ -136,7 +138,7 @@ describe('provider model catalog service', () => {
     expect(after).toBe(before);
   });
 
-  it('imports only missing models with all three enable switches off', () => {
+  it('imports only missing models and appends selected models enabled to the active route', () => {
     insertKey('groq', 'groq-test-key');
     const result = providerModelCatalog.importMissing(getDb(), 'platform:groq', [
       'catalog-refactor-new-model',
@@ -152,13 +154,13 @@ describe('provider model catalog service', () => {
         JOIN fallback_config f ON f.model_db_id = m.id
         JOIN profile_models pm ON pm.model_db_id = m.id AND pm.profile_id = ?
        WHERE m.platform = 'groq' AND m.model_id = 'catalog-refactor-new-model'
-    `).get(getDefaultProfileId(getDb())) as {
+    `).get(getActiveRoutingProfileId(getDb())) as {
       id: number;
       model_enabled: number;
       fallback_enabled: number;
       profile_enabled: number;
     };
-    expect(row).toMatchObject({ model_enabled: 0, fallback_enabled: 0, profile_enabled: 0 });
+    expect(row).toMatchObject({ model_enabled: 1, fallback_enabled: 1, profile_enabled: 1 });
   });
 
   it('records a tombstone on explicit deletion and clears it on deliberate re-import', () => {
@@ -187,8 +189,8 @@ describe('provider model catalog service', () => {
     const local = providerModelCatalog.listLocal(getDb(), 'platform:groq');
     const target = local.models.find(model => model.id === 'catalog-refactor-local-list');
     expect(target).toMatchObject({
-      localEnabled: false,
-      routingEnabled: false,
+      localEnabled: true,
+      routingEnabled: true,
       catalogManaged: true,
     });
   });

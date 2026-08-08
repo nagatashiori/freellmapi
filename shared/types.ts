@@ -179,6 +179,8 @@ export interface ApiKey {
   status: KeyStatus;
   enabled: boolean;
   keyless: boolean;
+  /** NULL means every model at this provider; an array limits this key to those IDs. */
+  modelScope: string[] | null;
   createdAt: string;
   lastCheckedAt: string | null;
   models?: ApiKeyModel[];
@@ -188,6 +190,7 @@ export interface ApiKeyCreate {
   platform: Platform;
   key: string;
   label?: string;
+  modelScope?: string[] | null;
 }
 
 

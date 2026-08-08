@@ -270,6 +270,8 @@ async function runModelCall(
       }
       // Non-retryable (auth, validation) — this slot/judge is done.
       break;
+    } finally {
+      try { route.release?.(); } catch { /* lease release is idempotent */ }
     }
   }
 
@@ -353,6 +355,8 @@ async function runJudgeStreaming(
         continue;
       }
       break;
+    } finally {
+      try { route.release?.(); } catch { /* lease release is idempotent */ }
     }
   }
   return { ok: false, error: lastError ?? 'no available key for judge' };

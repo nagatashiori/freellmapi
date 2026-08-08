@@ -1,7 +1,18 @@
 import { getDb, getSetting, setSetting } from '../db/index.js';
 import { getProvider, hasProvider, resolveProvider } from '../providers/index.js';
 import { decrypt } from '../lib/crypto.js';
-import { canMakeRequest, canUseTokens, isOnCooldown, canUseProvider, getSoonestCooldownExpiry } from './ratelimit.js';
+import {
+  canMakeRequest,
+  canUseTokens,
+  isOnCooldown,
+  canUseProvider,
+  canUseProviderMinute,
+  canUseProviderTokens,
+  canUseKeyConcurrency,
+  acquireLease,
+  releaseLease,
+  getSoonestCooldownExpiry,
+} from './ratelimit.js';
 import {
   BANDIT_PRESETS, DEFAULT_STRATEGY, type RoutingStrategy, type RoutingWeights,
   reliabilityPosterior, expectedReliability, sampleBeta,
@@ -26,6 +37,8 @@ import {
   type ModelProbeHealth,
   type ModelRoutingState,
 } from './model-health.js';
+import { endpointScopeOfKey, modelStatsKey } from '../lib/endpoint-scope.js';
+import { parseModelScope, scopeAllows } from '../lib/model-scope.js';
 
 class RouteError extends Error {
   status: number;
@@ -113,6 +126,7 @@ interface KeyRow {
   status: string;
   enabled: number;
   base_url: string | null;
+  model_scope_json: string | null;
 }
 
 // Chain row joined with the model fields the bandit needs to score it.
@@ -136,6 +150,7 @@ export interface ChainRow {
   // Custom models bind to the api_keys row carrying their endpoint (#212);
   // NULL for built-in platforms.
   key_id: number | null;
+  endpoint_scope?: string;
 }
 
 export interface RouteResult {
@@ -150,6 +165,8 @@ export interface RouteResult {
   // exhaustion (escalate the cooldown) from a transient per-minute spike.
   rpdLimit: number | null;
   tpdLimit: number | null;
+  endpointScope: string;
+  release?: () => void;
 }
 
 // ── Routing token estimate: cap the reserved OUTPUT, not the full max_tokens ──
@@ -347,7 +364,15 @@ interface ModelStats {
   monthlyUsedTokens: number; // calendar-month usage, for the headroom guardrail
 }
 
+interface KeyStats {
+  successes: number;
+  failures: number;
+  tokPerSec: number;
+  avgTtfbMs: number | null;
+}
+
 let statsCache: Map<string, ModelStats> | null = null;
+let keyStatsCache: Map<string, KeyStats> | null = null;
 let statsCacheTime = 0;
 
 function decayWeight(ageDays: number): number {
@@ -359,7 +384,7 @@ export function refreshStatsCache(db: Db, force = false): void {
 
   const since = new Date(Date.now() - WINDOW_MS).toISOString();
   const buckets = db.prepare(`
-    SELECT platform, model_id,
+    SELECT platform, model_id, key_id,
       CAST((julianday('now') - julianday(created_at)) AS INTEGER) AS age_days,
       COUNT(*) AS total,
       SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS successes,
@@ -374,18 +399,30 @@ export function refreshStatsCache(db: Db, force = false): void {
       -- often would read as one that fails constantly. NULL request_type is
       -- legacy live traffic and has to stay: an inequality alone drops it.
       AND (request_type IS NULL OR request_type != 'probe')
-    GROUP BY platform, model_id, age_days
+    GROUP BY platform, model_id, key_id, age_days
   `).all(since) as Array<{
-    platform: string; model_id: string; age_days: number; total: number; successes: number;
+    platform: string; model_id: string; key_id: number | null; age_days: number; total: number; successes: number;
     succ_out: number; succ_lat: number; succ_ttfb_sum: number; succ_ttfb_cnt: number;
   }>;
 
   // Accumulate decay-weighted sums per model.
+  // Any user-defined platform can carry a base_url, not only the legacy
+  // platform='custom' rows. Keep stats for those named endpoints isolated too.
+  const endpointScopes = db.prepare(
+    "SELECT id, base_url FROM api_keys WHERE base_url IS NOT NULL AND TRIM(base_url) != ''",
+  ).all() as Array<{ id: number; base_url: string | null }>;
+  const endpointByKeyId = new Map(endpointScopes.map(row => [row.id, endpointScopeOfKey(db, row.id)]));
+  const scopeFor = (_platform: string, keyId: number | null): string =>
+    keyId != null ? (endpointByKeyId.get(keyId) ?? '') : '';
+
   const acc = new Map<string, {
     wSucc: number; wFail: number; wOut: number; wLat: number; wTtfbSum: number; wTtfbCnt: number;
   }>();
+  const keyAcc = new Map<string, {
+    wSucc: number; wFail: number; wOut: number; wLat: number; wTtfbSum: number; wTtfbCnt: number;
+  }>();
   for (const b of buckets) {
-    const key = `${b.platform}:${b.model_id}`;
+    const key = modelStatsKey(b.platform, b.model_id, scopeFor(b.platform, b.key_id));
     const w = decayWeight(b.age_days);
     const a = acc.get(key) ?? { wSucc: 0, wFail: 0, wOut: 0, wLat: 0, wTtfbSum: 0, wTtfbCnt: 0 };
     a.wSucc += w * b.successes;
@@ -395,17 +432,33 @@ export function refreshStatsCache(db: Db, force = false): void {
     a.wTtfbSum += w * b.succ_ttfb_sum;
     a.wTtfbCnt += w * b.succ_ttfb_cnt;
     acc.set(key, a);
+
+    if (b.key_id != null) {
+      const keyStatsKey = `${key}:${b.key_id}`;
+      const ka = keyAcc.get(keyStatsKey) ?? { wSucc: 0, wFail: 0, wOut: 0, wLat: 0, wTtfbSum: 0, wTtfbCnt: 0 };
+      ka.wSucc += w * b.successes;
+      ka.wFail += w * (b.total - b.successes);
+      ka.wOut += w * b.succ_out;
+      ka.wLat += w * b.succ_lat;
+      ka.wTtfbSum += w * b.succ_ttfb_sum;
+      ka.wTtfbCnt += w * b.succ_ttfb_cnt;
+      keyAcc.set(keyStatsKey, ka);
+    }
   }
 
   // Calendar-month token usage per model, for the headroom guardrail.
   const usageRows = db.prepare(`
-    SELECT platform, model_id, COALESCE(SUM(input_tokens + output_tokens), 0) AS used
+    SELECT platform, model_id, key_id, COALESCE(SUM(input_tokens + output_tokens), 0) AS used
     FROM requests
     WHERE created_at >= datetime('now', 'start of month')
       AND request_type = 'chat'
-    GROUP BY platform, model_id
-  `).all() as Array<{ platform: string; model_id: string; used: number }>;
-  const usageMap = new Map(usageRows.map(r => [`${r.platform}:${r.model_id}`, r.used]));
+    GROUP BY platform, model_id, key_id
+  `).all() as Array<{ platform: string; model_id: string; key_id: number | null; used: number }>;
+  const usageMap = new Map<string, number>();
+  for (const row of usageRows) {
+    const key = modelStatsKey(row.platform, row.model_id, scopeFor(row.platform, row.key_id));
+    usageMap.set(key, (usageMap.get(key) ?? 0) + row.used);
+  }
 
   const next = new Map<string, ModelStats>();
   for (const [key, a] of acc) {
@@ -424,7 +477,18 @@ export function refreshStatsCache(db: Db, force = false): void {
     }
   }
 
+  const nextKeys = new Map<string, KeyStats>();
+  for (const [key, a] of keyAcc) {
+    nextKeys.set(key, {
+      successes: a.wSucc,
+      failures: a.wFail,
+      tokPerSec: a.wLat > 0 ? (a.wOut * 1000) / a.wLat : 0,
+      avgTtfbMs: a.wTtfbCnt > 0 ? a.wTtfbSum / a.wTtfbCnt : null,
+    });
+  }
+
   statsCache = next;
+  keyStatsCache = nextKeys;
   statsCacheTime = Date.now();
 }
 
@@ -468,7 +532,7 @@ function scoreChainEntry(
   sampled: boolean,
   keyCounts: Map<string, number>,
 ): ScoredEntry {
-  const stats = statsCache?.get(`${entry.platform}:${entry.model_id}`);
+  const stats = statsCache?.get(modelStatsKey(entry.platform, entry.model_id, entry.endpoint_scope));
   const successes = stats?.successes ?? 0;
   const failures = stats?.failures ?? 0;
 
@@ -723,8 +787,12 @@ function getChainByGlobalSort(db: Db, globalAxis: string): ChainRow[] {
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.size_label, m.monthly_token_budget,
            m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-           m.supports_tools, m.context_window, m.key_id
+           m.supports_tools, m.context_window, m.key_id,
+           COALESCE(NULLIF(m.endpoint_scope, ''),
+             CASE WHEN m.key_id IS NOT NULL THEN RTRIM(COALESCE(ak.base_url, ''), '/') ELSE '' END
+           ) AS endpoint_scope
     FROM models m
+    LEFT JOIN api_keys ak ON ak.id = m.key_id
     WHERE m.enabled = 1
   `).all() as ChainRow[];
 
@@ -779,6 +847,28 @@ export function resolveRoutingChain(modelString: string | undefined): ResolvedCh
   throw err;
 }
 
+// Reliability is deliberately heavier than speed: an API that is fast but
+// repeatedly fails should not outrank a slightly slower healthy account.
+function orderKeysByScore(entry: ChainRow, keys: KeyRow[]): KeyRow[] | null {
+  if (keys.length < 2 || !keyStatsCache) return null;
+  const prefix = `${modelStatsKey(entry.platform, entry.model_id, entry.endpoint_scope)}:`;
+  if (!keys.some(key => keyStatsCache!.has(prefix + key.id))) return null;
+  return keys
+    .map(key => {
+      const stats = keyStatsCache!.get(prefix + key.id);
+      const total = (stats?.successes ?? 0) + (stats?.failures ?? 0);
+      const reliability = total > 0 ? (stats!.successes + 1) / (total + 2) : 0.5;
+      const speed = stats?.tokPerSec && stats.tokPerSec > 0
+        ? Math.min(1, stats.tokPerSec / 100)
+        : stats?.avgTtfbMs != null
+          ? Math.max(0, Math.min(1, 1 - stats.avgTtfbMs / 30_000))
+          : 0.5;
+      return { key, score: reliability * 0.75 + speed * 0.25 };
+    })
+    .sort((a, b) => b.score - a.score || a.key.id - b.key.id)
+    .map(item => item.key);
+}
+
 /**
  * Pick a usable key for ONE model and build its RouteResult, or return null if
  * the model has no key that can serve the request right now (all cooled down,
@@ -793,6 +883,8 @@ export function resolveRoutingChain(modelString: string | undefined): ResolvedCh
 function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: Set<string>, diag?: string[]): RouteResult | null {
   const db = getDb();
   const label = `${entry.platform}/${entry.model_id}`;
+  const endpointScope = entry.endpoint_scope
+    ?? (entry.platform === 'custom' ? endpointScopeOfKey(db, entry.key_id) : '');
 
   if (!hasProvider(entry.platform as Platform)) {
     diag?.push(`${label}: no provider registered`);
@@ -800,11 +892,22 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
   }
   const provider = getProvider(entry.platform as Platform)!;
 
-  const keys = db.prepare(
+  const allKeys = db.prepare(
     "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')"
   ).all(entry.platform) as KeyRow[];
-  if (keys.length === 0) {
+  if (allKeys.length === 0) {
     diag?.push(`${label}: no enabled+healthy key for platform`);
+    return null;
+  }
+  const scopedKeys = allKeys.filter(key => scopeAllows(parseModelScope(key.model_scope_json), entry.model_id));
+  const keys = scopedKeys.filter(key => {
+    if (endpointScope) return endpointScopeOfKey(db, key.id) === endpointScope;
+    if (entry.platform !== 'custom' || entry.key_id == null) return true;
+    const keyScope = endpointScopeOfKey(db, key.id);
+    return keyScope ? keyScope === endpointScope : key.id === entry.key_id;
+  });
+  if (keys.length === 0) {
+    diag?.push(`${label}: no usable key — ${allKeys.length} key(s) are scoped to another model or endpoint`);
     return null;
   }
 
@@ -820,24 +923,25 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
     tpd: entry.tpd_limit,
   };
 
-  const rrKey = `${entry.platform}:${entry.model_id}`;
+  refreshStatsCache(db);
+  const rrKey = modelStatsKey(entry.platform, entry.model_id, endpointScope);
   let idx = roundRobinIndex.get(rrKey) ?? 0;
+  const ranked = orderKeysByScore({ ...entry, endpoint_scope: endpointScope }, keys);
 
   for (let attempt = 0; attempt < keys.length; attempt++) {
-    const key = keys[idx % keys.length];
+    const key = ranked ? ranked[attempt]! : keys[idx % keys.length]!;
     idx++;
-
-    // A custom model belongs to exactly one endpoint (#212); legacy rows
-    // (key_id NULL) keep the old any-key match.
-    if (entry.platform === 'custom' && entry.key_id != null && key.id !== entry.key_id) { note('custom-key-mismatch'); continue; }
 
     const skipId = `${entry.platform}:${entry.model_id}:${key.id}`;
     if (skipKeys?.has(skipId)) { note('already-failed-this-request'); continue; }
 
     if (isOnCooldown(entry.platform, entry.model_id, key.id)) { note('cooldown'); continue; }
     if (!canUseProvider(entry.platform, key.id)) { note('provider-daily-cap'); continue; }
+    if (!canUseProviderMinute(entry.platform, key.id)) { note('provider-minute-cap'); continue; }
+    if (!canUseKeyConcurrency(entry.platform, key.id)) { note('key-concurrency'); continue; }
     if (!canMakeRequest(entry.platform, entry.model_id, key.id, limits)) { note('rpm/rpd-limit'); continue; }
     if (!canUseTokens(entry.platform, entry.model_id, key.id, estimatedTokens, limits)) { note('tpm/tpd-limit'); continue; }
+    if (!canUseProviderTokens(entry.platform, key.id, entry.model_id, estimatedTokens)) { note('provider-daily-token-cap'); continue; }
 
     let decryptedKey: string;
     try {
@@ -856,6 +960,7 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
     if (!resolvedProvider) { note('no-resolved-provider'); continue; }
 
     roundRobinIndex.set(rrKey, idx);
+    const leaseId = acquireLease(entry.platform, entry.model_id, key.id, estimatedTokens);
     return {
       provider: resolvedProvider,
       modelId: entry.model_id,
@@ -866,6 +971,8 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
       displayName: entry.display_name,
       rpdLimit: limits.rpd,
       tpdLimit: limits.tpd,
+      endpointScope,
+      release: () => releaseLease(leaseId),
     };
   }
 
@@ -895,33 +1002,42 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
 export function hasOtherUsableKey(modelDbId: number, excludingKeyId: number, skipKeys?: Set<string>): boolean {
   const db = getDb();
   const m = db.prepare(`
-    SELECT platform, model_id, rpm_limit, rpd_limit, tpm_limit, tpd_limit, key_id
+    SELECT platform, model_id, rpm_limit, rpd_limit, tpm_limit, tpd_limit,
+           key_id, endpoint_scope
       FROM models WHERE id = ?
   `).get(modelDbId) as {
     platform: string; model_id: string;
     rpm_limit: number | null; rpd_limit: number | null;
     tpm_limit: number | null; tpd_limit: number | null; key_id: number | null;
+    endpoint_scope: string | null;
   } | undefined;
   if (!m) return false;
 
   const limits = { rpm: m.rpm_limit, rpd: m.rpd_limit, tpm: m.tpm_limit, tpd: m.tpd_limit };
   const keys = db.prepare(
-    "SELECT id FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')"
-  ).all(m.platform) as { id: number }[];
+    "SELECT id, model_scope_json, base_url FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')"
+  ).all(m.platform) as { id: number; model_scope_json: string | null; base_url: string | null }[];
 
   for (const k of keys) {
     if (k.id === excludingKeyId) continue;
     // A custom model binds to exactly one endpoint key (#212); a sibling custom
-    // key cannot serve it, so it doesn't count as an alternative.
-    if (m.platform === 'custom' && m.key_id != null && k.id !== m.key_id) continue;
+    // key cannot serve it, so it doesn't count as an alternative. When an
+    // endpoint scope is present, other keys on the same endpoint remain valid.
+    if (m.endpoint_scope) {
+      if (endpointScopeOfKey(db, k.id) !== m.endpoint_scope) continue;
+    } else if (m.platform === 'custom' && m.key_id != null && k.id !== m.key_id) continue;
+    if (!scopeAllows(parseModelScope(k.model_scope_json), m.model_id)) continue;
     if (skipKeys?.has(`${m.platform}:${m.model_id}:${k.id}`)) continue;
     if (isOnCooldown(m.platform, m.model_id, k.id)) continue;
     if (!canUseProvider(m.platform, k.id)) continue;
+    if (!canUseProviderMinute(m.platform, k.id)) continue;
+    if (!canUseKeyConcurrency(m.platform, k.id)) continue;
     if (!canMakeRequest(m.platform, m.model_id, k.id, limits)) continue;
     // A per-minute token spike on the failed key doesn't mean a fresh key lacks
     // headroom; a nominal 1-token probe only rules out a key already at its
     // TPM/TPD ceiling.
     if (!canUseTokens(m.platform, m.model_id, k.id, 1, limits)) continue;
+    if (!canUseProviderTokens(m.platform, k.id, m.model_id, 1)) continue;
     return true;
   }
   return false;
@@ -936,8 +1052,12 @@ function getModelChainRow(db: Db, modelDbId: number): ChainRow | undefined {
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.size_label, m.monthly_token_budget,
            m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-           m.supports_tools, m.context_window, m.key_id
+           m.supports_tools, m.context_window, m.key_id,
+           COALESCE(NULLIF(m.endpoint_scope, ''),
+             CASE WHEN m.key_id IS NOT NULL THEN RTRIM(COALESCE(ak.base_url, ''), '/') ELSE '' END
+           ) AS endpoint_scope
     FROM models m
+    LEFT JOIN api_keys ak ON ak.id = m.key_id
     WHERE m.id = ? AND m.enabled = 1
   `).get(modelDbId) as ChainRow | undefined;
 }
@@ -1022,23 +1142,32 @@ export function getOrderedFusionChain(): FusionCandidate[] {
   // can't fill — surfacing as "no available key" and pushing out a usable model,
   // which also makes the panel look like it's ignoring the routing strategy.
   const usableKeys = db.prepare(
-    "SELECT id, platform FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown')"
-  ).all() as { id: number; platform: string }[];
-  const keysByPlatform = new Map<string, number[]>();
+    "SELECT id, platform, model_scope_json FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown')"
+  ).all() as { id: number; platform: string; model_scope_json: string | null }[];
+  const keysByPlatform = new Map<string, typeof usableKeys>();
   for (const k of usableKeys) {
     const arr = keysByPlatform.get(k.platform);
-    if (arr) arr.push(k.id); else keysByPlatform.set(k.platform, [k.id]);
+    if (arr) arr.push(k); else keysByPlatform.set(k.platform, [k]);
   }
   const servable = chain.filter(e => {
-    const keyIds = keysByPlatform.get(e.platform);
-    if (!keyIds) return false;
+    const keyRows = keysByPlatform.get(e.platform);
+    if (!keyRows) return false;
     const limits = { rpm: e.rpm_limit, rpd: e.rpd_limit, tpm: e.tpm_limit, tpd: e.tpd_limit };
-    return keyIds.some(kid =>
-      (e.key_id == null || kid === e.key_id) &&
-      !isOnCooldown(e.platform, e.model_id, kid) &&
-      canUseProvider(e.platform, kid) &&
-      canMakeRequest(e.platform, e.model_id, kid, limits),
-    );
+    return keyRows.some(key => {
+      if (e.endpoint_scope) {
+        if (endpointScopeOfKey(db, key.id) !== e.endpoint_scope) return false;
+      } else if (e.key_id != null && e.platform === 'custom' && key.id !== e.key_id) {
+        return false;
+      }
+      if (!scopeAllows(parseModelScope(key.model_scope_json), e.model_id)) return false;
+      return !isOnCooldown(e.platform, e.model_id, key.id)
+        && canUseProvider(e.platform, key.id)
+        && canUseProviderMinute(e.platform, key.id)
+        && canUseKeyConcurrency(e.platform, key.id)
+        && canMakeRequest(e.platform, e.model_id, key.id, limits)
+        && canUseTokens(e.platform, e.model_id, key.id, 1, limits)
+        && canUseProviderTokens(e.platform, key.id, e.model_id, 1);
+    });
   });
 
   // Deterministic (expected-score) ordering so the panel faithfully follows the
@@ -1150,8 +1279,12 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
                m.platform, m.model_id, m.display_name, m.intelligence_rank,
                m.size_label, m.monthly_token_budget,
                m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-               m.supports_tools, m.context_window, m.key_id
+               m.supports_tools, m.context_window, m.key_id,
+               COALESCE(NULLIF(m.endpoint_scope, ''),
+                 CASE WHEN m.key_id IS NOT NULL THEN RTRIM(COALESCE(ak.base_url, ''), '/') ELSE '' END
+               ) AS endpoint_scope
         FROM models m
+        LEFT JOIN api_keys ak ON ak.id = m.key_id
         WHERE m.id = ? AND m.enabled = 1
       `).get(preferredModelDbId) as ChainRow | undefined;
       
@@ -1261,7 +1394,7 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
 
   const scores: RoutingScore[] = chain.map(entry => {
     const scored = scoreChainEntry(entry, weights, intelMin, intelMax, false, keyCounts);
-    const stats = statsCache?.get(`${entry.platform}:${entry.model_id}`);
+    const stats = statsCache?.get(modelStatsKey(entry.platform, entry.model_id, entry.endpoint_scope));
     return {
       modelDbId: entry.model_db_id,
       platform: entry.platform,

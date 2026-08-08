@@ -14,6 +14,8 @@ export const MODEL_VIEW_INVALIDATION_KEYS = [
   ['keys'],
   ['provider-model-catalog'],
   ['model-catalog-platforms'],
+  ['analytics'],
+  ['fusion-config'],
 ] as const
 
 /** Refresh every model-related page after one model mutation succeeds. */

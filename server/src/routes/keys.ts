@@ -14,6 +14,8 @@ import {
 import { encrypt, decrypt, maskKey } from '../lib/crypto.js';
 import { parseKeysFromFile, stripJsoncComments, stripTrailingCommas } from '../lib/key-parser.js';
 import { assessProviderUrl } from '../lib/url-guard.js';
+import { endpointScopeForBaseUrl } from '../lib/endpoint-scope.js';
+import { parseModelScope } from '../lib/model-scope.js';
 import { calibrateModelMeta, niceDisplayName, repairLegacyDisplayName } from '../lib/model-intel.js';
 import { providerModelCatalogRouter } from './provider-model-catalog.js';
 
@@ -26,6 +28,7 @@ export const keysRouter = Router();
 const PLATFORMS = [
   'google', 'groq', 'cerebras', 'nvidia', 'mistral',
   'openrouter', 'github', 'cohere', 'cloudflare', 'zhipu', 'ollama',
+  'modelscope', 'sealion', 'navy',
   'kilo', 'pollinations', 'llm7', 'huggingface', 'opencode', 'ovh', 'agnes', 'reka', 'siliconflow',
   'routeway', 'bazaarlink', 'ainative', 'aion', 'requesty', 'nara', 'aihorde', 'custom',
   // Local modification: AiHub third-party relay (see providers/index.ts).
@@ -55,14 +58,27 @@ const addKeySchema = z.object({
   platform: z.string().min(1),
   key: z.string().optional(),
   label: z.string().optional(),
+  modelScope: z.array(z.string().trim().min(1).max(200)).max(500).nullable().optional(),
 });
 
 const updateKeySchema = z.object({
   enabled: z.boolean().optional(),
   label: z.string().optional(),
-}).refine(data => data.enabled !== undefined || data.label !== undefined, {
-  message: 'At least one of enabled or label must be provided',
+  modelScope: z.array(z.string().trim().min(1).max(200)).max(500).nullable().optional(),
+}).refine(data => data.enabled !== undefined || data.label !== undefined || data.modelScope !== undefined, {
+  message: 'At least one of enabled, label, or modelScope must be provided',
 });
+
+function serializeModelScope(scope: string[] | null | undefined): string | null {
+  if (scope === undefined || scope === null) return null;
+  const normalized = [...new Set(scope.map(item => item.trim()).filter(Boolean))];
+  return normalized.length > 0 ? JSON.stringify(normalized) : null;
+}
+
+function publicModelScope(raw: string | null | undefined): string[] | null {
+  const parsed = parseModelScope(raw);
+  return parsed ? [...parsed].sort((a, b) => a.localeCompare(b)) : null;
+}
 
 const importKeySchema = z.object({
   keyName: z.string().optional(),
@@ -195,10 +211,15 @@ keysRouter.get('/', (_req: Request, res: Response) => {
     modelsByKeyId.set(keyId, list);
   }
 
-  // Named OpenAI platforms (modelscope, locedge…): models share platform slug, key_id NULL
+  // Named OpenAI platforms (modelscope, locedge…): models normally have
+  // key_id NULL, so an endpoint-bound model must be grouped by the same
+  // normalized base URL as the key. Otherwise two endpoints using the same
+  // model ID would appear on both key cards in the dashboard.
   const modelsByPlatform = new Map<string, any[]>();
+  const modelsByPlatformEndpoint = new Map<string, any[]>();
   const platformModelRows = db.prepare(`
-    SELECT m.platform, m.id, 'chat' AS kind, m.model_id, m.display_name
+    SELECT m.platform, m.id, 'chat' AS kind, m.model_id, m.display_name,
+           COALESCE(m.endpoint_scope, '') AS endpoint_scope
       FROM models m
      WHERE m.platform != 'custom'
        AND EXISTS (
@@ -209,15 +230,20 @@ keysRouter.get('/', (_req: Request, res: Response) => {
      ORDER BY m.display_name
   `).all() as any[];
   for (const m of platformModelRows) {
-    const list = modelsByPlatform.get(m.platform) ?? [];
-    list.push({
+    const model = {
       id: m.id,
       kind: m.kind,
       modelId: m.model_id,
       displayName: repairLegacyDisplayName(m.model_id, m.display_name),
       family: null,
-    });
+    };
+    const list = modelsByPlatform.get(m.platform) ?? [];
+    list.push(model);
     modelsByPlatform.set(m.platform, list);
+    const endpointKey = `${m.platform}\u0000${endpointScopeForBaseUrl(m.endpoint_scope)}`;
+    const scopedList = modelsByPlatformEndpoint.get(endpointKey) ?? [];
+    scopedList.push(model);
+    modelsByPlatformEndpoint.set(endpointKey, scopedList);
   }
 
   for (const list of modelsByKeyId.values()) {
@@ -239,6 +265,10 @@ keysRouter.get('/', (_req: Request, res: Response) => {
     let models: any[] | undefined;
     if (row.platform === 'custom') {
       models = modelsByKeyId.get(row.id) ?? [];
+    } else if (row.base_url && modelsByPlatformEndpoint.has(`${row.platform}\u0000${endpointScopeForBaseUrl(row.base_url)}`)) {
+      const exact = modelsByPlatformEndpoint.get(`${row.platform}\u0000${endpointScopeForBaseUrl(row.base_url)}`) ?? [];
+      const legacy = modelsByPlatformEndpoint.get(`${row.platform}\u0000`) ?? [];
+      models = [...new Map([...exact, ...legacy].map(model => [model.id, model])).values()];
     } else if (modelsByPlatform.has(row.platform)) {
       // Named OpenAI platforms (modelscope, aihub-as-user, locedge…)
       models = modelsByPlatform.get(row.platform);
@@ -254,6 +284,7 @@ keysRouter.get('/', (_req: Request, res: Response) => {
       keyless: resolveProvider(row.platform)?.keyless === true,
       createdAt: row.created_at,
       lastCheckedAt: row.last_checked_at,
+      modelScope: publicModelScope(row.model_scope_json),
       models,
     };
   });
@@ -358,6 +389,7 @@ keysRouter.post('/', async (req: Request, res: Response) => {
 
   const platform = parsed.data.platform.trim().toLowerCase();
   const { label } = parsed.data;
+  const modelScopeJson = serializeModelScope(parsed.data.modelScope);
   const isBuiltin = (PLATFORMS as readonly string[]).includes(platform);
   const db = getDb();
 
@@ -413,6 +445,7 @@ keysRouter.post('/', async (req: Request, res: Response) => {
         maskedKey: maskKey(keyToStore),
         status: 'unknown',
         enabled: true,
+        modelScope: null,
         modelsAvailable: enabledModelCount(platform),
         notice: noModelsNotice(platform),
       });
@@ -435,9 +468,9 @@ keysRouter.post('/', async (req: Request, res: Response) => {
 
   const { encrypted, iv, authTag } = encrypt(keyToStore);
   const result = db.prepare(`
-    INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
-    VALUES (?, ?, ?, ?, ?, 'unknown', 1, ?)
-  `).run(platform, label ?? '', encrypted, iv, authTag, baseUrl);
+    INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url, model_scope_json)
+    VALUES (?, ?, ?, ?, ?, 'unknown', 1, ?, ?)
+  `).run(platform, label ?? '', encrypted, iv, authTag, baseUrl, modelScopeJson);
 
   const newId = Number(result.lastInsertRowid);
 
@@ -459,6 +492,7 @@ keysRouter.post('/', async (req: Request, res: Response) => {
     maskedKey: maskKey(keyToStore),
     status,
     enabled: true,
+    modelScope: publicModelScope(modelScopeJson),
     modelsAvailable: enabledModelCount(platform),
     notice: noModelsNotice(platform),
   });
@@ -537,6 +571,7 @@ keysRouter.post('/custom/discover', async (req: Request, res: Response) => {
   }
 
   const baseUrl = parsed.data.baseUrl.trim().replace(/\/+$/, '');
+  const endpointScope = endpointScopeForBaseUrl(baseUrl);
   const verdict = await assessProviderUrl(baseUrl);
   if (!verdict.allowed) {
     res.status(400).json({ error: { message: `baseUrl rejected: ${verdict.reason}` } });
@@ -611,8 +646,11 @@ keysRouter.post('/custom/discover', async (req: Request, res: Response) => {
     seen.add(id);
     const ownedBy = (item as { owned_by?: unknown }).owned_by;
     const already = db.prepare(
-      'SELECT 1 FROM models WHERE model_id = ? LIMIT 1',
-    ).get(id);
+       `SELECT 1 FROM models
+          WHERE platform = 'custom' AND model_id = ?
+            AND (endpoint_scope = ? OR endpoint_scope = '')
+          LIMIT 1`,
+     ).get(id, endpointScope);
     models.push({
       id,
       ownedBy: typeof ownedBy === 'string' ? ownedBy : undefined,
@@ -636,6 +674,7 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
   }
 
   const baseUrl = parsed.data.baseUrl.trim().replace(/\/+$/, '');
+  const endpointScope = endpointScopeForBaseUrl(baseUrl);
 
   // SSRF guard (#440): a base_url is the one user-controlled outbound target.
   // Cloud metadata / link-local addresses are rejected outright; private
@@ -782,10 +821,10 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
         INSERT INTO models
           (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
            rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window, enabled, key_id,
-           supports_tools, supports_vision)
-        VALUES (@platform, @modelId, @displayName, @intelRank, @speedRank, @sizeLabel, NULL, NULL, NULL, NULL, '', NULL, 1, @keyId,
-           COALESCE(@tools, 1), COALESCE(@vision, 0))
-        ON CONFLICT(platform, model_id)
+           supports_tools, supports_vision, endpoint_scope)
+         VALUES (@platform, @modelId, @displayName, @intelRank, @speedRank, @sizeLabel, NULL, NULL, NULL, NULL, '', NULL, 1, @keyId,
+            COALESCE(@tools, 1), COALESCE(@vision, 0), @endpointScope)
+         ON CONFLICT(platform, model_id, endpoint_scope)
         DO UPDATE SET
           display_name = excluded.display_name,
           key_id = excluded.key_id,
@@ -803,14 +842,16 @@ keysRouter.post('/custom', async (req: Request, res: Response) => {
         // No official catalog speed → neutral 35 (not fake 50/100)
         speedRank: 35,
         sizeLabel: meta.sizeLabel,
-        keyId: bindKeyId,
+         keyId: bindKeyId,
+         endpointScope,
         tools: toolsParam,
         vision: visionParam,
       });
 
       const modelRow = db.prepare(
-        'SELECT id, supports_tools, supports_vision FROM models WHERE platform = ? AND model_id = ?',
-      ).get(platform, modelId) as { id: number; supports_tools: number; supports_vision: number };
+        `SELECT id, supports_tools, supports_vision FROM models
+          WHERE platform = ? AND model_id = ? AND endpoint_scope = ?`,
+      ).get(platform, modelId, endpointScope) as { id: number; supports_tools: number; supports_vision: number };
 
       // User-registered models join Default only. high/mid/light and other
       // named routing groups are explicit operator-curated groups.
@@ -1096,9 +1137,9 @@ keysRouter.patch('/:id', (req: Request, res: Response) => {
     return;
   }
 
-  const { enabled, label } = parsed.data;
+  const { enabled, label, modelScope } = parsed.data;
   const updates: string[] = [];
-  const values: (string | number)[] = [];
+  const values: (string | number | null)[] = [];
 
   if (enabled !== undefined) {
     updates.push('enabled = ?');
@@ -1107,6 +1148,10 @@ keysRouter.patch('/:id', (req: Request, res: Response) => {
   if (label !== undefined) {
     updates.push('label = ?');
     values.push(label);
+  }
+  if (modelScope !== undefined) {
+    updates.push('model_scope_json = ?');
+    values.push(serializeModelScope(modelScope) as string | null);
   }
 
   values.push(id);
@@ -1122,6 +1167,7 @@ keysRouter.patch('/:id', (req: Request, res: Response) => {
   const response: Record<string, unknown> = { success: true };
   if (enabled !== undefined) response.enabled = enabled;
   if (label !== undefined) response.label = label;
+  if (modelScope !== undefined) response.modelScope = publicModelScope(serializeModelScope(modelScope));
   res.json(response);
 });
 

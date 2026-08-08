@@ -505,6 +505,7 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
         attempt,
         platform: route.platform,
         model: route.modelId,
+        keyId: route.keyId,
         requestedModel: attempt === 0 ? requestedModel : undefined,
       });
       if (stream) {
@@ -513,13 +514,13 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
             start, attempt, attemptLog, clientGone: () => clientGone, requestedModel, estimatedInputTokens, tools, pinnedModelId,
             sessionId, pinned: resolved.pinned,
           });
-          traceRouteEvent('Anthropic', { event: 'ok', requestId: requestGroupId, attempt, platform: route.platform, model: route.modelId, latencyMs: Date.now() - start });
+          traceRouteEvent('Anthropic', { event: 'ok', requestId: requestGroupId, attempt, platform: route.platform, keyId: route.keyId, model: route.modelId, latencyMs: Date.now() - start });
           return 'done';
         } catch (err: any) {
           // The stream already committed (message_start sent) and surfaced its
           // own error event; stop without failover or a second response.
           if (err instanceof StreamAlreadyStarted) {
-            traceRouteEvent('Anthropic', { event: 'fail', requestId: requestGroupId, attempt, platform: route.platform, model: route.modelId, latencyMs: Date.now() - start, error: sanitizeProviderErrorMessage(err.message) });
+            traceRouteEvent('Anthropic', { event: 'fail', requestId: requestGroupId, attempt, platform: route.platform, keyId: route.keyId, model: route.modelId, latencyMs: Date.now() - start, error: sanitizeProviderErrorMessage(err.message) });
             return 'committed';
           }
           throw err;
@@ -594,13 +595,13 @@ anthropicRouter.post('/messages', async (req: Request, res: Response) => {
       res.setHeader('X-Routed-Via', `${route.platform}/${route.modelId}`);
       setFallbackHeaders(res, attempt, attemptLog);
       logRequest(route.platform, route.modelId, route.keyId, 'success', promptTokens, completionTokens, Date.now() - start, null, null, pinnedModelId);
-      traceRouteEvent('Anthropic', { event: 'ok', requestId: requestGroupId, attempt, platform: route.platform, model: route.modelId, latencyMs: Date.now() - start, inputTokens: promptTokens, outputTokens: completionTokens });
+      traceRouteEvent('Anthropic', { event: 'ok', requestId: requestGroupId, attempt, platform: route.platform, keyId: route.keyId, model: route.modelId, latencyMs: Date.now() - start, inputTokens: promptTokens, outputTokens: completionTokens });
       res.json(anthropicResponse);
       return 'done';
     },
     logFailure: (route, err, attempt) => {
       logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, Date.now() - start, sanitizeProviderErrorMessage(err.message), null, pinnedModelId);
-      traceRouteEvent('Anthropic', { event: 'fail', requestId: requestGroupId, attempt, platform: route.platform, model: route.modelId, latencyMs: Date.now() - start, error: sanitizeProviderErrorMessage(err.message) });
+      traceRouteEvent('Anthropic', { event: 'fail', requestId: requestGroupId, attempt, platform: route.platform, keyId: route.keyId, model: route.modelId, latencyMs: Date.now() - start, error: sanitizeProviderErrorMessage(err.message) });
     },
     onFatal: (route, err, attempt) => {
       setFallbackHeaders(res, attempt, attemptLog);

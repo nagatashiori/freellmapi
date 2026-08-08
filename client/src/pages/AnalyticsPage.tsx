@@ -136,6 +136,8 @@ interface RoutingTraceEvent {
   event: 'start' | 'next' | 'ok' | 'fail'
   platform: string
   modelId: string
+  keyId: number | null
+  keyLabel: string | null
   latencyMs: number | null
   error: string | null
   errorCategory: string | null
@@ -150,6 +152,8 @@ interface RoutingTrace {
   finalState: RoutingTraceEvent['event']
   finalPlatform: string
   finalModelId: string
+  finalKeyId: number | null
+  finalKeyLabel: string | null
   events: RoutingTraceEvent[]
 }
 
@@ -569,7 +573,7 @@ export default function AnalyticsPage() {
                           <span className={`mr-2 font-medium ${trace.finalState === 'ok' ? 'text-[#4ade80]' : trace.finalState === 'fail' ? 'text-destructive' : 'text-[#fbbf24]'}`}>{finalLabel}</span>
                           <span className="font-mono text-muted-foreground">{trace.requestId.slice(0, 12)}</span>
                           <span className="ml-2 text-muted-foreground">{trace.surface} · {dispatchCount} 次派发 · {trace.events.length} 个事件 · {formatSqliteUtcToLocalTime(trace.createdAt, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
-                          <span className="ml-2 text-muted-foreground">请求：{trace.requestedModel ?? 'auto'} → {targetLabel}：{trace.finalPlatform}/{trace.finalModelId}</span>
+                          <span className="ml-2 text-muted-foreground">请求：{trace.requestedModel ?? 'auto'} → {targetLabel}：{trace.finalPlatform}/{trace.finalModelId} · API：{trace.finalKeyLabel ?? '历史记录'}{trace.finalKeyId != null ? ` (#${trace.finalKeyId})` : ''}</span>
                         </summary>
                         <div className="mt-2 space-y-1 border-t pt-2 text-[11px]">
                           <div className="flex flex-wrap gap-x-3 text-muted-foreground">
@@ -586,6 +590,8 @@ export default function AnalyticsPage() {
                                 <span className="font-medium text-foreground">#{event.attempt + 1} {label}</span>
                                 <span>渠道：<code>{event.platform}</code></span>
                                 <span>模型：<code>{event.modelId}</code></span>
+                                <span>API：<code>{event.keyLabel ?? '历史记录'}</code></span>
+                                <span>API ID：<code>{event.keyId != null ? event.keyId : '—'}</code></span>
                                 {event.latencyMs != null && <span>累计 {event.latencyMs}ms</span>}
                                 {event.errorCategory && <span className="text-destructive">{errorCategoryLabel(event.errorCategory)}</span>}
                                 {event.error && <span className="text-destructive break-all">{event.error}</span>}

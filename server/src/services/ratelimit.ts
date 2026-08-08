@@ -30,12 +30,123 @@ function pruneTimestamps(timestamps: number[], windowMs: number, now: number): n
 const MINUTE = 60 * 1000;
 const DAY = 24 * 60 * MINUTE;
 
+/** Milliseconds since the most recent UTC midnight for account daily caps. */
+function msSinceUtcMidnight(now: number): number {
+  return now - new Date(now).setUTCHours(0, 0, 0, 0);
+}
+
 function withDb<T>(fn: (db: RateLimitDb) => T): T | undefined {
   try {
     return fn(getDb());
   } catch {
     return undefined;
   }
+}
+
+// ── In-flight account leases ───────────────────────────────────────────────
+// Usage is recorded after an upstream attempt finishes. A lease makes the
+// request visible between key selection and that write, closing the parallel
+// check-then-act gap in quota and concurrency checks.
+interface Lease {
+  platform: string;
+  modelId: string;
+  keyId: number;
+  tokens: number;
+  createdAt: number;
+}
+
+const leases = new Map<number, Lease>();
+let nextLeaseId = 1;
+const LEASE_MAX_AGE_MS = 2 * MINUTE;
+
+function pruneLeases(now: number): void {
+  for (const [id, lease] of leases) {
+    if (now - lease.createdAt > LEASE_MAX_AGE_MS) leases.delete(id);
+  }
+}
+
+/** Explicit opt-in per-key concurrency cap; unset means unlimited. */
+export function getKeyConcurrencyLimit(platform: string): number | null {
+  const raw = process.env[`MAX_CONCURRENT_REQUESTS_PER_KEY_${platform.toUpperCase()}`]
+    ?? process.env.MAX_CONCURRENT_REQUESTS_PER_KEY;
+  if (raw !== undefined && raw.trim() !== '') {
+    const value = Number(raw);
+    if (Number.isInteger(value) && value > 0) return value;
+  }
+  return null;
+}
+
+export function inFlightForKey(platform: string, keyId: number, now = Date.now()): number {
+  pruneLeases(now);
+  let count = 0;
+  for (const lease of leases.values()) {
+    if (lease.platform === platform && lease.keyId === keyId) count++;
+  }
+  return count;
+}
+
+export function canUseKeyConcurrency(platform: string, keyId: number, now = Date.now()): boolean {
+  const limit = getKeyConcurrencyLimit(platform);
+  return limit === null || inFlightForKey(platform, keyId, now) < limit;
+}
+
+export function acquireLease(
+  platform: string,
+  modelId: string,
+  keyId: number,
+  tokens: number,
+  now = Date.now(),
+): number {
+  pruneLeases(now);
+  const id = nextLeaseId++;
+  leases.set(id, { platform, modelId, keyId, tokens, createdAt: now });
+  return id;
+}
+
+/** Idempotent release used by fallback, fusion, and direct route callers. */
+export function releaseLease(leaseId: number): void {
+  leases.delete(leaseId);
+}
+
+/** Test and restart seam: in-memory leases never survive a process restart. */
+export function resetLeases(): void {
+  leases.clear();
+}
+
+function provisionalRequests(platform: string, modelId: string, keyId: number, now: number): number {
+  pruneLeases(now);
+  let count = 0;
+  for (const lease of leases.values()) {
+    if (lease.platform === platform && lease.modelId === modelId && lease.keyId === keyId) count++;
+  }
+  return count;
+}
+
+function provisionalTokens(platform: string, modelId: string, keyId: number, now: number): number {
+  pruneLeases(now);
+  let total = 0;
+  for (const lease of leases.values()) {
+    if (lease.platform === platform && lease.modelId === modelId && lease.keyId === keyId) total += lease.tokens;
+  }
+  return total;
+}
+
+function provisionalProviderRequests(platform: string, keyId: number, now: number): number {
+  return inFlightForKey(platform, keyId, now);
+}
+
+function provisionalProviderBilledTokens(platform: string, keyId: number, now: number): number {
+  pruneLeases(now);
+  let total = 0;
+  for (const lease of leases.values()) {
+    if (lease.platform === platform && lease.keyId === keyId) {
+      // A provider may apply a different multiplier to each model. Account
+      // for every in-flight lease using its own model instead of applying the
+      // candidate model's multiplier to the whole account total.
+      total += providerBilledTokens(platform, lease.modelId, lease.tokens);
+    }
+  }
+  return total;
 }
 
 function recordUsage(
@@ -142,13 +253,14 @@ export function canMakeRequest(
   limits: { rpm: number | null; rpd: number | null; tpm: number | null; tpd: number | null },
 ): boolean {
   const now = Date.now();
+  const inFlight = provisionalRequests(platform, modelId, keyId, now);
 
   if (limits.rpm !== null) {
-    if (requestCount(platform, modelId, keyId, MINUTE, now) >= limits.rpm) return false;
+    if (requestCount(platform, modelId, keyId, MINUTE, now) + inFlight >= limits.rpm) return false;
   }
 
   if (limits.rpd !== null) {
-    if (requestCount(platform, modelId, keyId, DAY, now) >= limits.rpd) return false;
+    if (requestCount(platform, modelId, keyId, DAY, now) + inFlight >= limits.rpd) return false;
   }
 
   return true;
@@ -162,15 +274,16 @@ export function canUseTokens(
   limits: { tpm: number | null; tpd: number | null },
 ): boolean {
   const now = Date.now();
+  const inFlight = provisionalTokens(platform, modelId, keyId, now);
 
   if (limits.tpm !== null) {
     const used = tokenCount(platform, modelId, keyId, MINUTE, now);
-    if (used + estimatedTokens > limits.tpm) return false;
+    if (used + inFlight + estimatedTokens > limits.tpm) return false;
   }
 
   if (limits.tpd !== null) {
     const used = tokenCount(platform, modelId, keyId, DAY, now);
-    if (used + estimatedTokens > limits.tpd) return false;
+    if (used + inFlight + estimatedTokens > limits.tpd) return false;
   }
 
   return true;
@@ -188,6 +301,15 @@ export function canUseTokens(
 //   PROVIDER_DAILY_REQUEST_CAP_OPENROUTER=50   (set 0 to disable the cap)
 const DEFAULT_PROVIDER_DAILY_REQUEST_CAPS: Record<string, number> = {
   openrouter: 1000,
+  modelscope: 1800,
+};
+
+const DEFAULT_PROVIDER_DAILY_TOKEN_CAPS: Record<string, number> = {
+  navy: 150_000,
+};
+
+const DEFAULT_PROVIDER_MINUTE_REQUEST_CAPS: Record<string, number> = {
+  nvidia: 40,
 };
 
 export function getProviderDailyRequestCap(platform: string): number | null {
@@ -197,6 +319,24 @@ export function getProviderDailyRequestCap(platform: string): number | null {
     if (Number.isFinite(n) && n >= 0) return n === 0 ? null : n;
   }
   return DEFAULT_PROVIDER_DAILY_REQUEST_CAPS[platform] ?? null;
+}
+
+export function getProviderMinuteRequestCap(platform: string): number | null {
+  const raw = process.env[`PROVIDER_MINUTE_REQUEST_CAP_${platform.toUpperCase()}`];
+  if (raw !== undefined && raw.trim() !== '') {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return n === 0 ? null : n;
+  }
+  return DEFAULT_PROVIDER_MINUTE_REQUEST_CAPS[platform] ?? null;
+}
+
+export function getProviderDailyTokenCap(platform: string): number | null {
+  const raw = process.env[`PROVIDER_DAILY_TOKEN_CAP_${platform.toUpperCase()}`];
+  if (raw !== undefined && raw.trim() !== '') {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return n === 0 ? null : n;
+  }
+  return DEFAULT_PROVIDER_DAILY_TOKEN_CAPS[platform] ?? null;
 }
 
 function countPersistedProviderRequests(
@@ -220,14 +360,15 @@ function countPersistedProviderRequests(
 
 // Total requests today for a provider account+key, summed across every model.
 export function providerDailyRequestCount(platform: string, keyId: number, now = Date.now()): number {
-  const persisted = countPersistedProviderRequests(platform, keyId, DAY, now);
+  const windowMs = msSinceUtcMidnight(now);
+  const persisted = countPersistedProviderRequests(platform, keyId, windowMs, now);
   if (persisted !== undefined) return persisted;
   // DB-unavailable fallback: sum the per-model rpd windows for this platform+key.
   // Window key format is "platform:modelId:keyId:rpd" (modelId may contain ':').
   let total = 0;
   for (const [key, w] of windows) {
     if (key.startsWith(`${platform}:`) && key.endsWith(`:${keyId}:rpd`)) {
-      total += pruneTimestamps(w.timestamps, DAY, now).length;
+      total += pruneTimestamps(w.timestamps, windowMs, now).length;
     }
   }
   return total;
@@ -238,7 +379,117 @@ export function providerDailyRequestCount(platform: string, keyId: number, now =
 export function canUseProvider(platform: string, keyId: number, now = Date.now()): boolean {
   const cap = getProviderDailyRequestCap(platform);
   if (cap === null) return true;
-  return providerDailyRequestCount(platform, keyId, now) < cap;
+  return providerDailyRequestCount(platform, keyId, now) + provisionalProviderRequests(platform, keyId, now) < cap;
+}
+
+export function providerMinuteRequestCount(platform: string, keyId: number, now = Date.now()): number {
+  const persisted = countPersistedProviderRequests(platform, keyId, MINUTE, now);
+  if (persisted !== undefined) return persisted;
+  let total = 0;
+  for (const [key, w] of windows) {
+    if (key.startsWith(`${platform}:`) && key.endsWith(`:${keyId}:rpm`)) {
+      total += pruneTimestamps(w.timestamps, MINUTE, now).length;
+    }
+  }
+  return total;
+}
+
+export function canUseProviderMinute(platform: string, keyId: number, now = Date.now()): boolean {
+  const cap = getProviderMinuteRequestCap(platform);
+  if (cap === null) return true;
+  return providerMinuteRequestCount(platform, keyId, now) + provisionalProviderRequests(platform, keyId, now) < cap;
+}
+
+interface ProviderQuotaModelRow {
+  model_id?: string;
+  tpd_limit: number | null;
+  monthly_token_budget: string | null;
+  used?: number;
+}
+
+function multiplierFromQuotaRow(row: ProviderQuotaModelRow | undefined, dailyCap: number): number {
+  if (!row) return 1;
+  const fromLabel = row.monthly_token_budget?.match(/(?:^|[·(\s])(\d+(?:\.\d+)?)x\b/i);
+  if (fromLabel) {
+    const n = Number(fromLabel[1]);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  if (row.tpd_limit != null && row.tpd_limit > 0 && row.tpd_limit < dailyCap) {
+    return dailyCap / row.tpd_limit;
+  }
+  return 1;
+}
+
+function providerBilledTokens(platform: string, modelId: string, rawTokens: number): number {
+  if (rawTokens <= 0) return 0;
+  const dailyCap = getProviderDailyTokenCap(platform);
+  if (dailyCap === null) return rawTokens;
+  if (platform !== 'navy') return rawTokens;
+  const row = withDb(db => db.prepare(`
+    SELECT tpd_limit, monthly_token_budget
+      FROM models
+     WHERE platform = ? AND model_id = ?
+     ORDER BY CASE WHEN endpoint_scope = '' THEN 0 ELSE 1 END, id
+     LIMIT 1
+  `).get(platform, modelId) as ProviderQuotaModelRow | undefined);
+  return Math.ceil(rawTokens * multiplierFromQuotaRow(row, dailyCap));
+}
+
+function sumPersistedProviderTokens(
+  platform: string,
+  keyId: number,
+  windowMs: number,
+  now: number,
+): number | undefined {
+  const dailyCap = getProviderDailyTokenCap(platform);
+  if (dailyCap === null) return 0;
+  return withDb(db => {
+    const rows = db.prepare(`
+      SELECT rlu.model_id, COALESCE(SUM(rlu.tokens), 0) AS used,
+             m.tpd_limit, m.monthly_token_budget
+        FROM rate_limit_usage rlu
+        LEFT JOIN models m ON m.platform = rlu.platform AND m.model_id = rlu.model_id
+       WHERE rlu.platform = ?
+         AND rlu.key_id = ?
+         AND rlu.kind = 'tokens'
+         AND rlu.created_at_ms > ?
+       GROUP BY rlu.model_id
+    `).all(platform, keyId, now - windowMs) as ProviderQuotaModelRow[];
+    return rows.reduce((sum, row) => sum + Math.ceil((row.used ?? 0) * (platform === 'navy'
+      ? multiplierFromQuotaRow(row, dailyCap)
+      : 1)), 0);
+  });
+}
+
+export function providerDailyTokenCount(platform: string, keyId: number, now = Date.now()): number {
+  const windowMs = msSinceUtcMidnight(now);
+  const persisted = sumPersistedProviderTokens(platform, keyId, windowMs, now);
+  if (persisted !== undefined) return persisted;
+  let total = 0;
+  const suffix = `:${keyId}:tpd`;
+  for (const [key, w] of windows) {
+    if (!key.startsWith(`${platform}:`) || !key.endsWith(suffix)) continue;
+    const modelId = key.slice(platform.length + 1, -suffix.length);
+    const raw = w.tokenTimestamps
+      .filter(t => t.ts > now - windowMs)
+      .reduce((sum, t) => sum + t.tokens, 0);
+    total += providerBilledTokens(platform, modelId, raw);
+  }
+  return total;
+}
+
+export function canUseProviderTokens(
+  platform: string,
+  keyId: number,
+  modelId: string,
+  estimatedTokens: number,
+  now = Date.now(),
+): boolean {
+  const cap = getProviderDailyTokenCap(platform);
+  if (cap === null) return true;
+  const used = providerDailyTokenCount(platform, keyId, now)
+    + provisionalProviderBilledTokens(platform, keyId, now);
+  return used + providerBilledTokens(platform, modelId, estimatedTokens) <= cap;
 }
 
 export function recordRequest(platform: string, modelId: string, keyId: number) {

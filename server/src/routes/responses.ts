@@ -487,6 +487,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
         attempt,
         platform: route.platform,
         model: route.modelId,
+        keyId: route.keyId,
         requestedModel: attempt === 0 ? requestedModelLabel : undefined,
       });
       if (stream) {
@@ -724,6 +725,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
             attempt,
             platform: route.platform,
             model: route.modelId,
+            keyId: route.keyId,
             latencyMs: Date.now() - start,
             inputTokens: estimatedInputTokens,
             outputTokens: totalOutputTokens,
@@ -742,6 +744,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
               attempt,
               platform: route.platform,
               model: route.modelId,
+              keyId: route.keyId,
               latencyMs: Date.now() - start,
               error: safe,
             });
@@ -835,6 +838,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
         attempt,
         platform: route.platform,
         model: route.modelId,
+        keyId: route.keyId,
         latencyMs: Date.now() - start,
         inputTokens: promptTokens,
         outputTokens: completionTokens,
@@ -851,6 +855,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
         attempt,
         platform: route.platform,
         model: route.modelId,
+        keyId: route.keyId,
         latencyMs: latency,
         error: safeError,
       });
