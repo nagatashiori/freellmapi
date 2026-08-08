@@ -849,6 +849,14 @@ export function resolveRoutingChain(modelString: string | undefined): ResolvedCh
 
 // Reliability is deliberately heavier than speed: an API that is fast but
 // repeatedly fails should not outrank a slightly slower healthy account.
+/**
+ * Order a model's candidate keys with the official account-level strategy.
+ *
+ * No history means no evidence, so the caller keeps the legacy round-robin.
+ * Once history exists, reliability is sampled from its Beta posterior (Thompson
+ * sampling) instead of using a fixed success-rate sort. That keeps a healthy
+ * key preferred without permanently starving a less-used sibling key.
+ */
 function orderKeysByScore(entry: ChainRow, keys: KeyRow[]): KeyRow[] | null {
   if (keys.length < 2 || !keyStatsCache) return null;
   const prefix = `${modelStatsKey(entry.platform, entry.model_id, entry.endpoint_scope)}:`;
@@ -856,13 +864,9 @@ function orderKeysByScore(entry: ChainRow, keys: KeyRow[]): KeyRow[] | null {
   return keys
     .map(key => {
       const stats = keyStatsCache!.get(prefix + key.id);
-      const total = (stats?.successes ?? 0) + (stats?.failures ?? 0);
-      const reliability = total > 0 ? (stats!.successes + 1) / (total + 2) : 0.5;
-      const speed = stats?.tokPerSec && stats.tokPerSec > 0
-        ? Math.min(1, stats.tokPerSec / 100)
-        : stats?.avgTtfbMs != null
-          ? Math.max(0, Math.min(1, 1 - stats.avgTtfbMs / 30_000))
-          : 0.5;
+      const { alpha, beta } = reliabilityPosterior(stats?.successes ?? 0, stats?.failures ?? 0);
+      const reliability = sampleBeta(alpha, beta);
+      const speed = speedScore(stats?.tokPerSec ?? 0, stats?.avgTtfbMs ?? null);
       return { key, score: reliability * 0.75 + speed * 0.25 };
     })
     .sort((a, b) => b.score - a.score || a.key.id - b.key.id)
@@ -893,7 +897,7 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
   const provider = getProvider(entry.platform as Platform)!;
 
   const allKeys = db.prepare(
-    "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')"
+    "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown') ORDER BY id ASC"
   ).all(entry.platform) as KeyRow[];
   if (allKeys.length === 0) {
     diag?.push(`${label}: no enabled+healthy key for platform`);
