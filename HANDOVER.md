@@ -1,6 +1,45 @@
 # HANDOVER — 2026-08-08
 
-## 当前任务卡：v13.21 官方账号池冷却治理与 Analytics token 记录
+## 当前任务卡：v13.22 超时账号冷却与重复调用修复（2026-08-09）
+
+### 用户可见结果
+
+- 同一把 API/token 因超时被中止后，下一次请求不会立刻再次选中它。
+- Analytics 仍会记录这一次失败的渠道、模型、API 标签和 API ID；本次请求不会因为时间预算耗尽而再启动新的上游尝试。
+- 前端与服务端一起发布，左上角版本为 `v13.22`。
+
+### 根因与修改
+
+- 根因：总时间预算用完时，旧代码只把失败写进最终错误链，没有执行“失败 API 冷却”动作，所以 API #18 没有冷却记录，下一次请求又被选中。
+- `server/src/lib/fallback-loop.ts`：预算中止分支现在先写失败日志，再按普通可重试失败流程给当前 API 写冷却、加入本次请求跳过列表，然后返回超时结果。
+- `server/src/__tests__/lib/fallback-loop.test.ts`：增加预算中止后必须写失败日志和冷却记录的回归测试。
+- 没有修改模型数量、模型 ID、模型启用状态、排名、人工路由顺序、fallback 顺序或供应商 key 内容。
+
+### 提交、部署与线上核验
+
+- source `local/freellmapi-ops`：`a43e3a7` 已 push；标签 `v13.22` 已 push。
+- VPS `/home/debian/freellmapi`：源码为 `a43e3a7`；镜像为本次重新构建的 `sha256:5bc76e2f...`；容器 `freellmapi-freellmapi-1` 为 `running healthy`，重启次数 0，OOM 为 false。
+- 生产数据库备份：`/home/debian/freellmapi/deploy-backups/20260809_v13.22_a43e3a7/`，包含数据库、WAL/SHM、旧前后端产物、compose 和容器检查信息。
+- 为立即避开已连续超时的 NVIDIA API #18，备份后给 `nvidia / minimaxai/minimax-m3 / key #18` 写入 5 分钟临时冷却；没有改 key 状态、模型资料或路由顺序。
+- 线上路由选择核验：在同一模型上，临时冷却 #18 后实际选择为 API #47，证明冷却记录已被路由读取。
+- 公网 `/api/ping` 返回 200；入口 `Cache-Control: public, max-age=0`；公网前端资源为 `assets/index-BynM_f0x.js`，包含 `v13.22`。
+
+### fresh 验证
+
+- TDD：旧实现新增测试先失败（1 项），修复后 fallback-loop 定向测试 `39/39` 通过。
+- 路由预算/取消测试 `3/3` 通过；迁移测试 `3/3` 通过；server 全量测试退出码 0。
+- `npm run build`、`npx tsc --noEmit -p server/tsconfig.json`、`git diff --check` 均通过。
+- VPS 新 server dist 已包含“same timed-out key immediately”修复逻辑；启动日志无错误。
+
+### 未完成验证与唯一下一步
+
+- 没有使用真实上游 token 发起测试请求，避免再次消耗额度；线上路由选择已用生产数据库做无上游调用的实际选择核验。
+- API #18 的临时冷却到期后，若它再次超时，新代码会自动重新记录冷却；如果它恢复正常，成功请求会按现有冷却恢复规则清理旧冷却。
+- 唯一下一步：用户刷新页面到 `v13.22`，下一次请求查看 Analytics，确认失败 API 后续尝试不再马上显示相同 API ID。
+
+---
+
+## 历史任务卡：v13.21 官方账号池冷却治理与 Analytics token 记录
 
 ### 目标与用户可见结果
 
