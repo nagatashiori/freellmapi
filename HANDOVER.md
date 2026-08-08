@@ -1,6 +1,44 @@
 # HANDOVER — 2026-08-08
 
-## 当前任务卡：v13.20 多 API 官方账号选择修复
+## 当前任务卡：v13.21 官方账号池冷却治理与 Analytics token 记录
+
+### 目标与用户可见结果
+
+- 保留 v13.20 的官方账号池核心行为：无历史时轮询，有历史时按官方 v0.6.9 的 Beta/Thompson 抽样在可靠性与速度之间选择；模型范围、健康状态、并发、RPM/RPD、TPM/TPD、供应商级限制和失败切换继续生效。
+- 成功恢复的 token 不继续继承旧的冷却升级阶梯；超时、5xx、网络错误不再被误计为“未知额度耗尽”，只有真正的限流信号才进入未知额度的升级计数。
+- Analytics 最近调度链继续显示每次实际使用的 API/token 标签和 API ID；只显示标签/编号，不显示真实密钥。
+
+### 当前状态
+
+- source `local/freellmapi-ops`：提交 `e950b39` 已 push；标签 `v13.21` 已 push。
+- VPS `/home/debian/freellmapi`：源码为 `e950b39`；容器 `freellmapi-freellmapi-1` 为 `running healthy`；服务端编译产物包含本轮冷却修复。
+- 前端重新构建并成套上传：公网使用 `assets/index-D3DUdwgK.js` 与 `assets/index-D9saEn7T.css`，左上角版本为 `v13.21`。
+- 部署备份：`/home/debian/freellmapi/deploy-backups/20260808_v13.21_e950b39/`；本轮没有写入生产模型、路由或 API key 数据。
+
+### 修改与验证
+
+- `server/src/services/ratelimit.ts`：成功请求清除 token 的冷却升级记录；增加 `quotaSignal` 判断。
+- `server/src/lib/fallback-loop.ts`：只有真正的限流错误才给未知日额度启用重复命中升级。
+- `server/src/__tests__/services/ratelimit.test.ts`：新增成功恢复重置冷却阶梯、超时/5xx 不计额度信号的测试。
+- 先红后绿：新增 2 项测试在旧实现下失败，修复后通过。
+- 定向账号池/限制/fallback/Analytics 测试：6 个文件、92 项通过；冷却测试 33/33 通过。
+- source 全量测试在排除仓库其他 worktree、外网 offline-fetch 和 Windows/undici bad-port 的 custom-modalities 测试后退出码 0；迁移测试退出码 0。
+- `npx tsc --noEmit -p server/tsconfig.json`、server build、client build、`git diff --check` 均通过。
+- 公网 `/api/ping` 200、首页 200、`Cache-Control: public, max-age=0`、HSTS 存在；公网 JS 含 `v13.21`、不含 `v13.20`，并含 Analytics 的 `API ID` 和 routing-traces 代码。
+
+### 保护边界与未完成验证
+
+- 未运行 ranking、recalibrate、sort；未修改模型数量、模型 ID、enabled、排名、profile/fallback 顺序或生产数据库资料。
+- 未用真实生产 token 发起上游请求，因此“线上真实请求连续使用两把 token”的最后一步仍需用户自行发一次请求后在 Analytics 查看；代码链路和模拟失败切换已验证。
+- VPS 上原有的 `docker-compose.yml` 修改及历史 `dist-*`/备份目录保持不动，没有执行清理。
+
+### 唯一下一步
+
+- 用同一端点的两把有效 token 发起请求，打开 Analytics 的“最近调度链”，确认每次尝试出现不同的 API 标签/ID；不要把真实 token 本身贴到页面或日志。
+
+---
+
+## 历史任务卡：v13.20 多 API 官方账号选择修复
 
 ### 目标与用户可见结果
 
