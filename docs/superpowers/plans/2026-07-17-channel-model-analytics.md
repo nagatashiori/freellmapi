@@ -126,7 +126,7 @@ Expected: all commands exit 0; client may retain its existing bundle-size warnin
 ### Task 3: 完整回归、交接与发布
 
 **Files:**
-- Modify: `HANDOVER.md`
+- Modify: `docs/operations/HANDOVER.md`
 
 - [ ] **Step 1: Run full test suite**
 
@@ -136,7 +136,7 @@ Expected: all server and client tests pass.
 
 - [ ] **Step 2: Record source and deployment boundaries**
 
-Append the code files, tests, production deployment files, database impact (`none`), verification output and any remaining known lint debt to `HANDOVER.md`.
+Append the code files, tests, production deployment files, database impact (`none`), verification output and any remaining known lint debt to `docs/operations/HANDOVER.md`.
 
 - [ ] **Step 3: Commit and push the isolated source change**
 
