@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getUnifiedApiKey, regenerateUnifiedKey, getSetting, setSetting } from '../db/index.js';
-import { applyProxyUrl, applyProxyEnabled, applyProxyBypass, isProxyActive, getProxyUrl, isProxyEnabled, getProxyBypassPlatforms } from '../lib/proxy.js';
+import { applyProxyUrl, applyProxyEnabled, applyProxyBypass, applyProxyMode, isProxyActive, getProxyUrl, isProxyEnabled, getProxyBypassPlatforms, getProxyMode } from '../lib/proxy.js';
 import { getSavedFusionConfig, setSavedFusionConfig, savedFusionConfigSchema, getFusionMaxK } from '../services/fusion.js';
 import { isUnifyEnabled, setUnifyEnabled, getUnifyOverrides, setUnifyOverrides, unifyOverridesSchema } from '../services/model-groups.js';
 import { getClaudeModelMap, setClaudeModelMap } from '../services/anthropic-map.js';
@@ -131,16 +131,18 @@ settingsRouter.get('/proxy', (_req: Request, res: Response) => {
     proxyUrl: getProxyUrl(),
     enabled: isProxyEnabled(),
     bypassPlatforms: getProxyBypassPlatforms(),
+    mode: getProxyMode(),
     active: isProxyActive(),
   });
 });
 
-// Set the proxy settings. Accepts partial updates: proxyUrl, enabled, bypassPlatforms.
+// Set the proxy settings. Accepts partial updates: proxyUrl, enabled, bypassPlatforms, mode.
 settingsRouter.put('/proxy', (req: Request, res: Response) => {
-  const { proxyUrl, enabled, bypassPlatforms } = req.body as {
+  const { proxyUrl, enabled, bypassPlatforms, mode } = req.body as {
     proxyUrl?: string;
     enabled?: boolean;
     bypassPlatforms?: string[];
+    mode?: string;
   };
 
   // --- proxyUrl ---
@@ -181,10 +183,24 @@ settingsRouter.put('/proxy', (req: Request, res: Response) => {
     applyProxyBypass(csv);
   }
 
+  // --- mode ---
+  if (typeof mode === 'string') {
+    const trimmed = mode.trim().toLowerCase();
+    if (!['direct-first', 'proxy-only', 'direct-only'].includes(trimmed)) {
+      res.status(400).json({
+        error: { message: 'Proxy mode must be direct-first, proxy-only, or direct-only', type: 'invalid_request_error' },
+      });
+      return;
+    }
+    setSetting('proxy_mode', trimmed);
+    applyProxyMode(trimmed);
+  }
+
   res.json({
     proxyUrl: getProxyUrl(),
     enabled: isProxyEnabled(),
     bypassPlatforms: getProxyBypassPlatforms(),
+    mode: getProxyMode(),
     active: isProxyActive(),
   });
 });

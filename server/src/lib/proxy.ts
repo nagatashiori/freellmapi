@@ -1,5 +1,6 @@
 import http from 'http';
 import https from 'https';
+import { isIP } from 'node:net';
 import { assertProviderUrlAllowed } from './url-guard.js';
 
 // undici (ProxyAgent) and socks-proxy-agent are lazy-loaded on first proxy use
@@ -26,7 +27,14 @@ async function loadSocksAgent(): Promise<Ctor<unknown>> {
 let _proxyUrl = '';
 let _proxyEnabled = true;
 let _bypassPlatforms = new Set<string>();
+export type ProxyRouteMode = 'direct-first' | 'proxy-only' | 'direct-only';
+let _proxyMode: ProxyRouteMode = 'direct-first';
 let _initialized = false;
+
+// A direct-first probe should not spend the complete provider timeout before
+// allowing a configured proxy to help. Once headers arrive, the response is
+// returned and streaming/body time remains governed by the caller's signal.
+const DIRECT_FIRST_PROBE_TIMEOUT_MS = 8_000;
 
 // Cache.
 let cached: {
@@ -57,6 +65,27 @@ export function applyProxyUrl(dbValue: string): void {
 
 export function getProxyUrl(): string {
   return _proxyUrl;
+}
+
+function normalizeProxyMode(value: string | undefined): ProxyRouteMode {
+  switch (value?.trim().toLowerCase()) {
+    case 'proxy-only':
+      return 'proxy-only';
+    case 'direct-only':
+      return 'direct-only';
+    case 'direct-first':
+    default:
+      return 'direct-first';
+  }
+}
+
+/** Select direct-first by default while retaining explicit legacy modes. */
+export function applyProxyMode(dbValue: string): void {
+  _proxyMode = normalizeProxyMode(process.env.PROXY_MODE || dbValue);
+}
+
+export function getProxyMode(): ProxyRouteMode {
+  return _proxyMode;
 }
 
 /** Toggle the proxy on/off without losing the URL. */
@@ -94,6 +123,85 @@ function shouldBypassProxy(platform?: string): boolean {
   if (!_proxyEnabled) return true;
   if (platform && _bypassPlatforms.has(platform.toLowerCase())) return true;
   return false;
+}
+
+function isPrivateIpv4(hostname: string): boolean {
+  const parts = hostname.split('.').map(Number);
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [a, b] = parts;
+  return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+}
+
+function isPrivateIpv6(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === '::1'
+    || normalized.startsWith('fc')
+    || normalized.startsWith('fd')
+    || normalized.startsWith('fe80:')
+    || normalized.startsWith('::ffff:127.')
+    || normalized.startsWith('::ffff:10.')
+    || normalized.startsWith('::ffff:192.168.')
+    || normalized.startsWith('::ffff:172.');
+}
+
+/** LAN, loopback, and link-local targets must never be sent to a proxy. */
+function isLocalNetworkTarget(url: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  } catch {
+    return false;
+  }
+  if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.local')) return true;
+  const version = isIP(hostname);
+  return version === 4 ? isPrivateIpv4(hostname) : version === 6 ? isPrivateIpv6(hostname) : false;
+}
+
+function canUseProxy(platform: string | undefined, url: string): boolean {
+  return Boolean(_proxyUrl) && !shouldBypassProxy(platform) && !isLocalNetworkTarget(url);
+}
+
+function isTransportFailure(err: unknown): boolean {
+  if (err instanceof TypeError) return true;
+  if (!err || typeof err !== 'object') return false;
+  const candidate = err as { name?: string; code?: string; message?: string };
+  if (candidate.name === 'AbortError' || candidate.name === 'TimeoutError') return true;
+  return /(?:fetch failed|timeout|ECONN|ENOTFOUND|EAI_AGAIN|socket|tls)/i.test(
+    `${candidate.code ?? ''} ${candidate.message ?? ''}`,
+  );
+}
+
+function directAttempt(
+  init: RequestInit | undefined,
+  timeoutMs: number | undefined,
+): {
+  init: RequestInit | undefined;
+  timedOut: () => boolean;
+  cleanup: () => void;
+} {
+  const parentSignal = init?.signal;
+  if (!timeoutMs || timeoutMs <= 0) {
+    return { init, timedOut: () => false, cleanup: () => undefined };
+  }
+
+  const controller = new AbortController();
+  let timedOut = false;
+  const onParentAbort = () => controller.abort(parentSignal?.reason);
+  if (parentSignal?.aborted) controller.abort(parentSignal.reason);
+  else parentSignal?.addEventListener('abort', onParentAbort, { once: true });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new DOMException('Direct request timed out', 'TimeoutError'));
+  }, Math.min(timeoutMs, DIRECT_FIRST_PROBE_TIMEOUT_MS));
+
+  return {
+    init: { ...init, signal: controller.signal },
+    timedOut: () => timedOut,
+    cleanup: () => {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener('abort', onParentAbort);
+    },
+  };
 }
 
 /**
@@ -360,26 +468,23 @@ export async function proxyFetch(
   }
 }
 
-/** Route the request through the configured proxy (or straight to fetch). */
-async function dispatchFetch(
+function isReplayableBody(body: RequestInit['body']): boolean {
+  if (body == null || typeof body === 'string') return true;
+  if (body instanceof URLSearchParams || body instanceof Uint8Array) return true;
+  if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) return true;
+  if (typeof Blob !== 'undefined' && body instanceof Blob) return true;
+  if (typeof FormData !== 'undefined' && body instanceof FormData) return true;
+  return false;
+}
+
+async function dispatchWithResolvedProxy(
   url: string,
   init: RequestInit | undefined,
   platform: string | undefined,
   requestType: ProxyRequestType,
   timeoutMs: number | undefined,
+  resolved: { dispatcher: unknown; isSocks: boolean },
 ): Promise<Response> {
-  // Bypass check: disabled globally, or this platform is exempt.
-  if (shouldBypassProxy(platform)) {
-    return fetch(url, init);
-  }
-
-  const resolved = await resolveDispatcher();
-
-  // No dispatcher (no proxy URL configured, or it failed to build) → direct
-  if (!resolved) {
-    return fetch(url, init);
-  }
-
   // SOCKS proxy → http/https fallback
   if (resolved.isSocks) {
     return socksFetch(url, init, resolved.dispatcher as http.Agent, platform, requestType, timeoutMs);
@@ -387,6 +492,56 @@ async function dispatchFetch(
 
   // HTTP/HTTPS proxy → undici (dispatcher is an undici extension not in TS types)
   return fetch(url, { ...init, dispatcher: resolved.dispatcher } as unknown as RequestInit);
+}
+
+async function dispatchViaProxy(
+  url: string,
+  init: RequestInit | undefined,
+  platform: string | undefined,
+  requestType: ProxyRequestType,
+  timeoutMs: number | undefined,
+): Promise<Response | undefined> {
+  const resolved = await resolveDispatcher();
+  if (!resolved) return undefined;
+  return dispatchWithResolvedProxy(url, init, platform, requestType, timeoutMs, resolved);
+}
+
+/** Route the request through direct-first or the configured proxy. */
+async function dispatchFetch(
+  url: string,
+  init: RequestInit | undefined,
+  platform: string | undefined,
+  requestType: ProxyRequestType,
+  timeoutMs: number | undefined,
+): Promise<Response> {
+  const proxyEligible = canUseProxy(platform, url);
+
+  // Explicit proxy-only remains available for compatibility, but private/LAN
+  // destinations are always direct by policy.
+  if (_proxyMode === 'proxy-only' && proxyEligible) {
+    return (await dispatchViaProxy(url, init, platform, requestType, timeoutMs)) ?? fetch(url, init);
+  }
+
+  // Disabled/bypassed/direct-only/no-proxy/local paths are direct-only.
+  if (_proxyMode === 'direct-only' || !proxyEligible) return fetch(url, init);
+
+  // direct-first: use a short, replayable direct attempt. The caller's signal
+  // remains attached to the proxy attempt so a provider/fallback deadline is
+  // still authoritative after the direct probe expires.
+  const attempt = directAttempt(init, timeoutMs);
+  try {
+    return await fetch(url, attempt.init);
+  } catch (err) {
+    if (init?.signal?.aborted || !isTransportFailure(err) || !isReplayableBody(init?.body)) throw err;
+    const resolved = await resolveDispatcher();
+    if (!resolved) throw err;
+    let host = 'unknown';
+    try { host = new URL(url).hostname; } catch { /* URL guard handles invalid custom URLs. */ }
+    console.warn(`[proxy] direct transport failed; retrying via proxy (${platform ?? 'unknown'}/${requestType} ${host})`);
+    return dispatchWithResolvedProxy(url, init, platform, requestType, timeoutMs, resolved);
+  } finally {
+    attempt.cleanup();
+  }
 }
 
 /**

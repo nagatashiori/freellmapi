@@ -18,6 +18,7 @@ import { endpointScopeForBaseUrl } from '../lib/endpoint-scope.js';
 import { parseModelScope } from '../lib/model-scope.js';
 import { calibrateModelMeta, niceDisplayName, repairLegacyDisplayName } from '../lib/model-intel.js';
 import { providerModelCatalogRouter } from './provider-model-catalog.js';
+import { proxyFetch } from '../lib/proxy.js';
 
 export const keysRouter = Router();
 
@@ -588,12 +589,12 @@ keysRouter.post('/custom/discover', async (req: Request, res: Response) => {
 
   let upstream: globalThis.Response;
   try {
-    upstream = await fetch(modelsUrl, {
+    upstream = await proxyFetch(modelsUrl, {
       method: 'GET',
       headers,
       signal: AbortSignal.timeout(30_000),
       redirect: 'manual',
-    });
+    }, 'custom', 'unknown', 30_000);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(502).json({ error: { message: `Failed to reach ${modelsUrl}: ${msg}` } });

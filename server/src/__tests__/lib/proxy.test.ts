@@ -3,10 +3,12 @@ import {
   applyProxyUrl,
   applyProxyEnabled,
   applyProxyBypass,
+  applyProxyMode,
   getProxyUrl,
   isProxyEnabled,
   getProxyBypassPlatforms,
   isProxyActive,
+  getProxyMode,
   proxyFetch,
   describeAbort,
 } from '../../lib/proxy.js';
@@ -17,6 +19,7 @@ beforeEach(() => {
   delete process.env.PROXY_URL;
   applyProxyEnabled(true);
   applyProxyBypass('');
+  applyProxyMode('direct-first');
   applyProxyUrl(''); // clears the URL and the dispatcher cache
 });
 
@@ -59,6 +62,16 @@ describe('proxy config accessors', () => {
     expect(isProxyEnabled()).toBe(false);
     expect(isProxyActive()).toBe(false);
   });
+
+  it('defaults to direct-first and accepts compatibility modes', () => {
+    expect(getProxyMode()).toBe('direct-first');
+    applyProxyMode('proxy-only');
+    expect(getProxyMode()).toBe('proxy-only');
+    applyProxyMode('direct-only');
+    expect(getProxyMode()).toBe('direct-only');
+    applyProxyMode('not-a-mode');
+    expect(getProxyMode()).toBe('direct-first');
+  });
 });
 
 describe('proxyFetch routing', () => {
@@ -71,13 +84,45 @@ describe('proxyFetch routing', () => {
     expect((init as any)?.dispatcher).toBeUndefined();
   });
 
-  it('routes through the dispatcher for an HTTP proxy', async () => {
+  it('uses the proxy after a direct transport failure', async () => {
     applyProxyUrl('http://proxy:8080');
-    const spy = vi.spyOn(global, 'fetch').mockResolvedValue(okResponse());
+    const spy = vi.spyOn(global, 'fetch')
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(okResponse());
     await proxyFetch('https://api.example.com/v1', { method: 'POST' }, 'groq');
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect((spy.mock.calls[0][1] as any)?.dispatcher).toBeUndefined();
+    expect((spy.mock.calls[1][1] as any)?.dispatcher).toBeDefined();
+  });
+
+  it('does not proxy or retry an HTTP error received directly', async () => {
+    applyProxyUrl('http://proxy:8080');
+    const response = { ok: false, status: 401 } as Response;
+    const spy = vi.spyOn(global, 'fetch').mockResolvedValue(response);
+    await expect(proxyFetch('https://api.example.com/v1', undefined, 'groq')).resolves.toBe(response);
     expect(spy).toHaveBeenCalledTimes(1);
-    const [, init] = spy.mock.calls[0];
-    expect((init as any)?.dispatcher).toBeDefined();
+    expect((spy.mock.calls[0][1] as any)?.dispatcher).toBeUndefined();
+  });
+
+  it('keeps LAN targets direct even when the direct request fails', async () => {
+    applyProxyUrl('http://proxy:8080');
+    const spy = vi.spyOn(global, 'fetch').mockRejectedValue(new TypeError('fetch failed'));
+    await expect(proxyFetch('http://192.168.1.111:11434/v1', undefined, 'ollama'))
+      .rejects.toThrow('fetch failed');
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect((spy.mock.calls[0][1] as any)?.dispatcher).toBeUndefined();
+  });
+
+  it('does not start a proxy attempt after the caller has cancelled', async () => {
+    applyProxyUrl('http://proxy:8080');
+    const controller = new AbortController();
+    controller.abort();
+    const spy = vi.spyOn(global, 'fetch').mockRejectedValue(
+      new DOMException('The operation was aborted', 'AbortError'),
+    );
+    await expect(proxyFetch('https://api.example.com/v1', { signal: controller.signal }, 'groq'))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 
   it('bypasses the proxy for a platform on the bypass list', async () => {
@@ -96,6 +141,15 @@ describe('proxyFetch routing', () => {
     await proxyFetch('https://api.example.com/v1', undefined, 'google');
     const [, init] = spy.mock.calls[0];
     expect((init as any)?.dispatcher).toBeUndefined();
+  });
+
+  it('supports proxy-only mode for compatibility', async () => {
+    applyProxyUrl('http://proxy:8080');
+    applyProxyMode('proxy-only');
+    const spy = vi.spyOn(global, 'fetch').mockResolvedValue(okResponse());
+    await proxyFetch('https://api.example.com/v1', undefined, 'groq');
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect((spy.mock.calls[0][1] as any)?.dispatcher).toBeDefined();
   });
 });
 

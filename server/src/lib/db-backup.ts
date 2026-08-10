@@ -5,6 +5,7 @@ import { gzipSync, gunzipSync } from 'zlib';
 import type { Db } from '../db/types.js';
 import type { Scheduler } from './scheduler.js';
 import { getDefaultDbPath } from '../db/index.js';
+import { proxyFetch } from './proxy.js';
 
 const MAGIC = Buffer.from('FAPIBK1\0');
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
@@ -81,7 +82,7 @@ async function readTarget(target: string): Promise<Buffer | null> {
     const headers: Record<string, string> = {};
     const token = process.env.FREEAPI_DB_BACKUP_TOKEN?.trim();
     if (token) headers.Authorization = `Bearer ${token}`;
-    const res = await fetch(target, { method: 'GET', headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    const res = await proxyFetch(target, { method: 'GET', headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }, 'db-backup', 'unknown', FETCH_TIMEOUT_MS);
     if (res.status === 404 || res.status === 204) return null;
     if (!res.ok) throw new Error(`backup restore failed: HTTP ${res.status}`);
     return Buffer.from(await res.arrayBuffer());
@@ -96,12 +97,12 @@ async function writeTarget(target: string, payload: Buffer): Promise<void> {
     const headers: Record<string, string> = { 'Content-Type': 'application/octet-stream' };
     const token = process.env.FREEAPI_DB_BACKUP_TOKEN?.trim();
     if (token) headers.Authorization = `Bearer ${token}`;
-    const res = await fetch(target, {
+    const res = await proxyFetch(target, {
       method: 'PUT',
       headers,
       body: payload,
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
+    }, 'db-backup', 'unknown', FETCH_TIMEOUT_MS);
     if (!res.ok) throw new Error(`backup upload failed: HTTP ${res.status}`);
     return;
   }

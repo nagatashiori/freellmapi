@@ -10,6 +10,7 @@ import {
   refreshLicenseStatus,
   syncCatalog,
 } from '../services/catalog-sync.js';
+import { proxyFetch } from '../lib/proxy.js';
 
 export const premiumRouter = Router();
 
@@ -50,12 +51,12 @@ premiumRouter.post('/key', async (req: Request, res: Response) => {
 
   let result: { valid: boolean; plan: string | null; status: string | null; expiresAt: string | null; reason?: string };
   try {
-    const r = await fetch(`${catalogBaseUrl()}/v1/license/activate`, {
+    const r = await proxyFetch(`${catalogBaseUrl()}/v1/license/activate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key }),
       signal: AbortSignal.timeout(15000),
-    });
+    }, 'premium', 'unknown', 15000);
     result = (await r.json()) as typeof result;
   } catch {
     res.status(502).json({ error: 'Could not reach the license service. Check your connection and try again.' });
@@ -108,12 +109,12 @@ premiumRouter.post('/portal', async (_req: Request, res: Response) => {
     return;
   }
   try {
-    const r = await fetch(`${catalogBaseUrl()}/v1/portal`, {
+    const r = await proxyFetch(`${catalogBaseUrl()}/v1/portal`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key }),
       signal: AbortSignal.timeout(15000),
-    });
+    }, 'premium', 'unknown', 15000);
     const body = (await r.json()) as { url?: string; error?: string };
     if (!r.ok || !body.url) {
       res.status(502).json({ error: body.error ?? 'Could not open the billing portal.' });

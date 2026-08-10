@@ -5,6 +5,7 @@ import { hasProvider } from '../providers/index.js';
 import { MEDIA_PLATFORMS } from './media.js';
 import type { Platform } from '@freellmapi/shared/types.js';
 import type { Scheduler } from '../lib/scheduler.js';
+import { proxyFetch } from '../lib/proxy.js';
 import {
   applyAllModelOverrides,
   applyModelOverrides,
@@ -461,7 +462,7 @@ export async function syncCatalog(force = false): Promise<SyncResult> {
     const url = new URL(`${catalogBaseUrl()}/v1/latest`);
     if (applied && !force) url.searchParams.set('since', applied);
 
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    const res = await proxyFetch(url.toString(), { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }, 'catalog', 'unknown', FETCH_TIMEOUT_MS);
 
     if (res.status === 304) {
       setSetting(SETTING_LAST_SYNC_MS, String(Date.now()));
@@ -525,10 +526,10 @@ export async function refreshLicenseStatus(): Promise<LicenseStatus | null> {
   const key = getSetting(SETTING_LICENSE_KEY);
   if (!key) return null;
   try {
-    const res = await fetch(`${catalogBaseUrl()}/v1/license/check`, {
+    const res = await proxyFetch(`${catalogBaseUrl()}/v1/license/check`, {
       headers: { Authorization: `Bearer ${key}` },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
+    }, 'catalog', 'unknown', FETCH_TIMEOUT_MS);
     if (!res.ok && res.status !== 401) throw new Error(`HTTP ${res.status}`);
     const body = (await res.json()) as Omit<LicenseStatus, 'checkedAtMs'>;
     const status: LicenseStatus = { ...body, checkedAtMs: Date.now() };
