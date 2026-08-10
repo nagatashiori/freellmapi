@@ -103,11 +103,8 @@ export function createApp(config?: Config) {
   // Anthropic-compatible Messages API (`POST /v1/messages`, `/count_tokens`) for
   // Claude Code and anything else speaking the Anthropic SDK. Mounted BEFORE the
   // OpenAI router so it can content-negotiate `GET /v1/models` (Anthropic shape
-  // when the caller sends `anthropic-version`, else it falls through). Also mount
-  // the router under `/v1/v1` for clients whose configured Anthropic base URL
-  // already contains `/v1` and whose SDK appends the version prefix again.
+  // when the caller sends `anthropic-version`, else it falls through).
   // All other paths it doesn't own fall through to the OpenAI router untouched.
-  app.use('/v1/v1', anthropicRouter);
   app.use('/v1', anthropicRouter);
   app.use('/v1', proxyRouter);
   // OpenAI Responses API shim (Codex CLI requires wire_api="responses"; see #96)

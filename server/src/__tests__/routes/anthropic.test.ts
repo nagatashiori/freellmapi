@@ -180,26 +180,13 @@ describe('Anthropic-compatible /v1/messages', () => {
     expect(headers.get('x-routed-via')).toMatch(/^groq\//);
   });
 
-  it('accepts the duplicate /v1 prefix used by Anthropic clients configured with a versioned base URL', async () => {
-    const db = getDb();
-    const model = db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
-                          rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window, enabled, supports_vision)
-      VALUES ('groq', 'glm-5.2', 'GLM 5.2', 5, 5, 'Large', 100, NULL, NULL, NULL, '~10M', 131072, 1, 0)
-    `).run();
-    db.prepare('INSERT INTO profile_models (profile_id, model_db_id, priority, enabled) VALUES (1, ?, 0, 1)')
-      .run(Number(model.lastInsertRowid));
-
-    mockJson(textCompletion('Hello through the compatibility path.'));
-    const { status, body } = await request(app, '/v1/v1/messages', {
+  it('rejects a duplicate /v1 prefix instead of maintaining a non-standard compatibility path', async () => {
+    const { status } = await request(app, '/v1/v1/messages', {
       model: 'glm-5.2', max_tokens: 64,
       messages: [{ role: 'user', content: 'hi' }],
     }, anthropicHeaders());
 
-    expect(status).toBe(200);
-    expect(body.type).toBe('message');
-    expect(body.model).toBe('glm-5.2');
-    expect(body.content).toEqual([{ type: 'text', text: 'Hello through the compatibility path.' }]);
+    expect(status).toBe(404);
   });
 
   it('routes the StepFun client alias to the matching catalog model group', async () => {
