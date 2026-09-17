@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import { initDb, getDb, setSetting } from '../../db/index.js';
 import {
   restoreProxySettings,
@@ -15,6 +15,12 @@ import {
   applyFetchRelayToken,
   encodeFetchRelayToken,
 } from '../../lib/proxy.js';
+
+// Official post-v0.11 fix #1211: keep OS-wide proxy settings out of this suite.
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  execFileSync: () => '',
+}));
 
 // #949: the desktop embedder builds the app without server/src/index.ts, so
 // the proxy state it starts with is whatever the module defaults are — an

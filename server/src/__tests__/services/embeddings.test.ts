@@ -3,6 +3,7 @@ import type { MockedFunction } from 'vitest';
 import { initDb, getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { resolveFamily, getDefaultFamily, runEmbeddings } from '../../services/embeddings.js';
+import { clearAllCooldowns, resetLeases } from '../../services/ratelimit.js';
 
 const realFetch = globalThis.fetch;
 
@@ -44,6 +45,8 @@ describe('embeddings service', () => {
   beforeEach(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     initDb(':memory:');
+    clearAllCooldowns();
+    resetLeases();
   });
 
   afterEach(() => {
@@ -268,6 +271,50 @@ describe('embeddings service', () => {
       expect(body.model).toBe('local-embed-v1');
       const log = getDb().prepare("SELECT key_id FROM requests WHERE request_type = 'embedding' ORDER BY id DESC LIMIT 1").get() as { key_id: number };
       expect(log.key_id).toBe(keyId);
+    });
+
+    it('retries a sibling key on the same custom endpoint before leaving the provider row', async () => {
+      const baseUrl = 'http://127.0.0.1:8182/v1';
+      const firstKeyId = addCustomKey(baseUrl, 'custom-embed-a');
+      addCustomKey(baseUrl, 'custom-embed-b');
+      getDb().prepare(`
+        INSERT INTO embedding_models
+          (family, platform, model_id, display_name, dimensions, max_input_tokens, priority, enabled, quota_label, key_id)
+        VALUES ('local-embed-pool', 'custom', 'local-embed-pool-v1', 'Local Embed Pool', 3, NULL, 1, 1, '', ?)
+      `).run(firstKeyId);
+      const fetchMock = mockFetch(async () => okEmbeddingResponse(3));
+      fetchMock.mockResolvedValueOnce(new Response('rate limited', { status: 429 }));
+      fetchMock.mockResolvedValueOnce(okEmbeddingResponse(3));
+
+      const result = await runEmbeddings('local-embed-pool', ['hello']);
+
+      expect(result.platform).toBe('custom');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const auth = fetchMock.mock.calls.map(call =>
+        new Headers((call[1] as RequestInit).headers).get('Authorization'));
+      expect(new Set(auth)).toEqual(new Set(['Bearer custom-embed-a', 'Bearer custom-embed-b']));
+    });
+
+    it('honors model_scope_json across sibling keys of a custom endpoint', async () => {
+      const baseUrl = 'http://127.0.0.1:8183/v1';
+      const boundKeyId = addCustomKey(baseUrl, 'wrong-scope-key');
+      const allowedKeyId = addCustomKey(baseUrl, 'allowed-scope-key');
+      getDb().prepare('UPDATE api_keys SET model_scope_json = ? WHERE id = ?')
+        .run(JSON.stringify(['some-other-model']), boundKeyId);
+      getDb().prepare('UPDATE api_keys SET model_scope_json = ? WHERE id = ?')
+        .run(JSON.stringify(['scoped-embed-v1']), allowedKeyId);
+      getDb().prepare(`
+        INSERT INTO embedding_models
+          (family, platform, model_id, display_name, dimensions, max_input_tokens, priority, enabled, quota_label, key_id)
+        VALUES ('scoped-embed', 'custom', 'scoped-embed-v1', 'Scoped Embed', 3, NULL, 1, 1, '', ?)
+      `).run(boundKeyId);
+      const fetchMock = mockFetch(async () => okEmbeddingResponse(3));
+
+      await runEmbeddings('scoped-embed', ['hello']);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const headers = new Headers((fetchMock.mock.calls[0][1] as RequestInit).headers);
+      expect(headers.get('Authorization')).toBe('Bearer allowed-scope-key');
     });
 
     describe('dimensions parameter (MRL truncation)', () => {

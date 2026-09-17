@@ -18,8 +18,58 @@ import { qualifiedModelMemberId } from '../lib/endpoint-scope.js';
 import { overriddenFieldNames } from '../services/model-state.js';
 import { parseModelScope, scopeAllows } from '../lib/model-scope.js';
 import { getQuotaOutlook } from '../services/quota-outlook.js';
+import { cancelProbeRun, createProbeRun, getProbeRun, listProbeRuns } from '../services/probe-run-manager.js';
 
 export const fallbackRouter = Router();
+
+// Async operator-driven full health sweep. The implementation deliberately
+// composes the official key health pass and official pinned-model router rather
+// than maintaining a second routing engine in the fork.
+const probeRunSchema = z.object({
+  kind: z.enum(['full', 'keys']).default('full'),
+  concurrency: z.number().int().min(1).max(5).optional(),
+});
+
+fallbackRouter.post('/probe-runs', (req: Request, res: Response) => {
+  const parsed = probeRunSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: parsed.error.errors.map(error => error.message).join(', ') } });
+    return;
+  }
+  try {
+    res.status(202).json(createProbeRun(parsed.data.kind, { concurrency: parsed.data.concurrency }));
+  } catch (err: any) {
+    res.status(400).json({ error: { message: err?.message ?? 'Failed to start full health test' } });
+  }
+});
+
+fallbackRouter.get('/probe-runs', (req: Request, res: Response) => {
+  const limit = Number.parseInt(String(req.query.limit ?? '20'), 10);
+  res.json({ runs: listProbeRuns(Number.isFinite(limit) ? limit : 20) });
+});
+
+fallbackRouter.get('/probe-runs/:runId', (req: Request, res: Response) => {
+  const run = getProbeRun(String(req.params.runId));
+  if (!run) {
+    res.status(404).json({ error: { message: 'Probe run not found' } });
+    return;
+  }
+  res.json(run);
+});
+
+fallbackRouter.delete('/probe-runs/:runId', (req: Request, res: Response) => {
+  const runId = String(req.params.runId);
+  const run = getProbeRun(runId);
+  if (!run) {
+    res.status(404).json({ error: { message: 'Probe run not found' } });
+    return;
+  }
+  if (run.status !== 'running') {
+    res.json({ success: true, run });
+    return;
+  }
+  res.json({ success: cancelProbeRun(runId) });
+});
 
 // Dashboard-session authenticated by app.ts. Polling only reads saved quota
 // observations and request history, never provider endpoints or key material.

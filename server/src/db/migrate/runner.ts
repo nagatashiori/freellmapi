@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 
 import type { Db } from '../types.js';
 import { DEFAULT_MIGRATIONS, type MigrationModule } from './defaults.js';
+import { prepareForkV15MigrationTracking } from './fork-v15-compat.js';
 
 export type MigrationDirection = 'up' | 'down';
 export type MigrationState = 'applied' | 'pending';
@@ -49,6 +50,7 @@ export async function runMigrations(
   const records = getMigrationRecords(options);
 
   if (direction === 'up') {
+    prepareForkV15MigrationTracking(db);
     await runPendingMigrations(db, records, options);
     return;
   }
@@ -69,6 +71,7 @@ export function runMigrationsSync(
   const records = getDefaultMigrationRecords();
 
   if (direction === 'up') {
+    prepareForkV15MigrationTracking(db);
     runPendingMigrationsSync(db, records);
     return;
   }

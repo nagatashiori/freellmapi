@@ -9,9 +9,27 @@
 // cross-provider redundancy for free.
 import { getDb, getSetting } from '../db/index.js';
 import { getClientContext } from '../lib/client-context.js';
+import {
+  isAccountSuspendedError,
+  isDailyQuotaExhaustedError,
+  isKeyAuthError,
+  isModelAccessForbiddenError,
+  isPaymentRequiredError,
+  isRateLimitSignal,
+} from '../lib/error-classify.js';
+import { AUTH_FAILURE_COOLDOWN_MS, msUntilNextUtcMidnight } from '../lib/fallback-loop.js';
 import { reserveProviderCredential } from './provider-credential.js';
 import { proxyFetch } from '../lib/proxy.js';
 import { customEndpointKeyIds } from './custom-endpoint.js';
+import {
+  getCooldownDecisionForLimit,
+  getModelForbiddenCooldownMs,
+  getPaymentRequiredCooldownMs,
+  recordRequest,
+  recordTokens,
+  setCooldown,
+  type CooldownDecision,
+} from './ratelimit.js';
 import type { Db } from '../db/types.js';
 
 export interface EmbeddingModelRow {
@@ -76,6 +94,30 @@ interface ProviderCredential {
 // Rough token estimate when the provider doesn't report usage (~4 chars/token).
 function estimateTokens(inputs: string[]): number {
   return Math.ceil(inputs.reduce((n, s) => n + s.length, 0) / 4);
+}
+
+function credentialCooldownForError(row: EmbeddingModelRow, keyId: number, err: unknown): CooldownDecision | null {
+  if (isKeyAuthError(err)) return { durationMs: AUTH_FAILURE_COOLDOWN_MS, source: 'heuristic' };
+  if (isPaymentRequiredError(err) || isAccountSuspendedError(err)) {
+    return { durationMs: getPaymentRequiredCooldownMs(), source: 'credit' };
+  }
+  if (isModelAccessForbiddenError(err)) {
+    return { durationMs: getModelForbiddenCooldownMs(), source: 'tier' };
+  }
+  if (isDailyQuotaExhaustedError(err)) {
+    const retryAfterMs = (err as { retryAfterMs?: number } | null)?.retryAfterMs;
+    return { durationMs: retryAfterMs ?? msUntilNextUtcMidnight(), source: 'authoritative' };
+  }
+  if (!isRateLimitSignal(err)) return null;
+  const retryAfterMs = (err as { retryAfterMs?: number } | null)?.retryAfterMs;
+  return getCooldownDecisionForLimit(
+    row.platform,
+    row.model_id,
+    keyId,
+    { rpd: null, tpd: null },
+    retryAfterMs,
+    { quotaSignal: isRateLimitSignal(err) },
+  );
 }
 
 const FETCH_TIMEOUT_MS = 30_000;
@@ -332,34 +374,54 @@ export async function runEmbeddings(model: string | undefined, inputs: string[],
 
   let lastError: EmbeddingsError | null = null;
   for (const row of chain) {
-    const { credential, budgetBlocked } = reserveProviderCredential(row, estimateTokens(inputs));
-    if (!credential) {
-      if (budgetBlocked) lastError = new EmbeddingsError('Monthly key budget exhausted', 429, 'quota_exceeded');
-      continue;
-    }
-    const started = Date.now();
-    try {
-      const out = await callProvider(row, credential, inputs, dimensions);
-      if (out.vectors.length !== inputs.length || out.vectors.some(v => !Array.isArray(v) || v.length === 0)) {
-        throw new EmbeddingsError('upstream returned malformed embeddings', 502);
+    const estimated = estimateTokens(inputs);
+    const skipped = new Set<number>();
+    let attemptedUpstream = false;
+    for (;;) {
+      const { credential, budgetBlocked } = reserveProviderCredential(
+        row,
+        estimated,
+        keyId => skipped.has(keyId),
+      );
+      if (!credential) {
+        if (budgetBlocked && !attemptedUpstream) {
+          lastError = new EmbeddingsError('Monthly key budget exhausted', 429, 'quota_exceeded');
+        }
+        break;
       }
-      const tokens = out.inputTokens ?? estimateTokens(inputs);
-      logEmbeddingRequest(row, credential.id, 'success', tokens, Date.now() - started, null);
-      return {
-        family,
-        platform: row.platform,
-        modelId: row.model_id,
-        dimensions: out.vectors[0].length,
-        vectors: out.vectors,
-        inputTokens: tokens,
-      };
-    } catch (err: any) {
-      const e = err instanceof EmbeddingsError ? err : new EmbeddingsError(String(err?.message ?? err), 502);
-      logEmbeddingRequest(row, credential.id, 'error', 0, Date.now() - started, e.message.slice(0, 300));
-      lastError = e;
-      // fall through to the next provider in the family
-    } finally {
-      credential.release();
+      attemptedUpstream = true;
+      const started = Date.now();
+      try {
+        const out = await callProvider(row, credential, inputs, dimensions);
+        if (out.vectors.length !== inputs.length || out.vectors.some(v => !Array.isArray(v) || v.length === 0)) {
+          throw new EmbeddingsError('upstream returned malformed embeddings', 502);
+        }
+        const tokens = out.inputTokens ?? estimated;
+        recordRequest(row.platform, row.model_id, credential.id);
+        recordTokens(row.platform, row.model_id, credential.id, tokens);
+        logEmbeddingRequest(row, credential.id, 'success', tokens, Date.now() - started, null);
+        return {
+          family,
+          platform: row.platform,
+          modelId: row.model_id,
+          dimensions: out.vectors[0].length,
+          vectors: out.vectors,
+          inputTokens: tokens,
+        };
+      } catch (err: any) {
+        const e = err instanceof EmbeddingsError ? err : new EmbeddingsError(String(err?.message ?? err), 502);
+        logEmbeddingRequest(row, credential.id, 'error', 0, Date.now() - started, e.message.slice(0, 300));
+        const cooldown = credentialCooldownForError(row, credential.id, e);
+        if (cooldown) {
+          setCooldown(row.platform, row.model_id, credential.id, cooldown.durationMs, cooldown.source);
+        }
+        skipped.add(credential.id);
+        lastError = e;
+        // Exhaust this provider's sibling-key pool before falling through to
+        // the next provider serving the same embedding family.
+      } finally {
+        credential.release();
+      }
     }
   }
 

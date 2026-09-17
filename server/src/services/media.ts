@@ -9,10 +9,26 @@
 // ~12h, free once each model is 30 days old) — never seeded by migrations.
 import { getDb } from '../db/index.js';
 import { getClientContext } from '../lib/client-context.js';
+import {
+  isAccountSuspendedError,
+  isDailyQuotaExhaustedError,
+  isKeyAuthError,
+  isModelAccessForbiddenError,
+  isPaymentRequiredError,
+  isRateLimitSignal,
+} from '../lib/error-classify.js';
+import { AUTH_FAILURE_COOLDOWN_MS, msUntilNextUtcMidnight } from '../lib/fallback-loop.js';
 import { reserveProviderCredential } from './provider-credential.js';
 import { proxyFetch } from '../lib/proxy.js';
 import { assessProviderUrl } from '../lib/url-guard.js';
-import { isOnCooldown, setCooldown } from './ratelimit.js';
+import {
+  getCooldownDecisionForLimit,
+  getModelForbiddenCooldownMs,
+  getPaymentRequiredCooldownMs,
+  recordRequest,
+  setCooldown,
+  type CooldownDecision,
+} from './ratelimit.js';
 import { SPEECHIFY_BASE_URL, SPEECHIFY_VERSION } from '../providers/speechify.js';
 
 /** Platforms with a media adapter below. catalog-sync gates media rows on this
@@ -725,6 +741,96 @@ function logMedia(row: Pick<MediaModelRow, 'platform' | 'model_id' | 'modality'>
   }
 }
 
+function mediaCredentialCooldownForError(
+  platform: string,
+  modelId: string,
+  keyId: number,
+  err: unknown,
+): CooldownDecision | null {
+  if (isKeyAuthError(err)) return { durationMs: AUTH_FAILURE_COOLDOWN_MS, source: 'heuristic' };
+  if (isPaymentRequiredError(err) || isAccountSuspendedError(err)) {
+    return { durationMs: getPaymentRequiredCooldownMs(), source: 'credit' };
+  }
+  if (isModelAccessForbiddenError(err)) {
+    return { durationMs: getModelForbiddenCooldownMs(), source: 'tier' };
+  }
+  if (isDailyQuotaExhaustedError(err)) {
+    const retryAfterMs = (err as { retryAfterMs?: number } | null)?.retryAfterMs;
+    return { durationMs: retryAfterMs ?? msUntilNextUtcMidnight(), source: 'authoritative' };
+  }
+  if (!isRateLimitSignal(err)) return null;
+  const retryAfterMs = (err as { retryAfterMs?: number } | null)?.retryAfterMs;
+  return getCooldownDecisionForLimit(
+    platform,
+    modelId,
+    keyId,
+    { rpd: null, tpd: null },
+    retryAfterMs,
+    { quotaSignal: isRateLimitSignal(err) },
+  );
+}
+
+/**
+ * Exhaust one media model's key pool before moving to the next provider row.
+ * This deliberately stays a thin wrapper around the official v0.11 credential
+ * selector: key eligibility and reservations live in provider-credential.ts;
+ * this function only owns per-attempt retry/cooldown/logging behavior.
+ */
+async function runMediaRow<T>(
+  row: Pick<MediaModelRow, 'platform' | 'model_id' | 'modality' | 'key_id'>,
+  call: (credential: ProviderCredential) => Promise<T>,
+  onError: (error: MediaError) => void,
+  opts: { clientSignal?: AbortSignal; allowKeyless?: boolean } = {},
+): Promise<{ value: T; keyId: number | null } | null> {
+  const skipped = new Set<number>();
+  let triedKeyless = false;
+  let attemptedUpstream = false;
+  for (;;) {
+    throwIfClientGone(opts.clientSignal);
+    const { credential: reserved, budgetBlocked } = reserveProviderCredential(
+      row,
+      0,
+      keyId => skipped.has(keyId),
+    );
+    let credential: ProviderCredential | null = reserved;
+    if (!credential && opts.allowKeyless && !triedKeyless) {
+      triedKeyless = true;
+      credential = { id: null, key: null, baseUrl: null, release: () => {} };
+    }
+    if (!credential) {
+      if (budgetBlocked && !attemptedUpstream) {
+        onError(new MediaError('Monthly key budget exhausted', 429, 'quota_exceeded'));
+      }
+      return null;
+    }
+
+    attemptedUpstream = true;
+    const started = Date.now();
+    try {
+      const value = await call(credential);
+      if (credential.id != null) recordRequest(row.platform, row.model_id, credential.id);
+      logMedia(row, credential.id, 'success', Date.now() - started, null);
+      return { value, keyId: credential.id };
+    } catch (err: any) {
+      const e = err instanceof MediaError ? err : new MediaError(String(err?.message ?? err), 502);
+      logMedia(row, credential.id, 'error', Date.now() - started, e.message.slice(0, 300));
+      if (credential.id != null) {
+        const cooldown = mediaCredentialCooldownForError(row.platform, row.model_id, credential.id, e);
+        if (cooldown) {
+          setCooldown(row.platform, row.model_id, credential.id, cooldown.durationMs, cooldown.source);
+        }
+        skipped.add(credential.id);
+      }
+      onError(e);
+      // A caller that hung up gets no second generation charged to its account.
+      throwIfClientGone(opts.clientSignal);
+      if (credential.id == null) return null;
+    } finally {
+      credential.release?.();
+    }
+  }
+}
+
 function chainError(modality: MediaModality, lastError: MediaError | null): MediaError {
   // Only statuses the CALLER can act on are passed through. 400 (bad prompt,
   // duration the model does not accept) and 413 (upload too large) describe
@@ -748,28 +854,19 @@ export async function runImageGeneration(model: string | undefined, params: Imag
   const chain = resolveMediaChain(model, 'image');
   let lastError: MediaError | null = null;
   for (const row of chain) {
-    const { credential, budgetBlocked } = KEYLESS_CAPABLE.has(row.platform)
-      ? { credential: { id: null, key: null, baseUrl: null, release: () => {} }, budgetBlocked: false }
-      : reserveProviderCredential(row, 0);
-    if (!credential) {
-      if (budgetBlocked) lastError = new MediaError('Monthly key budget exhausted', 429, 'quota_exceeded');
-      continue;
-    }
-    const started = Date.now();
-    try {
-      const images = await callImageProvider(row, credential, params);
-      if (!images.length || images.every(i => !i.b64_json && !i.url)) {
-        throw new MediaError('upstream returned no image', 502);
-      }
-      logMedia(row, credential.id, 'success', Date.now() - started, null);
-      return { platform: row.platform, modelId: row.model_id, images };
-    } catch (err: any) {
-      const e = err instanceof MediaError ? err : new MediaError(String(err?.message ?? err), 502);
-      logMedia(row, credential.id, 'error', Date.now() - started, e.message.slice(0, 300));
-      lastError = e;
-    } finally {
-      credential.release();
-    }
+    const attempted = await runMediaRow(
+      row,
+      async credential => {
+        const images = await callImageProvider(row, credential, params);
+        if (!images.length || images.every(i => !i.b64_json && !i.url)) {
+          throw new MediaError('upstream returned no image', 502);
+        }
+        return images;
+      },
+      error => { lastError = error; },
+      { allowKeyless: KEYLESS_CAPABLE.has(row.platform) },
+    );
+    if (attempted) return { platform: row.platform, modelId: row.model_id, images: attempted.value };
   }
   throw chainError('image', lastError);
 }
@@ -786,28 +883,17 @@ export async function runVideoGeneration(
   let lastError: MediaError | null = null;
   for (const row of chain) {
     throwIfClientGone(clientSignal);
-    const { credential, budgetBlocked } = reserveProviderCredential(row, 0,
-      keyId => isOnCooldown(row.platform, row.model_id, keyId));
-    if (!credential) {
-      if (budgetBlocked) lastError = new MediaError('Monthly key budget exhausted', 429, 'quota_exceeded');
-      continue;
-    }
-    const started = Date.now();
-    try {
-      const out = await callVideoProvider(row, credential, params, clientSignal);
-      if (!out.video.length) throw new MediaError('upstream returned no video', 502);
-      logMedia(row, credential.id, 'success', Date.now() - started, null);
-      return { platform: row.platform, modelId: row.model_id, ...out };
-    } catch (err: any) {
-      const e = err instanceof MediaError ? err : new MediaError(String(err?.message ?? err), 502);
-      logMedia(row, credential.id, 'error', Date.now() - started, e.message.slice(0, 300));
-      if (e.status === 429 && credential.id != null) setCooldown(row.platform, row.model_id, credential.id);
-      lastError = e;
-      // A caller that hung up gets no second generation charged to its account.
-      throwIfClientGone(clientSignal);
-    } finally {
-      credential.release();
-    }
+    const attempted = await runMediaRow(
+      row,
+      async credential => {
+        const out = await callVideoProvider(row, credential, params, clientSignal);
+        if (!out.video.length) throw new MediaError('upstream returned no video', 502);
+        return out;
+      },
+      error => { lastError = error; },
+      { clientSignal },
+    );
+    if (attempted) return { platform: row.platform, modelId: row.model_id, ...attempted.value };
   }
   throw chainError('video', lastError);
 }
@@ -1057,31 +1143,19 @@ export async function runTranscription(model: string | undefined, p: Transcripti
   }
   let lastError: MediaError | null = null;
   for (const m of usable) {
-    const { credential, budgetBlocked } = reserveProviderCredential({ platform: m.platform, key_id: m.keyId }, 0,
-      keyId => isOnCooldown(m.platform, m.modelId, keyId));
-    if (!credential) {
-      if (budgetBlocked) lastError = new MediaError('Monthly key budget exhausted', 429, 'quota_exceeded');
-      continue;
-    }
     const logRow = { platform: m.platform, model_id: m.modelId, modality: 'transcription' as const };
-    const started = Date.now();
-    try {
-      const out = await callTranscriptionProvider(m, credential, p);
-      if (p.responseFormat === 'vtt' && !out.vtt) {
-        throw new MediaError('upstream returned no vtt subtitles', 502);
-      }
-      logMedia(logRow, credential.id, 'success', Date.now() - started, null);
-      return { platform: m.platform, modelId: m.modelId, ...out };
-    } catch (err: any) {
-      const e = err instanceof MediaError ? err : new MediaError(String(err?.message ?? err), 502);
-      logMedia(logRow, credential.id, 'error', Date.now() - started, e.message.slice(0, 300));
-      if (e.status === 429 && credential.id != null) {
-        setCooldown(m.platform, m.modelId, credential.id);
-      }
-      lastError = e;
-    } finally {
-      credential.release();
-    }
+    const attempted = await runMediaRow(
+      { ...logRow, key_id: m.keyId },
+      async credential => {
+        const out = await callTranscriptionProvider(m, credential, p);
+        if (p.responseFormat === 'vtt' && !out.vtt) {
+          throw new MediaError('upstream returned no vtt subtitles', 502);
+        }
+        return out;
+      },
+      error => { lastError = error; },
+    );
+    if (attempted) return { platform: m.platform, modelId: m.modelId, ...attempted.value };
   }
   throw chainError('transcription', lastError);
 }
@@ -1091,25 +1165,23 @@ export async function runSpeech(model: string | undefined, params: SpeechParams)
   const chain = resolveMediaChain(model, 'audio');
   let lastError: MediaError | null = null;
   for (const row of chain) {
-    const { credential, budgetBlocked } = KEYLESS_CAPABLE.has(row.platform)
-      ? { credential: { id: null, key: null, baseUrl: null, release: () => {} }, budgetBlocked: false }
-      : reserveProviderCredential(row, 0);
-    if (!credential) {
-      if (budgetBlocked) lastError = new MediaError('Monthly key budget exhausted', 429, 'quota_exceeded');
-      continue;
-    }
-    const started = Date.now();
-    try {
-      const out = await callSpeechProvider(row, credential, params);
-      if (!out.audio.length) throw new MediaError('upstream returned no audio', 502);
-      logMedia(row, credential.id, 'success', Date.now() - started, null);
-      return { platform: row.platform, modelId: row.model_id, audio: out.audio, contentType: out.contentType };
-    } catch (err: any) {
-      const e = err instanceof MediaError ? err : new MediaError(String(err?.message ?? err), 502);
-      logMedia(row, credential.id, 'error', Date.now() - started, e.message.slice(0, 300));
-      lastError = e;
-    } finally {
-      credential.release();
+    const attempted = await runMediaRow(
+      row,
+      async credential => {
+        const out = await callSpeechProvider(row, credential, params);
+        if (!out.audio.length) throw new MediaError('upstream returned no audio', 502);
+        return out;
+      },
+      error => { lastError = error; },
+      { allowKeyless: KEYLESS_CAPABLE.has(row.platform) },
+    );
+    if (attempted) {
+      return {
+        platform: row.platform,
+        modelId: row.model_id,
+        audio: attempted.value.audio,
+        contentType: attempted.value.contentType,
+      };
     }
   }
   throw chainError('audio', lastError);

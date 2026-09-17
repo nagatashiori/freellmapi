@@ -1,9 +1,16 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { getSetting, initDb } from '../../db/index.js';
 import { mintDashboardToken } from '../helpers/auth.js';
 import { applyFetchRelayToken, applyProxyMode, applyProxyUrl } from '../../lib/proxy.js';
+
+// Official post-v0.11 fix #1211: an ambient OS proxy must not leak into tests
+// that explicitly clear the dashboard/env proxy configuration.
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  execFileSync: () => '',
+}));
 
 async function request(app: Express, method: string, path: string, body: any, token: string) {
   const server = app.listen(0, '127.0.0.1');

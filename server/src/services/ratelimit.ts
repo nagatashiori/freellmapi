@@ -184,15 +184,6 @@ function provisionalProviderRequests(platform: string, keyId: number, now: numbe
   return inFlightForKey(platform, keyId, now);
 }
 
-function provisionalProviderTokens(platform: string, keyId: number, now: number): number {
-  pruneLeases(now);
-  let total = 0;
-  for (const lease of leases.values()) {
-    if (lease.platform === platform && lease.keyId === keyId) total += lease.tokens;
-  }
-  return total;
-}
-
 // Retention sweep for rate_limit_usage. The only index on the table is
 // idx_rate_limit_usage_lookup(platform, model_id, key_id, kind, created_at_ms),
 // which a bare `created_at_ms <= ?` predicate cannot use — the prune is a full
@@ -721,6 +712,22 @@ function providerBilledTokens(platform: string, modelId: string, rawTokens: numb
   return Math.ceil(rawTokens * multiplier);
 }
 
+// Provider-wide token caps may bill different models at different multipliers
+// (NavyAI is the current example). In-flight leases therefore have to be
+// converted one by one with THEIR model's multiplier. Applying the candidate
+// model's multiplier to the whole provisional total can under- or over-count a
+// mixed-model account while requests are concurrently in flight.
+function provisionalProviderBilledTokens(platform: string, keyId: number, now: number): number {
+  pruneLeases(now);
+  let total = 0;
+  for (const lease of leases.values()) {
+    if (lease.platform === platform && lease.keyId === keyId) {
+      total += providerBilledTokens(platform, lease.modelId, lease.tokens);
+    }
+  }
+  return total;
+}
+
 function sumPersistedProviderTokens(
   platform: string,
   keyId: number,
@@ -781,7 +788,7 @@ export function canUseProviderTokens(
   const cap = getProviderDailyTokenCap(platform);
   if (cap === null) return true;
   const used = providerDailyTokenCount(platform, keyId, now)
-    + providerBilledTokens(platform, modelId, provisionalProviderTokens(platform, keyId, now));
+    + provisionalProviderBilledTokens(platform, keyId, now);
   return used + providerBilledTokens(platform, modelId, estimatedTokens) <= cap;
 }
 

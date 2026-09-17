@@ -19,6 +19,7 @@ import { ProviderChecklistSection } from '@/components/keys/provider-checklist-s
 import { AddKeyDialog } from '@/components/keys/add-key-dialog'
 import { ExportKeysDialog } from '@/components/keys/export-keys-dialog'
 import { AgentCompatibilitySection } from '@/components/keys/agent-compatibility-section'
+import { ProbeRunPanel } from '@/components/keys/probe-run-panel'
 
 type KeysTab = 'providers' | 'quotaSignals' | 'apiKey' | 'anthropic' | 'agents'
 const KEYS_TABS: { id: KeysTab; labelKey: string }[] = [
@@ -38,6 +39,7 @@ export default function KeysPage() {
   // entered from a checklist chip rather than the generic Add key button.
   const [addPlatform, setAddPlatform] = useState<Platform | ''>('')
   const [exportOpen, setExportOpen] = useState(false)
+  const [probeRunId, setProbeRunId] = useState<string | null>(null)
 
   const openAddKey = (platform: Platform | '' = '') => {
     setAddPlatform(platform)
@@ -65,6 +67,14 @@ export default function KeysPage() {
     },
   })
 
+  const fullTest = useMutation({
+    mutationFn: () => apiFetch<{ runId: string; totalCombos: number }>('/api/fallback/probe-runs', {
+      method: 'POST',
+      body: JSON.stringify({ kind: 'full' }),
+    }),
+    onSuccess: data => setProbeRunId(data.runId),
+  })
+
   return (
     <div>
       <PageHeader
@@ -72,6 +82,11 @@ export default function KeysPage() {
         description={t('keys.pageDescription')}
         actions={
           <>
+            {(tab === 'providers' || tab === 'quotaSignals') && keys.length > 0 && (
+              <Button variant="outline" size="sm" onClick={() => fullTest.mutate()} disabled={fullTest.isPending || !!probeRunId}>
+                {fullTest.isPending ? t('keys.fullTestStarting') : t('keys.fullTest')}
+              </Button>
+            )}
             {(tab === 'providers' || tab === 'quotaSignals') && keys.length > 0 && (
               <Button variant="outline" size="sm" onClick={() => checkAll.mutate()} disabled={checkAll.isPending}>
                 {checkAll.isPending ? t('keys.checking') : t('keys.checkAll')}
@@ -100,6 +115,10 @@ export default function KeysPage() {
       />
 
       <div className="space-y-8">
+        {probeRunId && (
+          <ProbeRunPanel runId={probeRunId} onDismiss={() => setProbeRunId(null)} />
+        )}
+
         {tab === 'apiKey' && (
           <>
             <UnifiedKeySection />

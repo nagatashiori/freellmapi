@@ -26,6 +26,14 @@ import {
   parseRegProxy,
 } from '../../lib/proxy.js';
 
+// Official post-v0.11 fix #1211: scrub the OS-wide proxy fallback so a
+// developer machine with Windows/macOS/Linux system proxy configured cannot
+// make the "no proxy configured" cases depend on ambient host state.
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  execFileSync: () => '',
+}));
+
 // Every env var the proxy config reads, in both the upper- and lower-case
 // spellings the convention allows. Cleared around each test so a developer
 // machine that genuinely sits behind a corporate proxy doesn't fail the suite.

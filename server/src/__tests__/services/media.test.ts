@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { initDb, getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import { runImageGeneration, runVideoGeneration, runSpeech } from '../../services/media.js';
+import { clearAllCooldowns, resetLeases } from '../../services/ratelimit.js';
 
 const realFetch = globalThis.fetch;
 
@@ -44,6 +45,8 @@ describe('media service', () => {
   beforeEach(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     initDb(':memory:');
+    clearAllCooldowns();
+    resetLeases();
   });
 
   afterEach(() => {
@@ -248,6 +251,33 @@ describe('media service', () => {
       const log = getDb().prepare("SELECT key_id FROM requests WHERE request_type = 'image' ORDER BY id DESC LIMIT 1").get() as { key_id: number };
       expect(log.key_id).toBe(keyId);
     });
+
+    it('retries custom-endpoint sibling keys and excludes keys outside the model scope', async () => {
+      const baseUrl = 'http://127.0.0.1:8283/v1';
+      const boundKeyId = addCustomKey(baseUrl, 'wrong-scope-image-key');
+      const siblingA = addCustomKey(baseUrl, 'image-sibling-a');
+      const siblingB = addCustomKey(baseUrl, 'image-sibling-b');
+      getDb().prepare('UPDATE api_keys SET model_scope_json = ? WHERE id = ?')
+        .run(JSON.stringify(['not-local-image-pool']), boundKeyId);
+      for (const id of [siblingA, siblingB]) {
+        getDb().prepare('UPDATE api_keys SET model_scope_json = ? WHERE id = ?')
+          .run(JSON.stringify(['local-image-pool']), id);
+      }
+      addMedia('custom', 'local-image-pool', 'image', 1, boundKeyId);
+      const fetchMock = vi.fn(async () => jsonResponse({ data: [{ url: 'https://example.test/pool.png' }] }));
+      fetchMock.mockResolvedValueOnce(new Response('temporary failure', { status: 503 }));
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: [{ url: 'https://example.test/pool.png' }] }));
+      globalThis.fetch = fetchMock as any;
+
+      const result = await runImageGeneration('local-image-pool', { prompt: 'pool' });
+
+      expect(result.images[0].url).toBe('https://example.test/pool.png');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const auth = fetchMock.mock.calls.map(call =>
+        new Headers((call[1] as RequestInit).headers).get('Authorization'));
+      expect(new Set(auth)).toEqual(new Set(['Bearer image-sibling-a', 'Bearer image-sibling-b']));
+      expect(auth).not.toContain('Bearer wrong-scope-image-key');
+    });
   });
 
   describe('video generation', () => {
@@ -395,6 +425,9 @@ describe('media service', () => {
       await expect(runVideoGeneration('nova-reel', { prompt: 'x' }))
         .rejects.toMatchObject({ status: 502 });
 
+      // Non-chat routes now share the chat-style auth bench. Clear it here so
+      // this assertion still isolates caller-attributable 400 propagation.
+      clearAllCooldowns();
       globalThis.fetch = vi.fn(async () => new Response('bad prompt', { status: 400 })) as any;
       await expect(runVideoGeneration('nova-reel', { prompt: 'x' }))
         .rejects.toMatchObject({ status: 400 });

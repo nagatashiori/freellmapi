@@ -15,6 +15,27 @@ const expectedLocales = [
   'fi', 'no', 'sk', 'bg', 'hr', 'sr', 'lt', 'zh-TW', 'pt-PT', 'ka',
 ]
 
+// Local-only probe-run UI intentionally ships English fallback for locales we
+// do not maintain translations for. I18nProvider already falls back to en at
+// runtime; keep the validator strict for every official key and allow fallback
+// only for this explicitly enumerated extension surface. zh-CN has real local
+// translations and therefore still defines these keys itself.
+const englishFallbackKeys = new Set([
+  'keys.fullTest',
+  'keys.fullTestStarting',
+  'keys.probeRunTitle',
+  'keys.probeRunProgress',
+  'keys.probeRunCancel',
+  'keys.probeRunCancelling',
+  'keys.probeRunCompleted',
+  'keys.probeRunCancelled',
+  'keys.probeRunFailed',
+  'keys.probeRunOk',
+  'keys.probeRunPartial',
+  'keys.probeRunRateLimited',
+  'keys.probeRunFailedCount',
+])
+
 function flatten(value, prefix = '', output = new Map()) {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     for (const [key, child] of Object.entries(value)) {
@@ -52,7 +73,7 @@ for (const locale of actualLocales) {
   )
   const entries = flatten(dictionary)
   const keys = new Set(entries.keys())
-  const missingKeys = [...englishKeys].filter(key => !keys.has(key))
+  const missingKeys = [...englishKeys].filter(key => !keys.has(key) && !englishFallbackKeys.has(key))
   const extraKeys = [...keys].filter(key => !englishKeys.has(key))
 
   if (missingKeys.length) {

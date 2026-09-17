@@ -16,6 +16,9 @@ import {
   getProviderDailyRequestCap,
   providerDailyTokenCount,
   getProviderDailyTokenCap,
+  acquireLease,
+  releaseLease,
+  resetLeases,
 } from '../../services/ratelimit.js';
 import { parseRetryAfterMs } from '../../providers/base.js';
 
@@ -342,6 +345,7 @@ describe('Rate Limiter', () => {
       original = process.env[ENV];
       getDb().prepare('DELETE FROM rate_limit_usage').run();
       getDb().prepare("DELETE FROM models WHERE platform = 'navy'").run();
+      resetLeases();
       delete process.env[ENV];
     });
 
@@ -377,6 +381,23 @@ describe('Rate Limiter', () => {
 
       expect(canUseProviderTokens('navy', testId, 'gemini-2.5-flash', 400)).toBe(true);
       expect(canUseProviderTokens('navy', testId, 'gemini-2.5-flash', 600)).toBe(false);
+    });
+
+    it('bills each in-flight model with its own multiplier', () => {
+      process.env[ENV] = '6000';
+      seedNavyModel('expensive', 30_000, '150K/day shared \u00b7 5x');
+      seedNavyModel('cheap', 150_000, '150K/day shared \u00b7 1x');
+
+      const leaseId = acquireLease('navy', 'expensive', testId, 1000);
+      try {
+        // The existing expensive request consumes 5000 billed tokens. A new
+        // 1001-token cheap request would exceed the 6000 shared cap. The old
+        // implementation incorrectly re-priced the in-flight 1000 tokens at
+        // the CHEAP model's 1x multiplier and allowed it.
+        expect(canUseProviderTokens('navy', testId, 'cheap', 1001)).toBe(false);
+      } finally {
+        releaseLease(leaseId);
+      }
     });
   });
 });

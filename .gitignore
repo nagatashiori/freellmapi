@@ -24,3 +24,8 @@ update-hermes.sh
 
 # Monetization planning — private, never committed
 monetization/
+
+# Local refactor/worktree artifacts. These are developer-machine state, not
+# part of the application source tree.
+.worktrees/
+server/dist-patch/
