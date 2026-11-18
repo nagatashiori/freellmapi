@@ -1223,7 +1223,10 @@ export async function handleResponses(req: Request, res: Response): Promise<void
     },
     dispatch: async (route, attempt, ctx) => {
       const contextBudget = routeOutputBudget(route, estimatedInputTokens);
-      const routeOpts = contextBudget != null ? { ...dispatchOpts, contextBudget } : dispatchOpts;
+      const attemptSignals = [clientAbort.signal, hedgeAbort.signal];
+      if (ctx.signal) attemptSignals.push(ctx.signal);
+      const attemptOpts = { ...dispatchOpts, signal: AbortSignal.any(attemptSignals) };
+      const routeOpts = contextBudget != null ? { ...attemptOpts, contextBudget } : attemptOpts;
       traceRouteEvent('Responses', {
         event: attempt === 0 ? 'start' : 'next',
         requestId: requestGroupId,

@@ -751,7 +751,9 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
     },
     dispatch: async (route, attempt, dispatchCtx) => {
       const contextBudget = routeOutputBudget(route, estimatedInputTokens);
-      const routeOptions = { ...dispatchOptions, contextBudget };
+      const attemptSignals = [clientAbort.signal, hedgeAbort.signal];
+      if (dispatchCtx.signal) attemptSignals.push(dispatchCtx.signal);
+      const routeOptions = { ...dispatchOptions, contextBudget, signal: AbortSignal.any(attemptSignals) };
       if (stream) {
         try {
           await streamCompletion(res, route, messages, routeOptions, {

@@ -206,6 +206,38 @@ export function getFallbackTimeBudgetMs(): number {
   return DEFAULT_FALLBACK_TIME_BUDGET_MS;
 }
 
+export const ATTEMPT_TTFB_TIMEOUT_SETTING = 'attempt_ttfb_timeout_ms';
+export const DEFAULT_ATTEMPT_TTFB_TIMEOUT_MS = 0;
+
+export function getAttemptTtfbTimeoutMs(): number {
+  let stored: string | undefined;
+  try {
+    stored = getSetting(ATTEMPT_TTFB_TIMEOUT_SETTING);
+  } catch {
+    stored = undefined;
+  }
+  const candidates = [stored, process.env.ATTEMPT_TTFB_TIMEOUT_MS];
+  for (const raw of candidates) {
+    if (raw === undefined || raw.trim() === '') continue;
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return DEFAULT_ATTEMPT_TTFB_TIMEOUT_MS;
+}
+
+export function newAttemptTtfbTimeoutError(platform: string, modelId: string, timeoutMs: number): Error {
+  const err = new Error(`upstream ${platform}/${modelId} stalled: no first byte within ${timeoutMs}ms (first-byte timeout)`);
+  (err as Error & { attemptTtfbTimeout?: boolean }).attemptTtfbTimeout = true;
+  return err;
+}
+
+export function isAttemptTtfbTimeoutError(err: any): boolean {
+  if (err?.attemptTtfbTimeout === true) return true;
+  if (err?.cause && (err.cause as { attemptTtfbTimeout?: boolean }).attemptTtfbTimeout === true) return true;
+  const msg = (err?.message ?? '').toLowerCase();
+  return msg.includes('first-byte timeout') || (msg.includes('stalled') && msg.includes('first byte'));
+}
+
 // Mutable per-request skip state threaded through the loop and mutated by
 // recordRetryableFailure / recordAuthFailure. skipKeys entries are
 // "platform:modelId:keyId"; skipModels holds model_db_ids ruled out for the
@@ -1295,10 +1327,15 @@ export type DispatchOutcome = 'done' | 'committed';
 /** Per-attempt handles the loop hands to dispatch. */
 export interface DispatchContext {
   /**
-   * Cancel this attempt's time-budget hedge. Idempotent and always safe to
+   * Cancel this attempt's time-budget hedge and first-byte timeout. Idempotent and always safe to
    * call, including when hedging is not armed at all. See FallbackHooks.dispatch.
    */
   disarmHedge(): void;
+  /**
+   * Abort signal for this specific attempt. Aborted when the attempt's first-byte
+   * timeout expires, triggering an invisible failover to the next candidate.
+   */
+  signal?: AbortSignal;
 }
 
 // Per-request exhaustion metadata handed to the exhaustion hooks, so each
@@ -1316,6 +1353,8 @@ export interface FallbackHooks {
   // getFallbackTimeBudgetMs() (setting → env → 45s; 0 disables).
   // Successful endpoint TTFB history can widen this floor.
   timeBudgetMs?: number;
+  // Per-attempt TTFB timeout override (0 disables). Defaults to getAttemptTtfbTimeoutMs().
+  attemptTtfbTimeoutMs?: number;
   // Circuit-breaker threshold override, mostly for tests. Defaults to
   // getMaxConsecutiveUpstreamFails() (setting → env → 0 = disabled).
   breakerLimit?: number;
@@ -1426,6 +1465,7 @@ export async function runFallbackLoop(hooks: FallbackHooks): Promise<void> {
 async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace): Promise<void> {
   const maxRetries = hooks.maxRetries ?? FALLBACK_MAX_RETRIES;
   const baseBudgetMs = hooks.timeBudgetMs ?? getFallbackTimeBudgetMs();
+  const attemptTtfbBudgetMs = hooks.attemptTtfbTimeoutMs ?? getAttemptTtfbTimeoutMs();
   const startedAt = Date.now();
   const attempts: AttemptRecord[] = hooks.attemptLog ?? [];
   const keyOrdinals = new Map<string, number>();
@@ -1497,6 +1537,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
     }
 
     let hedgeTimer: NodeJS.Timeout | undefined;
+    let attemptTtfbTimer: NodeJS.Timeout | undefined;
     try {
     // Select the endpoint before checking the budget: a slow endpoint may
     // still have time even after the base budget has expired. Recompute from
@@ -1553,12 +1594,24 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
     // because past that point cancelling would truncate a healthy response and
     // buy nothing: a committed stream can no longer fail over anyway. Slow is
     // not the same as stalled, and only stalled is worth killing.
+    const attemptController = new AbortController();
+
     const disarmHedge = () => {
       if (hedgeTimer) {
         clearTimeout(hedgeTimer);
         hedgeTimer = undefined;
       }
+      if (attemptTtfbTimer) {
+        clearTimeout(attemptTtfbTimer);
+        attemptTtfbTimer = undefined;
+      }
     };
+    if (attemptTtfbBudgetMs > 0) {
+      attemptTtfbTimer = setTimeout(() => {
+        console.log(`[FallbackLoop] attempt ${attempt} on ${route.platform}/${route.modelId} exceeded first-byte budget (${attemptTtfbBudgetMs}ms) with no response — aborting for fast failover`);
+        attemptController.abort(newAttemptTtfbTimeoutError(route.platform, route.modelId, attemptTtfbBudgetMs));
+      }, attemptTtfbBudgetMs);
+    }
     if (attempt > 1 && budgetMs > 0 && hooks.abortInFlight) {
       const remaining = budgetMs - (Date.now() - startedAt);
       if (remaining > 0) {
@@ -1575,7 +1628,10 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
       // otherwise the global proxy / direct path applies as before. The URL
       // arrives already decrypted on the route (services/router.ts), so an
       // attempt costs nothing extra — no query, no decrypt.
-      outcome = await withKeyProxy(route.proxyUrl, () => hooks.dispatch(route, attempt, { disarmHedge }));
+      outcome = await withKeyProxy(route.proxyUrl, () => hooks.dispatch(route, attempt, {
+        disarmHedge,
+        signal: attemptController.signal,
+      }));
     } catch (err: any) {
       // Client-caused abort: the composed fetch signal fired because OUR
       // client hung up mid-attempt (see newClientAbortError). Not a
@@ -1708,6 +1764,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
     return;
     } finally {
       if (hedgeTimer) clearTimeout(hedgeTimer);
+      if (attemptTtfbTimer) clearTimeout(attemptTtfbTimer);
       route.release?.();
     }
   }
