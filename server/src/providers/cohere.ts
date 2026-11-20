@@ -72,7 +72,7 @@ export class CohereProvider extends BaseProvider {
     });
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
+      const err = await this.readErrorBody(res, options?.signal);
       throw providerHttpError(res, `Cohere API error ${res.status}: ${(err as any).error?.message ?? res.statusText}`, err);
     }
 
@@ -121,7 +121,7 @@ export class CohereProvider extends BaseProvider {
     });
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
+      const err = await this.readErrorBody(res, options?.signal);
       throw providerHttpError(res, `Cohere API error ${res.status}: ${(err as any).error?.message ?? res.statusText}`, err);
     }
 

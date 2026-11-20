@@ -231,9 +231,16 @@ export function newAttemptTtfbTimeoutError(platform: string, modelId: string, ti
   return err;
 }
 
+function hasTrustedAttemptTtfbTimeout(err: any): boolean {
+  return err?.attemptTtfbTimeout === true || err?.cause?.attemptTtfbTimeout === true;
+}
+
+function hasExplicitAbortMarker(err: any, marker: 'clientAbort' | 'hedgeAbort'): boolean {
+  return err?.[marker] === true || err?.cause?.[marker] === true;
+}
+
 export function isAttemptTtfbTimeoutError(err: any): boolean {
-  if (err?.attemptTtfbTimeout === true) return true;
-  if (err?.cause && (err.cause as { attemptTtfbTimeout?: boolean }).attemptTtfbTimeout === true) return true;
+  if (hasTrustedAttemptTtfbTimeout(err)) return true;
   const msg = (err?.message ?? '').toLowerCase();
   return msg.includes('first-byte timeout') || (msg.includes('stalled') && msg.includes('first byte'));
 }
@@ -499,6 +506,13 @@ function consumeSkipBenchExemption(route: RouteResult, err: any): boolean {
  * Callers add the just-failed key to skipKeys via this function (do not pre-add).
  */
 export function recordRetryableFailure(route: RouteResult, err: any, state: FallbackState, now: number = Date.now()): boolean {
+  // Our first-byte deadline is a per-request latency policy, not evidence the
+  // provider is unhealthy. Try other routes, including models on this platform,
+  // without affecting global health or the consecutive-failure breaker.
+  if (hasTrustedAttemptTtfbTimeout(err) && !hasExplicitAbortMarker(err, 'hedgeAbort')) {
+    state.skipKeys.add(`${route.platform}:${route.modelId}:${route.keyId}`);
+    return true;
+  }
   // `skipModelForRequest: true` = the failure is MODEL behavior, not key
   // state (ignored response_format, JSON truncated at max_tokens): a sibling
   // key would reproduce it exactly, so rule out the whole model for this
@@ -1639,7 +1653,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
       // no logFailure 'error' row — and no further attempts either: nobody is
       // waiting, and there is no socket to render anything to. The finally
       // below still frees the in-flight lease.
-      if (isClientAbortError(err)) {
+      if (isClientAbortError(err) && (!hasTrustedAttemptTtfbTimeout(err) || hasExplicitAbortMarker(err, 'clientAbort'))) {
         const elapsedMs = Date.now() - startedAt;
         console.log(`[FallbackLoop] client disconnected mid-attempt on ${route.platform}/${route.modelId} — upstream canceled, stopping without benching`);
         // Visibility row (#752): a pure abort used to leave NOTHING in the
@@ -1671,7 +1685,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
       // rate-limit signal, so cooldownDecisionForError keeps it light) plus the
       // gradual model-level sink, both of which decay on their own if the route
       // recovers.
-      if (isHedgeAbortError(err)) {
+      if (isHedgeAbortError(err) && (!hasTrustedAttemptTtfbTimeout(err) || hasExplicitAbortMarker(err, 'hedgeAbort'))) {
         const elapsedMs = Date.now() - startedAt;
         const attemptElapsedMs = Date.now() - attemptStartedAt;
         const ownedWholeBudget = budgetMs > 0
@@ -1689,7 +1703,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
         return;
       }
       hooks.logFailure(route, err, attempt);
-      if (isKeyAuthError(err)) {
+      if (isKeyAuthError(err) && !hasTrustedAttemptTtfbTimeout(err)) {
         // KEY-fatal, not request-fatal: rotate past the bad key and revalidate
         // it immediately instead of 502-ing while healthy routes sit idle.
         recordAuthFailure(route, hooks.state);
@@ -1699,7 +1713,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
         if (stopIfBreakerTripped()) return;
         continue;
       }
-      if (isRetryableError(err)) {
+      if (isRetryableError(err) || hasTrustedAttemptTtfbTimeout(err)) {
         const exempt = recordRetryableFailure(route, err, hooks.state);
         // An in-band provider error that arrives only after the attempt has
         // silently consumed most of the operator's whole budget (#1218 Gap 3:
@@ -1713,7 +1727,7 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
         // a fast verdict costs the ladder nothing.
         const errStr = err?.message ?? '';
         if (
-          budgetMs > 0
+          !hasTrustedAttemptTtfbTimeout(err) && budgetMs > 0
           && typeof errStr === 'string' && errStr.includes('in-band provider error')
           && Date.now() - attemptStartedAt >= budgetMs * HEDGE_BENCH_MIN_SILENT_FRACTION
         ) {

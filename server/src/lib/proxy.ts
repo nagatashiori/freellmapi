@@ -646,7 +646,10 @@ function enrichAbort(
   timeoutMs: number | undefined,
 ): Error {
   if (!err || typeof err !== 'object') return err as Error;
-  const e = err as Error & { name?: string; cause?: unknown };
+  const e = err as Error & { name?: string; cause?: unknown; attemptTtfbTimeout?: boolean; clientAbort?: boolean; hedgeAbort?: boolean };
+  // These trusted reasons carry control-flow semantics. Rewriting the error
+  // would discard a direct marker when the message happens to contain "aborted".
+  if (e.attemptTtfbTimeout === true || e.clientAbort === true || e.hedgeAbort === true) return e;
   const isAbort = e.name === 'AbortError' || /aborted/i.test(e.message ?? '');
   if (!isAbort) return e;
   const enriched = new DOMException(
@@ -733,12 +736,20 @@ function socksFetch(
   // timeout; a plain timer abort keeps the tagged AbortError.
   const abortRejection = (): Error => {
     const reason = signal?.reason;
-    return reason instanceof Error && reason.name !== 'AbortError' && reason.name !== 'TimeoutError'
+    const hasMarker = (value: any) => value?.attemptTtfbTimeout === true || value?.clientAbort === true || value?.hedgeAbort === true;
+    return reason instanceof Error && (hasMarker(reason) || hasMarker(reason.cause) ||
+      (reason.name !== 'AbortError' && reason.name !== 'TimeoutError'))
       ? reason
       : abortError(platform, type, timeoutMs, Date.now() - startedAt);
   };
 
   return new Promise((resolve, reject) => {
+    let abortBody: ((reason: Error) => void) | undefined;
+    let onAbort: (() => void) | undefined;
+    let receivedHeaders = false;
+    const cleanupAbort = () => {
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+    };
     const req = transport.request({
       hostname: url.hostname,
       port,
@@ -755,22 +766,35 @@ function socksFetch(
       // this hook — the connection to the proxy itself still resolves normally.
       lookup: socksHostnameLookup,
     }, (res) => {
+      receivedHeaders = true;
       if (signal?.aborted) {
-        res.destroy();
         reject(abortRejection());
+        res.destroy();
         return;
       }
 
       const status = res.statusCode ?? 0;
       const statusText = res.statusMessage ?? '';
 
+      let bodySettled = false;
+      const finishBody = () => {
+        if (bodySettled) return false;
+        bodySettled = true;
+        abortBody = undefined;
+        cleanupAbort();
+        return true;
+      };
       const body = new ReadableStream({
         start(controller) {
-          res.on('data', (chunk: Buffer) => controller.enqueue(new Uint8Array(chunk)));
-          res.on('end', () => controller.close());
-          res.on('error', (err: Error) => controller.error(err));
+          abortBody = (reason) => { if (finishBody()) controller.error(reason); };
+          res.on('data', (chunk: Buffer) => {
+            if (!bodySettled) controller.enqueue(new Uint8Array(chunk));
+          });
+          res.on('end', () => { if (finishBody()) controller.close(); });
+          res.on('error', (err: Error) => { if (finishBody()) controller.error(err); });
         },
         cancel() {
+          finishBody();
           res.destroy();
         },
       });
@@ -783,22 +807,31 @@ function socksFetch(
       resolve(new Response(body, { status, statusText, headers: hdrs }));
     });
 
-    req.on('error', (err) => reject(err));
+    req.on('error', (err) => {
+      if (!receivedHeaders) cleanupAbort();
+      reject(err);
+    });
     req.on('timeout', () => {
+      if (!receivedHeaders) cleanupAbort();
       req.destroy();
       reject(new Error('timeout'));
     });
 
     if (signal) {
       if (signal.aborted) {
-        req.destroy();
         reject(abortRejection());
+        req.destroy();
         return;
       }
-      signal.addEventListener('abort', () => {
+      onAbort = () => {
+        const reason = abortRejection();
+        // After headers the fetch promise is settled; error the body before
+        // destroying the request, which otherwise reports a generic reset.
+        abortBody?.(reason);
+        reject(reason);
         req.destroy();
-        reject(abortRejection());
-      }, { once: true });
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
     }
 
     if (init?.body) {

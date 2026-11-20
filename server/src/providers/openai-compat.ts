@@ -404,7 +404,7 @@ export class OpenAICompatProvider extends BaseProvider {
     });
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
+      const err = await this.readErrorBody(res, options?.signal);
       const rescued = this.rescueFailedGeneration(err, options);
       if (rescued) {
         console.log(`[${this.name}] Rescued ${rescued.length} inline tool call(s) from a ${res.status} tool_use_failed (#264)`);
@@ -432,6 +432,10 @@ export class OpenAICompatProvider extends BaseProvider {
       // An aborted body read (per-attempt deadline, client disconnect) is not
       // a malformed body — rethrow so it keeps its abort classification
       // instead of reading as a "non-OpenAI-compatible endpoint" below.
+      // A caller abort can carry a plain Error reason (e.g. the first-byte
+      // deadline), or the body reader can replace it with a generic AbortError.
+      // Preserve the originating reason without masking unrelated parse errors.
+      this.rethrowBodyAbort(res, err, options?.signal);
       if (isAbortLikeError(err)) throw err;
       parseErr = err;
       data = undefined as unknown as ChatCompletionResponse;
@@ -538,7 +542,7 @@ export class OpenAICompatProvider extends BaseProvider {
     });
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
+      const err = await this.readErrorBody(res, options?.signal);
       const rescued = this.rescueFailedGeneration(err, options);
       if (rescued) {
         console.log(`[${this.name}] Rescued ${rescued.length} inline tool call(s) from a ${res.status} tool_use_failed (stream, #264)`);

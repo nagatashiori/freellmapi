@@ -159,7 +159,7 @@ export class AIHordeProvider extends BaseProvider {
     });
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
+      const err = await this.readErrorBody(res, options?.signal);
       throw providerHttpError(res, `${this.name} API error ${res.status}: ${this.parseError(err, res.status, res.statusText)}`, err);
     }
 

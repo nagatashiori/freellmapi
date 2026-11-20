@@ -480,6 +480,11 @@ export function setProviderMomentAttribution(enabled: boolean): void {
 // feature is off or the error is not a provider-moment failure. Route call
 // sites pass this straight through to logRequest.
 export function failureAttributionFor(err: any): string | null {
+  // This is our own per-attempt deadline, not evidence against the provider.
+  // Only accept the explicit local marker on the error or its immediate cause.
+  if (err?.attemptTtfbTimeout === true || err?.cause?.attemptTtfbTimeout === true) {
+    return 'local_attempt_ttfb_timeout';
+  }
   if (!isProviderMomentAttributionEnabled()) return null;
   return isProviderMomentFailure(err) ? 'provider_moment' : null;
 }
@@ -885,7 +890,8 @@ export function refreshStatsCache(db: Db, force = false): void {
       SUM(CASE WHEN ${IS_TIMEOUT_SQL} THEN 1 ELSE 0 END) AS timeouts,
       SUM(CASE WHEN ${IS_TIMEOUT_SQL} THEN MIN(MAX(latency_ms, 0), ${TIMEOUT_LATENCY_CAP_MS}) ELSE 0 END) AS timeout_lat
     FROM requests
-    WHERE created_at >= ? AND status <> 'canceled'${pmExcluded}
+    WHERE created_at >= ? AND status <> 'canceled'
+      AND (failure_attribution IS NULL OR failure_attribution <> 'local_attempt_ttfb_timeout')${pmExcluded}
     GROUP BY platform, model_id, key_id, age_days
   `).all(since) as Array<{
     platform: string; model_id: string; key_id: number | null; age_days: number; total: number; successes: number;

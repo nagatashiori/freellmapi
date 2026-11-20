@@ -1,8 +1,13 @@
 import http from 'http';
 import type { AddressInfo } from 'net';
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { GoogleProvider } from '../../providers/google.js';
+import { CohereProvider } from '../../providers/cohere.js';
+import { CloudflareProvider } from '../../providers/cloudflare.js';
+import { AIHordeProvider } from '../../providers/aihorde.js';
 import { OpenAICompatProvider } from '../../providers/openai-compat.js';
 import { isClientAbortError, newClientAbortError } from '../../lib/error-classify.js';
+import * as proxy from '../../lib/proxy.js';
 import type { ChatMessage } from '@freellmapi/shared/types.js';
 
 /**
@@ -102,6 +107,137 @@ describe('AbortSignal through provider fetch + body/stream reads', () => {
     expect(err).not.toBeNull();
     expect(isClientAbortError(err)).toBe(true);
     await upstream.closed;
+  });
+
+  it.each(['headers', 'body'] as const)('preserves a first-byte timeout reason during stalled %s', async (phase) => {
+    upstream = await startUpstream((_req, res) => {
+      if (phase === 'body') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.write('{\"id\":\"chatcmpl-hang\",\"choices\":[');
+      }
+    });
+    const controller = new AbortController();
+    const reason = Object.assign(new Error('upstream stalled: no first byte (first-byte timeout)'), { attemptTtfbTimeout: true });
+    const pending = makeProvider(upstream.url).chatCompletion('test-key', MESSAGES, 'test-model', { signal: controller.signal });
+    setTimeout(() => controller.abort(reason), 100);
+    const err = await pending.then(() => null, e => e);
+    expect(err).toBe(reason);
+    await upstream.closed;
+  });
+
+  it.each(['non-stream', 'stream'] as const)('preserves timeout and client abort reasons while reading a stalled non-2xx %s body', async (mode) => {
+    for (const reason of [
+      Object.assign(new Error('upstream stalled: no first byte (first-byte timeout)'), { attemptTtfbTimeout: true }),
+      newClientAbortError(),
+    ]) {
+      upstream = await startUpstream((_req, res) => {
+        res.writeHead(503, { 'content-type': 'application/json' });
+        res.write('{"error":');
+      });
+      const provider = makeProvider(upstream.url);
+      const controller = new AbortController();
+      const pending = mode === 'stream'
+        ? provider.streamChatCompletion('test-key', MESSAGES, 'test-model', { signal: controller.signal }).next()
+        : provider.chatCompletion('test-key', MESSAGES, 'test-model', { signal: controller.signal });
+      setTimeout(() => controller.abort(reason), 100);
+      const err = await pending.then(() => null, e => e);
+      expect(err).toBe(reason);
+      await upstream.closed;
+      await upstream.stop();
+      upstream = null;
+    }
+  });
+
+  it.each([
+    ['Google', () => new GoogleProvider(), 'key', true],
+    ['Cohere', () => new CohereProvider(), 'key', true],
+    ['Cloudflare', () => new CloudflareProvider(), 'account:token', true],
+    ['AI Horde', () => new AIHordeProvider(), 'key', false],
+  ] as const)('%s preserves abort reasons in non-2xx body reads', async (_name, make, key, hasStream) => {
+    for (const stream of hasStream ? [false, true] : [false]) {
+      for (const reason of [
+        Object.assign(new Error('first-byte timeout'), { attemptTtfbTimeout: true }),
+        newClientAbortError(),
+      ]) {
+        const provider = make();
+        if (provider instanceof CloudflareProvider) {
+          vi.spyOn(provider as any, 'meterCall').mockReturnValue({ meter: { refund: vi.fn() }, inputTokens: 0 });
+        }
+        const controller = new AbortController();
+        const response = {
+          ok: false, status: 503, statusText: 'Service Unavailable', headers: new Headers(),
+          json: async () => {
+            controller.abort(reason);
+            throw reason;
+          },
+        };
+        vi.spyOn(provider as any, 'fetchWithTimeout').mockResolvedValue(response);
+        const pending = stream
+          ? provider.streamChatCompletion(key, MESSAGES, 'test-model', { signal: controller.signal }).next()
+          : provider.chatCompletion(key, MESSAGES, 'test-model', { signal: controller.signal });
+        expect(await pending.then(() => null, e => e)).toBe(reason);
+      }
+    }
+  });
+
+  it.each([200, 503] as const)('preserves the first abort cause during HTTP %s body reads', async (status) => {
+    for (const winner of ['provider', 'caller'] as const) {
+      const caller = new AbortController();
+      const reason = newClientAbortError();
+      let fetchSignal: AbortSignal | undefined;
+      const spy = vi.spyOn(proxy, 'proxyFetch').mockImplementation(async (_url, init) => {
+        fetchSignal = init?.signal as AbortSignal;
+        return {
+          ok: status === 200, status, statusText: 'Service Unavailable', headers: new Headers(),
+          json: async () => {
+            if (winner === 'caller') caller.abort(reason);
+            else if (!fetchSignal!.aborted) await new Promise<void>(resolve => fetchSignal!.addEventListener('abort', () => resolve(), { once: true }));
+            if (winner === 'provider') caller.abort(reason);
+            // Let the later timeout fire before rejecting, exposing order races.
+            await new Promise(resolve => setTimeout(resolve, 30));
+            throw new DOMException('The operation was aborted', 'AbortError');
+          },
+        } as Response;
+      });
+      try {
+        const err = await makeProvider('http://unused.invalid').chatCompletion('key', MESSAGES, 'test-model', { signal: caller.signal, timeoutMs: 10 }).then(() => null, e => e);
+        expect(fetchSignal?.aborted).toBe(true);
+        if (winner === 'caller') expect(err).toBe(reason);
+        else {
+          expect(err).not.toBe(reason);
+          expect(isClientAbortError(err)).toBe(false);
+          expect(err?.name).toBe('AbortError');
+        }
+      } finally {
+        spy.mockRestore();
+      }
+    }
+  });
+
+  it.each([200, 503] as const)('does not infer caller ownership without a fetch signal for HTTP %s', async (status) => {
+    const provider = makeProvider('http://unused.invalid');
+    const caller = new AbortController();
+    const reason = newClientAbortError();
+    vi.spyOn(provider as any, 'fetchWithTimeout').mockResolvedValue({
+      ok: status === 200, status, statusText: 'Service Unavailable', headers: new Headers(),
+      json: async () => { caller.abort(reason); throw new DOMException('The operation was aborted', 'AbortError'); },
+    });
+    const err = await provider.chatCompletion('key', MESSAGES, 'test-model', { signal: caller.signal }).then(() => null, e => e);
+    expect(err).not.toBe(reason);
+    expect(isClientAbortError(err)).toBe(false);
+  });
+
+  it('does not replace an unrelated parse error when abort races with a non-2xx body read', async () => {
+    const provider = makeProvider('http://unused.invalid');
+    const controller = new AbortController();
+    const reason = Object.assign(new Error('first-byte timeout'), { attemptTtfbTimeout: true });
+    vi.spyOn(provider as any, 'fetchWithTimeout').mockResolvedValue({
+      ok: false, status: 503, statusText: 'Service Unavailable', headers: new Headers(),
+      json: async () => { controller.abort(reason); throw new SyntaxError('bad JSON'); },
+    });
+    const err = await provider.chatCompletion('key', MESSAGES, 'test-model', { signal: controller.signal }).then(() => null, e => e);
+    expect(err).not.toBe(reason);
+    expect(err.message).toContain('503');
   });
 
   it('per-attempt timeout still fires on slow headers', async () => {

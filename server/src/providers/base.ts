@@ -11,6 +11,7 @@ import type { ExtendedSamplingOptions } from '../lib/sampling-params.js';
 import { proxyFetch } from '../lib/proxy.js';
 import { providerTimeoutMs, streamStallTimeoutMs } from '../lib/provider-timeout.js';
 import { extractThinkTagsFromStream } from '../lib/think-tags.js';
+import { isTransportError } from '../lib/error-classify.js';
 
 /** A provider HTTP error carrying the upstream status and, when the provider
  *  stated one, the parsed back-off so the router can bench the key for at least
@@ -256,6 +257,42 @@ export abstract class BaseProvider {
    * true; overridden by subclasses. */
   readonly supportsChat: boolean = true;
 
+  // A Response keeps its actual fetch signal, including the provider's own
+  // timeout. The composite's reason is immutable after the first abort.
+  private readonly responseSignals = new WeakMap<Response, AbortSignal>();
+
+  protected rethrowBodyAbort(res: Response, err: unknown, caller?: AbortSignal): void {
+    const signal = this.responseSignals.get(res);
+    type AbortMarkers = Partial<Record<'attemptTtfbTimeout' | 'clientAbort' | 'hedgeAbort', unknown>>;
+    const marked = err as (AbortMarkers & { cause?: AbortMarkers }) | null;
+    const markerNames = ['attemptTtfbTimeout', 'clientAbort', 'hedgeAbort'] as const;
+    if (markerNames.some(name => marked?.[name] === true || marked?.cause?.[name] === true)) throw err;
+    if ((caller?.aborted && err === caller.reason) ||
+        (signal?.aborted && err === signal.reason)) throw err;
+    const transport = isTransportError(err);
+    // Compatibility for fetch implementations that replace the reason with a
+    // generic DOMException. An independently produced identical exception is
+    // indistinguishable, so this is a heuristic, not proof of causation.
+    if (!transport && signal?.aborted && err instanceof DOMException &&
+        (err.name === 'AbortError' || err.name === 'TimeoutError')) {
+      if (caller?.aborted && signal.reason === caller.reason) throw caller.reason;
+      throw err;
+    }
+    // Preserve retryable transport failures from successful response bodies;
+    // for non-2xx responses retain the already-known upstream HTTP status.
+    if (res.ok && transport) throw err;
+  }
+
+  /** Preserve attributable aborts while retaining the malformed-body fallback. */
+  protected async readErrorBody(res: Response, signal?: AbortSignal): Promise<any> {
+    try {
+      return await res.json();
+    } catch (err) {
+      this.rethrowBodyAbort(res, err, signal);
+      return {};
+    }
+  }
+
   abstract chatCompletion(
     apiKey: string,
     messages: ChatMessage[],
@@ -402,7 +439,9 @@ export abstract class BaseProvider {
     try {
       // requestType='chat' + timeoutMs makes the AbortError message read
       // `<platform>, chat, 15s` for triage from the requests.error column.
-      return await proxyFetch(url, signal ? { ...init, signal } : init, this.platform, 'chat', timeoutMs);
+      const response = await proxyFetch(url, signal ? { ...init, signal } : init, this.platform, 'chat', timeoutMs);
+      if (signal) this.responseSignals.set(response, signal);
+      return response;
     } finally {
       if (headerTimer !== undefined) clearTimeout(headerTimer);
     }

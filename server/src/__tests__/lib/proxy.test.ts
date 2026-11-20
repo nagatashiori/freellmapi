@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { EventEmitter } from 'events';
+import { EventEmitter, getEventListeners } from 'events';
 import http from 'http';
 import https from 'https';
 import {
@@ -196,6 +196,131 @@ function stubHttpsRequest() {
 function stubHttpRequest() {
   return vi.spyOn(http, 'request').mockImplementation(fakeRequest);
 }
+
+// A simulated IncomingMessage delivers headers and partial bytes, then models
+// Node's ECONNRESET/"aborted" after req.destroy(). No real socket is opened.
+describe('SOCKS response body abort causality', () => {
+  function stubPartialResponse(status: number) {
+    let response: any;
+    const req = new EventEmitter() as any;
+    req.write = () => {};
+    req.destroy = () => response.emit('error', Object.assign(new Error('aborted'), { code: 'ECONNRESET' }));
+    req.end = () => {
+      response = new EventEmitter() as any;
+      response.statusCode = status;
+      response.statusMessage = status === 200 ? 'OK' : 'Service Unavailable';
+      response.headers = {};
+      response.destroy = () => {};
+      callback(response);
+    };
+    let callback: (res: any) => void;
+    vi.spyOn(https, 'request').mockImplementation(((_opts: any, cb: any) => {
+      callback = cb;
+      return req;
+    }) as any);
+    return () => response;
+  }
+
+  it.each([200, 503])('preserves the first signal reason while HTTP %s body is pending', async (status) => {
+    for (const first of ['attempt', 'client'] as const) {
+      applyProxyUrl('socks5://127.0.0.1:1080');
+      const getResponse = stubPartialResponse(status);
+      const attempt = new AbortController();
+      const client = new AbortController();
+      const localReason = Object.assign(new Error('local first-byte timeout'), { attemptTtfbTimeout: true });
+      const clientReason = Object.assign(new Error('client disconnected'), { clientAbort: true });
+      const response = await proxyFetch('https://api.example.com/v1', {
+        signal: AbortSignal.any([attempt.signal, client.signal]),
+      }, 'groq');
+      getResponse().emit('data', Buffer.from('{"partial":'));
+      const bodyResult = response.json().then(() => null, (err) => err);
+      if (first === 'attempt') {
+        attempt.abort(localReason);
+        client.abort(clientReason);
+      } else {
+        client.abort(clientReason);
+        attempt.abort(localReason);
+      }
+      expect(await bodyResult).toBe(first === 'attempt' ? localReason : clientReason);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it.each(['attemptTtfbTimeout', 'clientAbort', 'hedgeAbort'] as const)(
+    'preserves a marked AbortError on streaming body reads: %s', async (marker) => {
+      for (const wrapped of [false, true]) {
+        applyProxyUrl('socks5://127.0.0.1:1080');
+        stubPartialResponse(200);
+        const controller = new AbortController();
+        const response = await proxyFetch('https://api.example.com/v1', { signal: controller.signal }, 'groq');
+        const read = response.body!.getReader().read().then(() => null, err => err);
+        const marked = Object.assign(new Error('marked'), { [marker]: true });
+        const reason = Object.assign(new Error('aborted'), { name: 'AbortError' }, wrapped ? { cause: marked } : { [marker]: true });
+        controller.abort(reason);
+        expect(await read).toBe(reason);
+        vi.restoreAllMocks();
+      }
+    },
+  );
+
+  it.each(['error', 'timeout'] as const)('removes the signal listener after a pre-header %s', async (event) => {
+    applyProxyUrl('socks5://127.0.0.1:1080');
+    const controller = new AbortController();
+    const initial = getEventListeners(controller.signal, 'abort').length;
+    const req = new EventEmitter() as any;
+    req.write = () => {};
+    req.destroy = vi.fn();
+    req.end = () => queueMicrotask(() => {
+      if (event === 'error') req.emit('error', new Error('connection failed'));
+      else req.emit('timeout');
+    });
+    vi.spyOn(https, 'request').mockImplementation((() => req) as any);
+    const err = await proxyFetch('https://api.example.com/v1', { signal: controller.signal }, 'groq').then(() => null, e => e);
+    expect(err?.message).toContain(event === 'error' ? 'connection failed' : 'timeout');
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(initial);
+    const destroysBefore = req.destroy.mock.calls.length;
+    controller.abort(new Error('late abort'));
+    expect(req.destroy).toHaveBeenCalledTimes(destroysBefore);
+  });
+
+  it.each(['error', 'timeout'] as const)('retains the body abort listener after a post-header request %s', async (event) => {
+    applyProxyUrl('socks5://127.0.0.1:1080');
+    const controller = new AbortController();
+    const req = new EventEmitter() as any;
+    req.write = () => {};
+    req.destroy = vi.fn();
+    req.end = () => {
+      const res = new EventEmitter() as any;
+      res.statusCode = 200;
+      res.statusMessage = 'OK';
+      res.headers = {};
+      res.destroy = () => {};
+      callback(res);
+    };
+    let callback: (res: any) => void;
+    vi.spyOn(https, 'request').mockImplementation(((_opts: any, cb: any) => { callback = cb; return req; }) as any);
+    const response = await proxyFetch('https://api.example.com/v1', { signal: controller.signal }, 'groq');
+    const result = response.body!.getReader().read().then(() => null, e => e);
+    if (event === 'error') req.emit('error', new Error('request failed'));
+    else req.emit('timeout');
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
+    const reason = Object.assign(new Error('first-byte timeout'), { attemptTtfbTimeout: true });
+    controller.abort(reason);
+    expect(await result).toBe(reason);
+  });
+
+  it('preserves an upstream body error that precedes a later abort', async () => {
+    applyProxyUrl('socks5://127.0.0.1:1080');
+    const getResponse = stubPartialResponse(200);
+    const caller = new AbortController();
+    const response = await proxyFetch('https://api.example.com/v1', { signal: caller.signal }, 'groq');
+    const result = response.body!.getReader().read().then(() => null, (err) => err);
+    const upstreamError = new Error('upstream body failed');
+    getResponse().emit('error', upstreamError);
+    caller.abort(Object.assign(new Error('client disconnected'), { clientAbort: true }));
+    expect(await result).toBe(upstreamError);
+  });
+});
 
 describe('proxyFetch dispatcher selection for SOCKS schemes (#630)', () => {
   const cases: Array<[string, number]> = [
@@ -831,6 +956,14 @@ describe('describeAbort', () => {
 // isRetryableError() (which matches the substring "aborted") keeps
 // classifying it as retryable.
 describe('proxyFetch abort error enrichment', () => {
+  it.each(['attemptTtfbTimeout', 'clientAbort', 'hedgeAbort'] as const)(
+    'preserves a directly marked %s rejection even when its message says aborted', async (marker) => {
+      const marked = Object.assign(new Error('upstream aborted before first byte'), { [marker]: true });
+      vi.spyOn(global, 'fetch').mockRejectedValue(marked);
+      await expect(proxyFetch('https://api.example.com/v1', undefined, 'groq', 'chat', 10)).rejects.toBe(marked);
+    },
+  );
+
   it('rewrites a native AbortError to include platform, type, and timeout', async () => {
     const abortErr = new DOMException('The operation was aborted', 'AbortError');
     vi.spyOn(global, 'fetch').mockRejectedValue(abortErr);

@@ -111,7 +111,7 @@ export class CloudflareProvider extends BaseProvider {
     if (!res.ok) {
       // An error answer ran no inference, so it bills no neurons.
       meter.refund();
-      const err = await res.json().catch(() => ({}));
+      const err = await this.readErrorBody(res, options?.signal);
       throw providerHttpError(res, `Cloudflare API error ${res.status}: ${(err as any).error?.message ?? (err as any).errors?.[0]?.message ?? res.statusText}`, err);
     }
 
@@ -175,7 +175,7 @@ export class CloudflareProvider extends BaseProvider {
     if (!res.ok) {
       // An error answer ran no inference, so it bills no neurons.
       meter.refund();
-      const err = await res.json().catch(() => ({}));
+      const err = await this.readErrorBody(res, options?.signal);
       throw providerHttpError(res, `Cloudflare API error ${res.status}: ${(err as any).error?.message ?? (err as any).errors?.[0]?.message ?? res.statusText}`, err);
     }
 

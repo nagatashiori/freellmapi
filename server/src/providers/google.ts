@@ -346,8 +346,9 @@ function extractImageUrl(block: unknown): string | undefined {
 // directly; for `http(s)` URLs we fetch and inline because the Gemini API does
 // not fetch external URLs itself. Fetching a user-supplied URL is a minor SSRF
 // surface, acceptable for a single-user self-hosted proxy; we still restrict to
-// http/https and cap the size. Returns null (part skipped) on any failure.
-async function imageUrlToInlineData(url: string): Promise<{ mimeType: string; data: string } | null> {
+// http/https and cap the size. Non-abort failures skip the part.
+async function imageUrlToInlineData(url: string, signal?: AbortSignal): Promise<{ mimeType: string; data: string } | null> {
+  signal?.throwIfAborted();
   const dataMatch = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(url);
   if (dataMatch) {
     const mimeType = dataMatch[1] || 'application/octet-stream';
@@ -359,19 +360,30 @@ async function imageUrlToInlineData(url: string): Promise<{ mimeType: string; da
     return { mimeType, data };
   }
   if (/^https?:\/\//i.test(url)) {
+    // Capture the caller's first reason synchronously, before a later competing abort.
+    let abortReason: unknown;
+    const onAbort = () => { abortReason = signal!.reason; };
+    signal?.addEventListener('abort', onAbort, { once: true });
     try {
       // Internal helper that turns an image URL into inline data for the
       // Gemini request body. No formal timeout — relies on the platform's
       // own default. Use a 30s cap to avoid hanging the whole request when
       // an image host stalls; classify as `image` for triage.
-      const res = await proxyFetch(url, { signal: AbortSignal.timeout(30_000) }, 'google', 'image', 30_000);
+      const timeout = AbortSignal.timeout(30_000);
+      const imageSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+      const res = await proxyFetch(url, { signal: imageSignal }, 'google', 'image', 30_000);
+      if (signal?.aborted) throw abortReason;
       if (!res.ok) return null;
       const buf = Buffer.from(await res.arrayBuffer());
+      if (signal?.aborted) throw abortReason;
       if (buf.length === 0 || buf.length > MAX_IMAGE_BYTES) return null;
       const mimeType = res.headers.get('content-type')?.split(';')[0]?.trim() || 'image/jpeg';
       return { mimeType, data: buf.toString('base64') };
     } catch {
+      if (signal?.aborted) throw abortReason;
       return null;
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
     }
   }
   return null;
@@ -379,7 +391,7 @@ async function imageUrlToInlineData(url: string): Promise<{ mimeType: string; da
 
 // Build Gemini parts for a user message: joined text first, then any images as
 // inlineData. Non-array content (string/null) collapses to a single text part.
-async function userContentToParts(content: ChatMessage['content']): Promise<GeminiPart[]> {
+async function userContentToParts(content: ChatMessage['content'], signal?: AbortSignal): Promise<GeminiPart[]> {
   const parts: GeminiPart[] = [];
   const text = contentToString(content);
   if (text.length > 0) parts.push({ text });
@@ -390,7 +402,7 @@ async function userContentToParts(content: ChatMessage['content']): Promise<Gemi
       if (type !== 'image_url' && type !== 'image') continue;
       const url = extractImageUrl(block);
       if (!url) continue;
-      const inlineData = await imageUrlToInlineData(url);
+      const inlineData = await imageUrlToInlineData(url, signal);
       if (inlineData) parts.push({ inlineData });
     }
   }
@@ -403,10 +415,11 @@ async function userContentToParts(content: ChatMessage['content']): Promise<Gemi
 // Translate OpenAI messages to Gemini format. Content may arrive as a string,
 // null, or the OpenAI multimodal array envelope. System/assistant/tool messages
 // flatten to text; user messages additionally carry images as inlineData parts.
-async function toGeminiContents(messages: ChatMessage[]): Promise<{
+async function toGeminiContents(messages: ChatMessage[], signal?: AbortSignal): Promise<{
   contents: GeminiContent[];
   systemInstruction?: { parts: Array<{ text: string }> };
 }> {
+  signal?.throwIfAborted();
   const systemMessages = messages
     .filter(m => m.role === 'system')
     .map(m => contentToString(m.content))
@@ -479,11 +492,12 @@ async function toGeminiContents(messages: ChatMessage[]): Promise<{
 
       return {
         role: 'user',
-        parts: await userContentToParts(m.content),
+        parts: await userContentToParts(m.content, signal),
       };
     })))
     .filter((entry): entry is { role: 'user' | 'model'; parts: GeminiPart[] } => entry !== null);
 
+  signal?.throwIfAborted();
   return {
     contents,
     systemInstruction: systemMessages.length > 0
@@ -568,7 +582,7 @@ export class GoogleProvider extends BaseProvider {
     options?: CompletionOptions,
     quotaContext?: QuotaObservationContext,
   ): Promise<ChatCompletionResponse> {
-    const translated = await toGeminiContents(messages);
+    const translated = await toGeminiContents(messages, options?.signal);
     const request = contentsForModel(modelId, translated.contents, translated.systemInstruction);
 
     const tools = toGeminiTools(options?.tools);
@@ -607,7 +621,7 @@ export class GoogleProvider extends BaseProvider {
     });
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
+      const err = await this.readErrorBody(res, options?.signal);
       throw googleHttpError(res, err);
     }
 
@@ -651,7 +665,7 @@ export class GoogleProvider extends BaseProvider {
     options?: CompletionOptions,
     quotaContext?: QuotaObservationContext,
   ): AsyncGenerator<ChatCompletionChunk> {
-    const translated = await toGeminiContents(messages);
+    const translated = await toGeminiContents(messages, options?.signal);
     const request = contentsForModel(modelId, translated.contents, translated.systemInstruction);
 
     const tools = toGeminiTools(options?.tools);
@@ -688,7 +702,7 @@ export class GoogleProvider extends BaseProvider {
     });
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
+      const err = await this.readErrorBody(res, options?.signal);
       throw googleHttpError(res, err);
     }
 

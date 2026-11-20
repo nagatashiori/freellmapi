@@ -8,8 +8,9 @@ import {
   getAttemptTtfbTimeoutMs,
   newAttemptTtfbTimeoutError,
   isAttemptTtfbTimeoutError,
+  recordRetryableFailure,
 } from '../../lib/fallback-loop.js';
-import { isRetryableError, isClientAbortError, isHedgeAbortError } from '../../lib/error-classify.js';
+import { isRetryableError, isClientAbortError, isHedgeAbortError, newClientAbortError } from '../../lib/error-classify.js';
 import { acquireLease, releaseLease, resetLeases } from '../../services/ratelimit.js';
 import type { RouteResult } from '../../services/router.js';
 
@@ -68,6 +69,18 @@ describe('fallback loop attempt-level TTFB timeout and fast failover', () => {
     expect(isHedgeAbortError(err)).toBe(false);
   });
 
+  it.each(['direct', 'immediate cause'] as const)('exempts trusted attempt timeout marker: %s', (shape) => {
+    const state = newFallbackState();
+    const { route } = leasedRoute();
+    const marked = newAttemptTtfbTimeoutError('fake', route.modelId, 10);
+    const err = shape === 'direct' ? marked : new Error('wrapped timeout', { cause: marked });
+    expect(recordRetryableFailure(route, err, state)).toBe(true);
+    expect(state.skipKeys.has(`fake:${route.modelId}:${route.keyId}`)).toBe(true);
+    expect(state.skipPlatforms.size).toBe(0);
+    expect(getDb().prepare('SELECT * FROM rate_limit_cooldowns').all()).toHaveLength(0);
+    route.release?.();
+  });
+
   it('reads setting and env var with setting taking precedence', () => {
     expect(getAttemptTtfbTimeoutMs()).toBe(0);
 
@@ -117,6 +130,152 @@ describe('fallback loop attempt-level TTFB timeout and fast failover', () => {
 
     // Verifies key 0 was added to skipKeys for this request
     expect(state.skipKeys.has(`fake:frontier-model-1:${route0.keyId}`)).toBe(true);
+  });
+
+  it('keeps other same-platform models available without global cooldown or breaker penalties', async () => {
+    const state = newFallbackState();
+    const routes = [leasedRoute('slow-a').route, leasedRoute('slow-b').route, leasedRoute('fast-c').route];
+    const route = vi.fn(() => {
+      const next = routes.find(r => !state.skipPlatforms.has(r.platform) && !state.skipModels.has(r.modelDbId) && !state.skipKeys.has(`${r.platform}:${r.modelId}:${r.keyId}`));
+      if (!next) throw new Error("no candidates");
+      return next;
+    });
+    const dispatch = vi.fn(async (r, _attempt, ctx) => {
+      if (r === routes[2]) return 'done';
+      return await new Promise((_resolve, reject) => ctx.signal.addEventListener('abort', () => reject(ctx.signal.reason), { once: true }));
+    });
+    const h = hooks(state, { maxRetries: 8, breakerLimit: 1, timeBudgetMs: 1000, attemptTtfbTimeoutMs: 10, route, dispatch });
+    await runFallbackLoop(h);
+    expect(dispatch.mock.calls.map(call => call[0].modelId)).toEqual(['slow-a', 'slow-b', 'fast-c']);
+    expect(state.skipPlatforms.size).toBe(0);
+    expect(state.skipKeys.size).toBe(2);
+    expect(getDb().prepare('SELECT * FROM rate_limit_cooldowns').all()).toHaveLength(0);
+    expect(h.onExhausted).not.toHaveBeenCalled();
+    expect(h.onRoutingExhausted).not.toHaveBeenCalled();
+    const nextState = newFallbackState();
+    expect(nextState.skipKeys.size).toBe(0);
+    expect(nextState.skipPlatforms.size).toBe(0);
+  });
+
+  it('retries an opaque error wrapping a trusted attempt timeout without health penalties', async () => {
+    const state = newFallbackState();
+    const routes = [leasedRoute('wrapped-slow').route, leasedRoute('wrapped-next').route];
+    const dispatch = vi.fn(async (_route, attempt) => {
+      if (attempt === 0) throw new Error('dispatch failed', { cause: newAttemptTtfbTimeoutError('fake', 'wrapped-slow', 10) });
+      return 'done';
+    });
+    const h = hooks(state, { maxRetries: 3, breakerLimit: 1, route: (attempt: number) => routes[attempt], dispatch });
+    await runFallbackLoop(h);
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(state.skipKeys.has(`fake:wrapped-slow:${routes[0].keyId}`)).toBe(true);
+    expect(state.skipPlatforms.size).toBe(0);
+    expect(getDb().prepare('SELECT * FROM rate_limit_cooldowns').all()).toHaveLength(0);
+    expect(h.onFatal).not.toHaveBeenCalled();
+    expect(h.onExhausted).not.toHaveBeenCalled();
+  });
+
+  it.each(['401 unauthorized', 'fallback time budget expired', 'client disconnected'])(
+    'retries a trusted attempt timeout despite misleading outer message %s', async (message) => {
+      const state = newFallbackState();
+      const routes = [leasedRoute('collision').route, leasedRoute('collision-next').route];
+      let now = Date.now();
+      vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const dispatch = vi.fn(async (_route, attempt) => {
+        if (attempt === 0) {
+          now += 800;
+          throw new Error(message, { cause: newAttemptTtfbTimeoutError('fake', 'collision', 10) });
+        }
+        return 'done';
+      });
+      const h = hooks(state, { maxRetries: 3, timeBudgetMs: 1000, breakerLimit: 1, route: (attempt: number) => routes[attempt], dispatch });
+      await runFallbackLoop(h);
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      expect(state.skipKeys.has('fake:collision:' + routes[0].keyId)).toBe(true);
+      expect(state.skipPlatforms.size).toBe(0);
+      expect(getDb().prepare('SELECT * FROM rate_limit_cooldowns').all()).toHaveLength(0);
+      expect(h.onExhausted).not.toHaveBeenCalled();
+      expect(h.onFatal).not.toHaveBeenCalled();
+    },
+  );
+
+  it('gives an explicit hedge marker precedence over a wrapped trusted attempt timeout', async () => {
+    const state = newFallbackState();
+    const route = leasedRoute('hedge-first').route;
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const err = Object.assign(new Error('hedge'), { hedgeAbort: true, cause: newAttemptTtfbTimeoutError('fake', 'hedge-first', 10) });
+    const dispatch = vi.fn(async () => { now += 800; throw err; });
+    const h = hooks(state, { maxRetries: 3, timeBudgetMs: 1000, breakerLimit: 1, route: () => route, dispatch });
+    await runFallbackLoop(h);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(h.onExhausted).toHaveBeenCalledOnce();
+    expect(getDb().prepare('SELECT * FROM rate_limit_cooldowns').all().length).toBeGreaterThan(0);
+  });
+
+  it('gives client abort precedence over a wrapped trusted attempt timeout', async () => {
+    const state = newFallbackState();
+    const route = leasedRoute('client-first').route;
+    const err = Object.assign(newClientAbortError(), { cause: newAttemptTtfbTimeoutError('fake', 'client-first', 10) });
+    const dispatch = vi.fn(async () => { throw err; });
+    const h = hooks(state, { maxRetries: 3, breakerLimit: 1, route: () => route, dispatch });
+    await runFallbackLoop(h);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(h.logFailure).not.toHaveBeenCalled();
+    expect(h.onExhausted).not.toHaveBeenCalled();
+    expect(state.skipKeys.size).toBe(0);
+    expect(state.skipPlatforms.size).toBe(0);
+    expect(getDb().prepare('SELECT * FROM rate_limit_cooldowns').all()).toHaveLength(0);
+  });
+
+  it('does not bench a trusted attempt timeout that mentions an in-band error', async () => {
+    const state = newFallbackState();
+    const routes = [leasedRoute('local-in-band').route, leasedRoute('local-next').route];
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const dispatch = vi.fn(async (_route, attempt) => {
+      if (attempt === 0) {
+        now += 800;
+        const err = newAttemptTtfbTimeoutError('fake', 'local-in-band', 10);
+        err.message += ' in-band provider error';
+        throw err;
+      }
+      return 'done';
+    });
+    const h = hooks(state, { maxRetries: 3, timeBudgetMs: 1000, breakerLimit: 1, route: (attempt: number) => routes[attempt], dispatch });
+    await runFallbackLoop(h);
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(getDb().prepare('SELECT * FROM rate_limit_cooldowns').all()).toHaveLength(0);
+    expect(state.skipPlatforms.size).toBe(0);
+    expect(h.onExhausted).not.toHaveBeenCalled();
+  });
+
+  it('exhausts candidates once each when all attempts time out', async () => {
+    const state = newFallbackState();
+    const routes = [leasedRoute('only-a').route, leasedRoute('only-b').route];
+    const route = vi.fn(() => {
+      const next = routes.find(r => !state.skipPlatforms.has(r.platform) && !state.skipKeys.has(`${r.platform}:${r.modelId}:${r.keyId}`));
+      if (!next) throw new Error("no candidates");
+      return next;
+    });
+    const dispatch = vi.fn(async (_r, _attempt, ctx) => await new Promise((_resolve, reject) => ctx.signal.addEventListener('abort', () => reject(ctx.signal.reason), { once: true })));
+    const h = hooks(state, { maxRetries: 20, timeBudgetMs: 1000, attemptTtfbTimeoutMs: 10, route, dispatch });
+    await runFallbackLoop(h);
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(h.onRoutingExhausted).toHaveBeenCalledTimes(1);
+    expect(getDb().prepare('SELECT * FROM rate_limit_cooldowns').all()).toHaveLength(0);
+  });
+
+  it.each(['upstream timeout', 'Fake stream: no first byte within 1000ms (first-byte timeout)'])(
+    'preserves upstream timeout cooldown and breaker behavior: %s', async (message) => {
+    const state = newFallbackState();
+    const route = leasedRoute('upstream-timeout').route;
+    const dispatch = vi.fn(async () => { throw new Error(message); });
+    const h = hooks(state, { maxRetries: 10, breakerLimit: 1, route: () => route, dispatch });
+    await runFallbackLoop(h);
+    expect(state.skipPlatforms.has('fake')).toBe(true);
+    expect(getDb().prepare('SELECT * FROM rate_limit_cooldowns').all()).toHaveLength(1);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(h.onExhausted).toHaveBeenCalledTimes(1);
   });
 
   it('clears attempt timer when disarmHedge is called before timeout and does not abort mid-stream', async () => {
