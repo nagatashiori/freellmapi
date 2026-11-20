@@ -2,7 +2,7 @@ name: Docker
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/ttfb-fast-failover]
     tags: ['v*.*.*']
   pull_request:
     branches: [main]
