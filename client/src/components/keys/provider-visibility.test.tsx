@@ -35,27 +35,51 @@ async function mount(component: ReactNode) {
   </QueryClientProvider></MemoryRouter>))
 }
 
-it.each(['aclide', 'waterfall'])('keeps %s metadata for saved keys but excludes it from all shared new-provider choices', platform => {
+it.each(['aclide', 'waterfall', 'ainative'])('keeps %s metadata for saved keys but excludes it from all shared new-provider choices', platform => {
   expect(PLATFORMS.find(p => p.value === platform)).toMatchObject({ hidden: true, label: expect.any(String), url: expect.any(String) })
   expect(LISTED_PLATFORMS.some(p => p.value === platform)).toBe(false)
   expect(LISTED_PLATFORMS.some(p => p.value === 'clod')).toBe(true)
 })
 
-it('omits Waterfall and ACLIDE from the add-key provider picker', async () => {
+it('does not advertise a free tier for AINative (#2019)', () => {
+  expect(PLATFORMS.find(p => p.value === 'ainative')?.label).toMatch(/paid/i)
+  expect(PLATFORMS.find(p => p.value === 'ainative')?.label).not.toMatch(/free/i)
+})
+
+it('omits Waterfall, ACLIDE and AINative from the add-key provider picker', async () => {
   await mount(<AddKeyForm onSuccess={() => {}} />)
   const options = [...container.querySelectorAll('option')].map(option => option.value)
   expect(options).toContain('groq')
   expect(options).toContain('rime')
   expect(options).toContain('freetts')
+  expect(options).toContain('zro')
+  expect(options).toContain('typecast')
+  expect(options).toContain('cartesia')
+  expect(options).toContain('silvr')
+  expect(PLATFORMS.find(p => p.value === 'typecast')?.label).toMatch(/non-commercial, attribution required/i)
+  expect(PLATFORMS.find(p => p.value === 'cartesia')?.label).toMatch(/non-commercial/i)
+  expect(PLATFORMS.find(p => p.value === 'zro')).toMatchObject({
+    label: 'Zro / MoonMath.ai (shared daily free usage)', url: 'https://zro.moonmath.ai/api-keys',
+  })
   expect(PLATFORMS.find(p => p.value === 'freetts')?.label).toMatch(/personal use only.*watermarked/i)
   expect(options).not.toContain('waterfall')
   expect(options).not.toContain('aclide')
+  expect(options).not.toContain('ainative')
 })
 
-it('omits Waterfall and ACLIDE from the add-model provider picker', async () => {
+it('offers Varosity without promising a recurring daily credit', async () => {
+  await mount(<AddKeyForm onSuccess={() => {}} />)
+  const option = container.querySelector('option[value="varosity"]')
+  expect(option).not.toBeNull()
+  expect(option?.textContent).toContain('Varosity')
+  expect(option?.textContent).not.toMatch(/daily/i)
+})
+
+it('omits Waterfall, ACLIDE and AINative from the add-model provider picker', async () => {
   await mount(<AddModelDialog open onOpenChange={() => {}} />)
   const options = [...container.querySelectorAll('#provider-platform-select option')].map(option => (option as HTMLOptionElement).value)
   expect(options).toContain('groq')
   expect(options).not.toContain('waterfall')
   expect(options).not.toContain('aclide')
+  expect(options).not.toContain('ainative')
 })

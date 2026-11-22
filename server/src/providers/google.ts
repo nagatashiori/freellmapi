@@ -10,8 +10,10 @@ import type {
 import { BaseProvider, providerHttpError, type CompletionOptions, type KeyValidationResult } from './base.js';
 import { contentToString } from '../lib/content.js';
 import { proxyFetch } from '../lib/proxy.js';
+import { assessProviderUrl } from '../lib/url-guard.js';
 import { recordQuotaObservationsFromResponse, type QuotaObservationContext } from '../services/provider-quota.js';
 import { providerTimeoutMs, streamStallTimeoutMs } from '../lib/provider-timeout.js';
+import { currentUpstreamWatch } from '../lib/upstream-watch.js';
 import { sanitizeForGemini } from '../lib/gemini-wire.js';
 import { resolveMaxTokens } from '../lib/sampling-params.js';
 
@@ -342,11 +344,41 @@ function extractImageUrl(block: unknown): string | undefined {
   return undefined;
 }
 
+const MAX_IMAGE_REDIRECTS = 3;
+const IMAGE_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+// Fetch a caller-supplied image URL with the same address policy custom
+// providers get (#1881): every hop, the first URL and each redirect target, is
+// classified before it is requested, so an image URL (or a public host that
+// redirects) cannot reach cloud metadata or link-local addresses, or private
+// ones when FREEAPI_BLOCK_PRIVATE_PROVIDER_URLS is set. Redirects are followed
+// by hand for that reason, a few hops at most, since image hosts and CDNs often
+// redirect. Returns null when blocked or failed.
+async function fetchImageChecked(rawUrl: string, callerSignal?: AbortSignal): Promise<Response | null> {
+  let url = rawUrl;
+  const timeout = AbortSignal.timeout(30_000);
+  const signal = callerSignal ? AbortSignal.any([callerSignal, timeout]) : timeout;
+  for (let hop = 0; hop <= MAX_IMAGE_REDIRECTS; hop++) {
+    if (!(await assessProviderUrl(url)).allowed) return null;
+    // 30s cap so a stalled image host cannot hang the whole request;
+    // classified as `image` for triage.
+    const res = await proxyFetch(url, { signal, redirect: 'manual' }, 'google', 'image', 30_000);
+    if (!IMAGE_REDIRECT_STATUSES.has(res.status)) return res;
+    const location = res.headers.get('location');
+    if (!location) return null;
+    try {
+      url = new URL(location, url).href;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 // Convert an image URL to a Gemini inlineData part. Handles base64 `data:` URLs
 // directly; for `http(s)` URLs we fetch and inline because the Gemini API does
-// not fetch external URLs itself. Fetching a user-supplied URL is a minor SSRF
-// surface, acceptable for a single-user self-hosted proxy; we still restrict to
-// http/https and cap the size. Non-abort failures skip the part.
+// not fetch external URLs itself. Each URL and redirect is checked before
+// fetching; non-abort failures skip the part.
 async function imageUrlToInlineData(url: string, signal?: AbortSignal): Promise<{ mimeType: string; data: string } | null> {
   signal?.throwIfAborted();
   const dataMatch = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(url);
@@ -365,15 +397,11 @@ async function imageUrlToInlineData(url: string, signal?: AbortSignal): Promise<
     const onAbort = () => { abortReason = signal!.reason; };
     signal?.addEventListener('abort', onAbort, { once: true });
     try {
-      // Internal helper that turns an image URL into inline data for the
-      // Gemini request body. No formal timeout — relies on the platform's
-      // own default. Use a 30s cap to avoid hanging the whole request when
-      // an image host stalls; classify as `image` for triage.
-      const timeout = AbortSignal.timeout(30_000);
-      const imageSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
-      const res = await proxyFetch(url, { signal: imageSignal }, 'google', 'image', 30_000);
+      const res = await fetchImageChecked(url, signal);
       if (signal?.aborted) throw abortReason;
-      if (!res.ok) return null;
+      if (!res || !res.ok) return null;
+      const declared = Number(res.headers.get('content-length'));
+      if (Number.isFinite(declared) && declared > MAX_IMAGE_BYTES) return null;
       const buf = Buffer.from(await res.arrayBuffer());
       if (signal?.aborted) throw abortReason;
       if (buf.length === 0 || buf.length > MAX_IMAGE_BYTES) return null;
@@ -729,6 +757,9 @@ export class GoogleProvider extends BaseProvider {
     const inactivityTimeoutMs = streamStallTimeoutMs(this.platform);
     const firstByteMs = this.firstByteBudgetMs(options?.timeoutMs ?? this.timeoutMs, inactivityTimeoutMs);
     let awaitingFirstByte = true;
+    // Fallback silent-window cap (#1960), same contract as readSseStream.
+    const watch = currentUpstreamWatch();
+    watch?.opened(options?.timeoutMs ?? this.timeoutMs);
 
     try {
       while (true) {
@@ -737,6 +768,7 @@ export class GoogleProvider extends BaseProvider {
           : await this.readWithStallTimeout(() => reader.read(), inactivityTimeoutMs);
         awaitingFirstByte = false;
         if (done) break;
+        if (value && value.byteLength > 0) watch?.activity();
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
