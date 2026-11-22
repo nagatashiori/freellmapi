@@ -212,6 +212,22 @@ describe('Update API', () => {
         expect(result.body.remoteSha).toBe(LOCAL_SHA.slice(0, 7));
       });
 
+      it('compares a fork build with the official release tag when upstream cannot resolve its SHA', async () => {
+        const fetchMock = vi.fn(async (url: string | URL | RequestInfo) => {
+          const target = String(url);
+          if (target.includes('/releases/latest')) return response({
+            tag_name: 'v0.12.0', html_url: 'https://github.com/tashfeenahmed/freellmapi/releases/tag/v0.12.0',
+          });
+          if (target.includes('/repos/tashfeenahmed/')) return response({}, 404);
+          return response(compareBody('ahead'));
+        });
+        const { app } = createTestApp({ env: { FREELLMAPI_INSTALL_METHOD: installation, FREELLMAPI_COMMIT_SHA: LOCAL_SHA }, fetch: fetchMock });
+        const result = await httpGet(app, '/api/update/check');
+        expect(result.body).toMatchObject({ status: 'available', installation });
+        expect(fetchMock).toHaveBeenCalledWith(
+          `https://api.github.com/repos/nagatashiori/freellmapi/compare/${LOCAL_SHA}...tashfeenahmed:v0.12.0`, expect.any(Object));
+      });
+
       it('reports an update when the install trails the latest tag', async () => {
         const fetchMock = vi.fn(async (url: string | URL | RequestInfo) => {
           if (String(url).includes('/releases/latest')) {
@@ -462,6 +478,18 @@ describe('Update API', () => {
         encoding: 'utf8',
         timeout: 5_000,
       });
+    });
+
+    it('checks a fork commit against the official target after the official repository returns 404', async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(response({}, 404))
+        .mockResolvedValueOnce(response(compareBody('behind')));
+      const { app } = createTestApp({ fetch: fetchMock });
+      const result = await httpGet(app, '/api/update/check');
+      expect(result.body.status).toBe('ahead');
+      expect(fetchMock).toHaveBeenNthCalledWith(2,
+        `https://api.github.com/repos/nagatashiori/freellmapi/compare/${LOCAL_SHA}...tashfeenahmed:main`,
+        expect.any(Object));
     });
 
     it('returns unknown for an unrecognized commit without parsing the 404 body', async () => {

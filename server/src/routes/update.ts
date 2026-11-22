@@ -8,6 +8,7 @@ import { getAppVersion } from '../lib/app-version.js';
 const execFileAsync = promisify(nodeExecFile);
 
 const REPOSITORY = 'tashfeenahmed/freellmapi';
+const FORK_REPOSITORY = 'nagatashiori/freellmapi';
 const RELEASES_URL = `https://github.com/${REPOSITORY}/releases`;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 /**
@@ -439,13 +440,21 @@ export function createUpdateRouter(options: UpdateRouterOptions = {}): Router {
     }
 
     const url = `https://api.github.com/repos/${REPOSITORY}/compare/${currentIdentity.sha}...${compareTarget}`;
-    const response = await fetchImpl(url, {
+    let response = await fetchImpl(url, {
       headers: githubHeaders('application/vnd.github+json'),
       signal: AbortSignal.timeout(10_000),
     });
 
+    // GitHub's upstream repository cannot always resolve commits belonging to
+    // our fork. Compare the exact deployed SHA from the fork, with the target
+    // still explicitly anchored to the official repository.
     if (response.status === 404) {
-      return { status: 'unknown', ...baseResult };
+      const forkUrl = `https://api.github.com/repos/${FORK_REPOSITORY}/compare/${currentIdentity.sha}...tashfeenahmed:${compareTarget}`;
+      response = await fetchImpl(forkUrl, {
+        headers: githubHeaders('application/vnd.github+json'),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (response.status === 404) return { status: 'unknown', ...baseResult };
     }
     if (response.status === 401 || response.status === 403 || response.status === 429) {
       // The Atom feed tracks `main` only; for a desktop install it would
